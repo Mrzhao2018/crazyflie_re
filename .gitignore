@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 telemetry/
+artifacts/
 
 archive/
 

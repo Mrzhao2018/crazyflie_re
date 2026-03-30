@@ -123,17 +123,36 @@ class MissionProfile:
 
                 start_transform = self.affine_transform_at(seg_start)
                 end_transform = self.affine_transform_at(seg_end)
+                start_velocity = self.affine_velocity_at(seg_start, nominal_position)
+                end_velocity = self.affine_velocity_at(seg_end, nominal_position)
 
                 start_pos = start_transform.A @ nominal_position + start_transform.b
                 end_pos = end_transform.A @ nominal_position + end_transform.b
-                delta = end_pos - start_pos
 
                 pieces.append(
                     TrajectoryPiece(
                         duration=duration,
-                        x=self._linear_coeffs(float(delta[0]), duration),
-                        y=self._linear_coeffs(float(delta[1]), duration),
-                        z=self._linear_coeffs(float(delta[2]), duration),
+                        x=self._cubic_hermite_coeffs(
+                            float(start_pos[0]),
+                            float(end_pos[0]),
+                            float(start_velocity[0]),
+                            float(end_velocity[0]),
+                            duration,
+                        ),
+                        y=self._cubic_hermite_coeffs(
+                            float(start_pos[1]),
+                            float(end_pos[1]),
+                            float(start_velocity[1]),
+                            float(end_velocity[1]),
+                            duration,
+                        ),
+                        z=self._cubic_hermite_coeffs(
+                            float(start_pos[2]),
+                            float(end_pos[2]),
+                            float(start_velocity[2]),
+                            float(end_velocity[2]),
+                            duration,
+                        ),
                         yaw=[0.0] * 8,
                     )
                 )
@@ -152,6 +171,31 @@ class MissionProfile:
     def _linear_coeffs(displacement: float, duration: float) -> list[float]:
         velocity = displacement / duration
         return [0.0, velocity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    @staticmethod
+    def _cubic_hermite_coeffs(
+        p0: float, p1: float, v0: float, v1: float, duration: float
+    ) -> list[float]:
+        T = duration
+        a0 = p0
+        a1 = v0
+        a2 = (3 * (p1 - p0) / (T**2)) - (2 * v0 + v1) / T
+        a3 = (-2 * (p1 - p0) / (T**3)) + (v0 + v1) / (T**2)
+        return [a0, a1, a2, a3, 0.0, 0.0, 0.0, 0.0]
+
+    def affine_velocity_at(self, t: float, nominal_position: np.ndarray) -> np.ndarray:
+        if self._leader_motion.mode == "affine_rotation":
+            omega = self._leader_motion.angular_rate
+            angle = omega * t
+            dA = np.array(
+                [
+                    [-omega * np.sin(angle), -omega * np.cos(angle), 0.0],
+                    [omega * np.cos(angle), -omega * np.sin(angle), 0.0],
+                    [0.0, 0.0, 0.0],
+                ]
+            )
+            return dA @ nominal_position
+        return np.zeros(3)
 
     def phase_at(self, t: float) -> MissionPhase:
         for phase in self._phases:
