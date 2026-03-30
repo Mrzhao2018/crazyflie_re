@@ -1,0 +1,30 @@
+drones:
+  - id: 1
+    uri: "radio://0/60/2M/E7E7E7E701"
+    role: leader
+    radio_group: 0
+  - id: 2
+    uri: "radio://0/60/2M/E7E7E7E702"
+    role: leader
+    radio_group: 0
+  - id: 3
+    uri: "radio://0/60/2M/E7E7E7E703"
+    role: leader
+    radio_group: 0
+  - id: 4
+    uri: "radio://1/110/2M/E7E7E7E701"
+    role: leader
+    radio_group: 1
+  - id: 5
+    uri: "radio://1/110/2M/E7E7E7E702"
+    role: follower
+    radio_group: 1
+  - id: 6
+    uri: "radio://1/110/2M/E7E7E7E703"
+    role: follower
+    radio_group: 1
+
+control:
+  gain: 1.0
+  damping: 2.0
+  max_velocity: 0.5

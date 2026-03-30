@@ -1,0 +1,32 @@
+duration: 60.0
+formation_type: "pyramid"
+leader_motion:
+  mode: "affine_rotation"
+  angular_rate: 0.1
+  translation: [0.0, 0.0, 0.0]
+  trajectory_enabled: false
+  trajectory_id: 1
+  trajectory_time_scale: 1.0
+  trajectory_relative_position: false
+  trajectory_relative_yaw: false
+  trajectory_reversed: false
+  trajectory_type: "poly4d"
+  trajectory_start_addr: 0
+  trajectory_pieces: []
+  trajectory_sample_dt: 5.0
+phases:
+  - name: "settle"
+    t_start: 0.0
+    t_end: 2.0
+    mode: "settle"
+  - name: "formation_run"
+    t_start: 2.0
+    t_end: 60.0
+    mode: "formation_run"
+nominal_positions:
+  - [1.0, 0.0, 0.5]      # leader 1
+  - [0.0, 1.0, 0.5]      # leader 2
+  - [-1.0, 0.0, 0.5]     # leader 3
+  - [0.0, 0.0, 1.5]      # leader 4 (高度不同，确保affine span)
+  - [0.0, 0.0, 0.8]      # follower 5
+  - [0.5, 0.5, 0.6]      # follower 6

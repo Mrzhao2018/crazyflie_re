@@ -1,0 +1,7 @@
+pose_log_freq: 10.0
+follower_tx_freq: 8.0
+leader_update_freq: 1.0
+parked_hold_freq: 0.5
+follower_cmd_deadband: 0.05
+readiness_wait_for_params: true
+readiness_reset_estimator: false
