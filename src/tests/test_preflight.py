@@ -68,6 +68,7 @@ assert bad_report.ok is False
 assert (
     "POSE_FRESH" in bad_report.failed_codes or "DISCONNECTED" in bad_report.failed_codes
 )
+assert any("missing" in reason or "outside" in reason for reason in bad_report.reasons)
 
 low_bat_runner = PreflightRunner(
     {
@@ -81,7 +82,26 @@ low_bat_runner = PreflightRunner(
 for drone_id in fleet.all_ids():
     low_bat_runner.comp["health_bus"].update(drone_id, {"pm.vbat": 3.0}, 0.0)
 low_bat_report = low_bat_runner.run()
-assert low_bat_report.ok is False
-assert any(code.startswith("VBAT_DRONE_") for code in low_bat_report.failed_codes)
+assert low_bat_report.ok is True
+assert not any(code.startswith("VBAT_DRONE_") for code in low_bat_report.failed_codes)
+assert low_bat_report.reasons == []
+
+stale_health_runner = PreflightRunner(
+    {
+        "fleet": fleet,
+        "formation": formation,
+        "pose_bus": FakePoseBus(snapshot),
+        "health_bus": HealthBus(),
+        "config": config,
+    }
+)
+for drone_id in fleet.all_ids():
+    stale_health_runner.comp["health_bus"].update(drone_id, {"pm.vbat": 4.0}, -10.0)
+stale_health_report = stale_health_runner.run()
+assert stale_health_report.ok is False
+assert any(
+    code.startswith("HEALTH_FRESH_DRONE_") for code in stale_health_report.failed_codes
+)
+assert any("stale" in reason for reason in stale_health_report.reasons)
 
 print("[OK] Preflight structured report contracts verified")

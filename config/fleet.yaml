@@ -5,11 +5,11 @@ drones:
     radio_group: 0
   - id: 2
     uri: "radio://0/60/2M/E7E7E7E702"
-    role: leader
+    role: follower
     radio_group: 0
   - id: 3
     uri: "radio://0/60/2M/E7E7E7E703"
-    role: leader
+    role: follower
     radio_group: 0
   - id: 4
     uri: "radio://1/110/2M/E7E7E7E701"
@@ -23,6 +23,22 @@ drones:
     uri: "radio://1/110/2M/E7E7E7E703"
     role: follower
     radio_group: 1
+  - id: 7
+    uri: "radio://2/80/2M/E7E7E7E701"
+    role: leader
+    radio_group: 2
+  - id: 8
+    uri: "radio://2/80/2M/E7E7E7E702"
+    role: leader
+    radio_group: 2
+  - id: 9
+    uri: "radio://2/80/2M/E7E7E7E703"
+    role: follower
+    radio_group: 2
+  - id: 10
+    uri: "radio://2/80/2M/E7E7E7E704"
+    role: follower
+    radio_group: 2
 
 control:
   gain: 1.0

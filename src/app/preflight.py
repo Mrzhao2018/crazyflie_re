@@ -55,8 +55,8 @@ class PreflightRunner:
 
         add_check(
             "FOLLOWER_COUNT",
-            len(fleet.follower_ids()) == 2,
-            "V2 requires exactly 2 followers",
+            len(fleet.follower_ids()) >= 1,
+            "V2 requires at least 1 follower",
             actual=len(fleet.follower_ids()),
         )
 
@@ -101,28 +101,42 @@ class PreflightRunner:
                 add_check(
                     f"BOUNDARY_DRONE_{drone_id}",
                     in_bounds,
-                    f"Drone {drone_id} inside boundary before takeoff",
+                    f"Drone {drone_id} outside boundary before takeoff",
                     drone_id=drone_id,
                     position=pos.tolist(),
                 )
 
                 sample = health_samples.get(drone_id)
                 has_health = sample is not None and "pm.vbat" in sample.values
+                health_fresh = bool(
+                    has_health
+                    and snapshot is not None
+                    and sample.t_meas >= snapshot.t_meas - config.safety.pose_timeout
+                )
                 add_check(
                     f"HEALTH_DRONE_{drone_id}",
                     has_health,
-                    f"Drone {drone_id} health sample available",
+                    f"Drone {drone_id} health sample missing",
                     drone_id=drone_id,
                 )
                 if has_health:
                     add_check(
-                        f"VBAT_DRONE_{drone_id}",
-                        float(sample.values["pm.vbat"]) >= config.safety.min_vbat,
-                        f"Drone {drone_id} battery above threshold",
+                        f"HEALTH_FRESH_DRONE_{drone_id}",
+                        health_fresh,
+                        f"Drone {drone_id} health sample stale",
                         drone_id=drone_id,
-                        vbat=float(sample.values["pm.vbat"]),
-                        threshold=config.safety.min_vbat,
+                        t_meas=sample.t_meas,
+                        snapshot_t_meas=snapshot.t_meas,
                     )
+                    if config.safety.min_vbat > 0:
+                        add_check(
+                            f"VBAT_DRONE_{drone_id}",
+                            float(sample.values["pm.vbat"]) >= config.safety.min_vbat,
+                            f"Drone {drone_id} battery below threshold",
+                            drone_id=drone_id,
+                            vbat=float(sample.values["pm.vbat"]),
+                            threshold=config.safety.min_vbat,
+                        )
 
         reasons = [check.message for check in checks if not check.passed]
         return PreflightReport(

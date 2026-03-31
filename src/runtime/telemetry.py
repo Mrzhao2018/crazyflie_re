@@ -5,6 +5,11 @@ import json
 from collections import Counter
 import time
 
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover
+    np = None
+
 
 @dataclass
 class TelemetryRecord:
@@ -40,7 +45,8 @@ class TelemetryRecorder:
         self._records.append(record)
         if self._fh is None:
             return
-        self._fh.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+        safe_payload = self._json_safe(asdict(record))
+        self._fh.write(json.dumps(safe_payload, ensure_ascii=False) + "\n")
         self._fh.flush()
 
     def record_event(self, event: str, **details) -> None:
@@ -72,9 +78,27 @@ class TelemetryRecorder:
     def export_replay(self) -> dict:
         return {
             "phase_events": self.phase_events(),
-            "records": [asdict(record) for record in self._records],
+            "records": [self._json_safe(asdict(record)) for record in self._records],
             "summary": self.summary(),
         }
+
+    def _json_safe(self, value):
+        if isinstance(value, dict):
+            return {self._json_safe(k): self._json_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(v) for v in value]
+        if isinstance(value, tuple):
+            return [self._json_safe(v) for v in value]
+        if np is not None:
+            if isinstance(value, np.ndarray):
+                return self._json_safe(value.tolist())
+            if isinstance(value, np.bool_):
+                return bool(value)
+            if isinstance(value, np.integer):
+                return int(value)
+            if isinstance(value, np.floating):
+                return float(value)
+        return value
 
     def close(self) -> None:
         if self._fh is not None:

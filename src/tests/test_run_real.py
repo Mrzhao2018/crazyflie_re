@@ -359,7 +359,7 @@ def build_components(
         (),
         {
             "latest": lambda self: {
-                did: type("Sample", (), {"values": {"pm.vbat": 4.0}})()
+                did: type("Sample", (), {"values": {"pm.vbat": 4.0}, "t_meas": 0.0})()
                 for did in [1, 2, 3, 4, 5, 6]
             },
             "update": lambda self, drone_id, values, t_meas: None,
@@ -419,7 +419,16 @@ assert components["pose_source"].started is True
 assert components["telemetry"].opened is not None
 assert components["transport"].wait_calls == components["fleet"].all_ids()
 assert components["transport"].reset_calls == components["fleet"].all_ids()
-assert len(components["leader_executor"].actions) == 1
+assert any(event["event"] == "health_ready" for event in components["telemetry"].events)
+assert len(components["leader_executor"].actions) >= 1
+assert any(
+    any(action.kind == "takeoff" for action in batch)
+    for batch in components["leader_executor"].actions
+)
+assert any(
+    event["event"] in {"trajectory_prepare", "formation_align"}
+    for event in components["telemetry"].events
+)
 assert len(components["follower_executor"].takeoff_calls) == 1
 
 
@@ -442,6 +451,7 @@ components["follower_executor"].execute_hold = stop_after_hold
 app.run()
 assert len(components["follower_executor"].hold_calls) >= 1
 assert len(components["follower_executor"].velocity_calls) == 0
+assert components["fsm"].state() == MissionState.HOLD
 
 
 # run() ABORT path triggers emergency land semantics
@@ -487,5 +497,50 @@ if any(
 ):
     assert len(components["transport"].upload_calls) >= 1
     assert len(components["transport"].define_calls) >= 1
+
+# run() can recover from HOLD when safety recovers
+components = build_components(
+    [make_snapshot(1), make_snapshot(2), make_snapshot(3)],
+    [
+        SafetyDecision("HOLD", ["frame"]),
+        SafetyDecision("EXECUTE", []),
+        SafetyDecision("ABORT", ["stop"]),
+    ],
+)
+app = RealMissionApp(components)
+components["fsm"]._state = MissionState.SETTLE
+app.run()
+assert any(
+    event["event"] == "hold_recovered" for event in components["telemetry"].events
+)
+assert components["follower_controller"].calls >= 1
+
+# start() failure path cleans up resources
+components = build_components(
+    [make_snapshot(1)], [SafetyDecision("EXECUTE", [])], preflight_ok=False
+)
+app = RealMissionApp(components)
+assert app.start() is False
+assert components["telemetry"].closed is True
+assert components["pose_source"].stopped is True
+
+
+# start() fails if health is never ready
+components = build_components([make_snapshot(1)], [SafetyDecision("EXECUTE", [])])
+components["health_bus"] = type(
+    "NoHealthBus",
+    (),
+    {
+        "latest": lambda self: {},
+        "update": lambda self, drone_id, values, t_meas: None,
+    },
+)()
+app = RealMissionApp(components)
+assert app.start() is False
+assert components["fsm"].state() == MissionState.ABORT
+assert any(
+    event["event"] == "health_ready" and event["details"]["ok"] is False
+    for event in components["telemetry"].events
+)
 
 print("[OK] RealMissionApp orchestration contracts verified")

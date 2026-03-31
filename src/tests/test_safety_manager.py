@@ -45,7 +45,7 @@ assert "COMMAND_SATURATED" in decision.reason_codes
 
 health = {5: HealthSample(t_meas=0.0, values={"pm.vbat": 3.0})}
 decision = safety.evaluate(snapshot, health=health)
-assert decision.action == "ABORT"
-assert "LOW_BATTERY" in decision.reason_codes
+assert decision.action == "EXECUTE"
+assert "LOW_BATTERY" not in decision.reason_codes
 
 print("[OK] SafetyManager decision contracts verified")

@@ -16,6 +16,7 @@ class RealMissionApp:
         self.comp = components
         self._running = False
         self._last_processed_seq = -1
+        self._trajectory_started = False
         self._readiness_report = {
             "wait_for_params": {},
             "reset_estimator": {},
@@ -33,24 +34,31 @@ class RealMissionApp:
             return True
         except ValueError as exc:
             logger.error(f"FSM transition failed: {exc}")
-            self.comp["fsm"]._state = MissionState.ABORT
+            self.comp["fsm"].force_abort()
             return False
+
+    def _fail_start(self, reason: str) -> bool:
+        logger.error(reason)
+        self.comp["fsm"].force_abort()
+        self.shutdown()
+        return False
 
     def start(self):
         """启动"""
         logger.info("=== 启动真机任务 ===")
+        telemetry_path = Path("telemetry") / "run_real.jsonl"
+        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.comp["telemetry"].open(str(telemetry_path))
 
         # 连接
         if not self._safe_transition(MissionState.CONNECT):
-            return False
+            return self._fail_start("FSM failed before connect")
         try:
             self.comp["link_manager"].connect_all()
             self.comp["telemetry"].record_event("connect_all", ok=True)
         except Exception as e:
-            logger.error(f"连接失败: {e}")
             self.comp["telemetry"].record_event("connect_all", ok=False, error=str(e))
-            self.comp["fsm"]._state = MissionState.ABORT
-            return False
+            return self._fail_start(f"连接失败: {e}")
 
         if self.comp["config"].comm.readiness_wait_for_params:
             for drone_id in self.comp["fleet"].all_ids():
@@ -83,10 +91,24 @@ class RealMissionApp:
                 break
             time.sleep(0.1)
         else:
-            logger.error("部分无人机定位未就绪，中止任务")
             self.comp["telemetry"].record_event("pose_ready", ok=False)
-            self.comp["fsm"]._state = MissionState.ABORT
-            return False
+            return self._fail_start("部分无人机定位未就绪，中止任务")
+
+        logger.info("等待健康数据...")
+        for _ in range(30):
+            health_samples = self.comp["health_bus"].latest()
+            if all(
+                drone_id in health_samples
+                and "pm.vbat" in health_samples[drone_id].values
+                for drone_id in self.comp["fleet"].all_ids()
+            ):
+                self._readiness_report["health_ready"] = True
+                self.comp["telemetry"].record_event("health_ready", ok=True)
+                break
+            time.sleep(0.1)
+        else:
+            self.comp["telemetry"].record_event("health_ready", ok=False)
+            return self._fail_start("健康状态数据未就绪，中止任务")
 
         leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
         if leader_ref.mode == "trajectory" and leader_ref.trajectory is not None:
@@ -120,10 +142,10 @@ class RealMissionApp:
                 )
 
         if not self._safe_transition(MissionState.POSE_READY):
-            return False
+            return self._fail_start("FSM failed entering POSE_READY")
 
         if not self._safe_transition(MissionState.PREFLIGHT):
-            return False
+            return self._fail_start("FSM failed entering PREFLIGHT")
         self.comp["readiness_report"] = self._readiness_report
         preflight_report = self.comp["preflight"].run()
         self.comp["telemetry"].record_event(
@@ -132,20 +154,14 @@ class RealMissionApp:
             failed_codes=preflight_report.failed_codes,
         )
         if not preflight_report.ok:
-            logger.error(
+            return self._fail_start(
                 f"Preflight failed: {preflight_report.reasons} codes={preflight_report.failed_codes}"
             )
-            self.comp["fsm"]._state = MissionState.ABORT
-            return False
-
-        telemetry_path = Path("telemetry") / "run_real.jsonl"
-        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
-        self.comp["telemetry"].open(str(telemetry_path))
 
         # Takeoff - 所有无人机起飞
         logger.info("=== 起飞 ===")
         if not self._safe_transition(MissionState.TAKEOFF):
-            return False
+            return self._fail_start("FSM failed entering TAKEOFF")
 
         self.comp["leader_executor"].execute(
             [self._leader_takeoff_action(self.comp["fleet"].leader_ids())]
@@ -158,9 +174,25 @@ class RealMissionApp:
 
         # Settle - 等待稳定并验证
         if not self._safe_transition(MissionState.SETTLE):
-            return False
+            return self._fail_start("FSM failed entering SETTLE")
         logger.info("等待稳定...")
         time.sleep(2.0)
+
+        # 起飞后先对齐到初始编队，再进入 RUN
+        initial_leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
+        if initial_leader_ref.mode == "batch_goto":
+            from ..runtime.command_plan import LeaderAction
+
+            align_action = LeaderAction(
+                kind="batch_goto",
+                drone_ids=self.comp["fleet"].leader_ids(),
+                payload={"positions": initial_leader_ref.positions, "duration": 2.0},
+            )
+            self.comp["leader_executor"].execute([align_action])
+            self.comp["telemetry"].record_event(
+                "formation_align", ok=True, duration=2.0
+            )
+            time.sleep(2.2)
 
         # 验证所有无人机在空中
         snapshot = self.comp["pose_bus"].latest()
@@ -168,9 +200,27 @@ class RealMissionApp:
             for drone_id in self.comp["fleet"].all_ids():
                 idx = self.comp["fleet"].id_to_index(drone_id)
                 if snapshot.positions[idx][2] < 0.3:
-                    logger.error(f"Drone {drone_id} 未成功起飞")
+                    self.comp["telemetry"].record_event(
+                        "takeoff_validation", ok=False, drone_id=drone_id
+                    )
                     self._emergency_land()
                     return False
+
+        leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
+        if leader_ref.mode == "trajectory" and not self._trajectory_started:
+            from ..runtime.command_plan import LeaderAction
+
+            self.comp["leader_executor"].execute(
+                [
+                    LeaderAction(
+                        kind="start_trajectory",
+                        drone_ids=self.comp["fleet"].leader_ids(),
+                        payload=leader_ref.trajectory or {},
+                    )
+                ]
+            )
+            self._trajectory_started = True
+            self.comp["telemetry"].record_event("trajectory_start", ok=True)
 
         logger.info("系统就绪")
         self.comp["telemetry"].record_event("startup_complete", ok=True)
@@ -216,6 +266,10 @@ class RealMissionApp:
                 self._enter_hold_mode()
                 time.sleep(0.1)
                 continue
+
+            if self.comp["fsm"].state() == MissionState.HOLD:
+                self._safe_transition(MissionState.RUN)
+                self.comp["telemetry"].record_event("hold_recovered", ok=True)
 
             t_elapsed = time.time() - mission_start_time
             leader_ref = self.comp["leader_ref_gen"].reference_at(t_elapsed)
@@ -263,6 +317,10 @@ class RealMissionApp:
                 time.sleep(0.1)
                 continue
 
+            if self.comp["fsm"].state() == MissionState.HOLD:
+                self._safe_transition(MissionState.RUN)
+                self.comp["telemetry"].record_event("hold_recovered", ok=True)
+
             # 8. 调度器生成发送计划
             plan = self.comp["scheduler"].plan(
                 snapshot,
@@ -270,7 +328,7 @@ class RealMissionApp:
                 leader_ref,
                 commands,
                 safety_decision,
-                parked_follower_ids=self.comp["fleet"].follower_ids(),
+                parked_follower_ids=[],
             )
 
             # 9. 执行
@@ -341,7 +399,7 @@ class RealMissionApp:
         """紧急降落"""
         logger.error("=== 紧急降落 ===")
         self.comp["telemetry"].record_event("emergency_land", ok=True)
-        self.comp["fsm"]._state = MissionState.ABORT
+        self.comp["fsm"].force_abort()
 
         # Followers先停velocity，恢复high-level权限
         self.comp["follower_executor"].stop_velocity_mode(

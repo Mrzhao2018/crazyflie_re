@@ -19,10 +19,12 @@ class LighthousePoseSource:
         self._health_callbacks = []
         self._log_configs = {}
         self._sync_loggers = {}
+        self._threads = []
         self._running = False
 
     def start(self):
         """启动定位数据流"""
+        self._threads = []
         self._running = True
 
         for drone_id in self.fleet.all_ids():
@@ -53,6 +55,7 @@ class LighthousePoseSource:
             worker.start()
             self._sync_loggers[drone_id] = sync_logger
             self._log_configs[drone_id] = [pose_conf, health_conf]
+            self._threads.append(worker)
 
         logger.info("Lighthouse pose source started")
 
@@ -64,6 +67,9 @@ class LighthousePoseSource:
                 sync_logger.disconnect()
             except Exception:
                 pass
+        for worker in self._threads:
+            worker.join(timeout=1.0)
+        self._threads.clear()
         self._sync_loggers.clear()
         self._log_configs.clear()
 

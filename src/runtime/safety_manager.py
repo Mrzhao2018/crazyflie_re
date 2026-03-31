@@ -111,7 +111,7 @@ class SafetyManager:
                     )
 
         # 6. 检查健康状态
-        if health is not None:
+        if health is not None and self.config.min_vbat > 0:
             for drone_id, sample in health.items():
                 vbat = sample.values.get("pm.vbat")
                 if vbat is not None and float(vbat) < self.config.min_vbat:

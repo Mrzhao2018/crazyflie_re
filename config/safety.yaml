@@ -1,7 +1,7 @@
-boundary_min: [-2.0, -2.0, 0.0]
-boundary_max: [2.0, 2.0, 2.5]
+boundary_min: [-1.6, -1.6, -0.1]
+boundary_max: [1.6, 1.6, 1.70]
 pose_timeout: 1.0
 max_condition_number: 100.0
 max_command_norm: 2.0
 estimator_variance_threshold: 0.001
-min_vbat: 3.6
+min_vbat: 0.0

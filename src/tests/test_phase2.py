@@ -51,6 +51,8 @@ snapshot = PoseSnapshot(0, 0.0, nominal, np.ones(len(nominal), dtype=bool), [])
 estimator = AffineFrameEstimator(fleet)
 frame = estimator.estimate(snapshot, fleet.leader_ids())
 print(f"[OK] Frame valid: {frame.valid}, cond: {frame.condition_number:.2f}")
+assert frame.valid == follower_ref.valid
+assert abs(frame.condition_number - follower_ref.frame_condition_number) < 1e-6
 
 print("\n=== 测试FollowerController ===")
 controller = FollowerController(config.control)

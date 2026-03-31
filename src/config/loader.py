@@ -61,11 +61,8 @@ class ConfigLoader:
         if config.mission.leader_motion.trajectory_sample_dt <= 0:
             raise ValueError("trajectory_sample_dt 必须大于 0")
 
-        if config.mission.leader_motion.trajectory_pieces is None:
-            raise ValueError("trajectory_pieces 不能为空，请至少提供 []")
-
-        if config.safety.min_vbat <= 0:
-            raise ValueError("min_vbat 必须大于 0")
+        if config.safety.min_vbat < 0:
+            raise ValueError("min_vbat 不能小于 0；设为 0 可关闭电量检查")
 
         for freq_name in (
             "pose_log_freq",

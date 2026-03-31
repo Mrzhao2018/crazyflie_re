@@ -101,7 +101,11 @@ assert any(
     event["event"] in {"wait_for_params", "reset_estimator", "fsm_transition"}
     for event in components["telemetry"].events
 )
-assert len(components["leader_executor"].actions) == 1
+assert len(components["leader_executor"].actions) >= 1
+assert any(
+    any(action.kind == "takeoff" for action in batch)
+    for batch in components["leader_executor"].actions
+)
 assert len(components["follower_executor"].takeoff_calls) == 1
 
 print("[OK] Startup flow quasi-system contracts verified")

@@ -84,18 +84,10 @@ class CommandScheduler:
         leader_actions = []
         if (
             leader_ref is not None
-            and policy.leader_mode in {"batch_goto", "trajectory"}
+            and policy.leader_mode == "batch_goto"
             and now - self.last_leader_update_time >= self.leader_update_interval
         ):
-            if leader_ref.mode == "trajectory":
-                leader_actions.append(
-                    LeaderAction(
-                        kind="start_trajectory",
-                        drone_ids=leader_ref.leader_ids,
-                        payload=leader_ref.trajectory or {},
-                    )
-                )
-            else:
+            if leader_ref.mode == "batch_goto":
                 leader_actions.append(
                     LeaderAction(
                         kind="batch_goto",
@@ -106,7 +98,7 @@ class CommandScheduler:
                         },
                     )
                 )
-            self.last_leader_update_time = now
+                self.last_leader_update_time = now
 
         if snapshot.seq <= self.last_pose_seq:
             return TxPlan(

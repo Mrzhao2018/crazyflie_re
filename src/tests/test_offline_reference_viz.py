@@ -27,6 +27,11 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     assert gif_path.stat().st_size > 0
     assert replay.times[0] == 0.0
     assert replay.times[-1] == 20.0
-    assert len(replay.drone_ids) == 6
+    assert len(replay.drone_ids) == 10
+    assert replay.roles[1] == "leader"
+    assert replay.roles[4] == "leader"
+    assert replay.roles[7] == "leader"
+    assert replay.roles[8] == "leader"
+    assert replay.roles[10] == "follower"
 
 print("[OK] Offline reference visualization smoke path verified")

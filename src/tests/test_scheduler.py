@@ -106,7 +106,7 @@ plan3 = scheduler.plan(
 assert len(plan3.follower_actions) == 0
 assert len(plan3.hold_actions) == len(fleet.follower_ids())
 
-fsm._state = MissionState.LAND
+fsm.transition(MissionState.LAND)
 plan4 = scheduler.plan(
     snapshot,
     MissionState.LAND,
@@ -121,5 +121,16 @@ abort_safety = SafetyDecision(action="ABORT", reasons=["test"])
 plan5 = scheduler.plan(snapshot, MissionState.RUN, leader_ref, commands, abort_safety)
 assert len(plan5.leader_actions) == 0
 assert len(plan5.follower_actions) == 0
+
+fsm_recover = MissionFSM()
+fsm_recover.transition(MissionState.CONNECT)
+fsm_recover.transition(MissionState.POSE_READY)
+fsm_recover.transition(MissionState.PREFLIGHT)
+fsm_recover.transition(MissionState.TAKEOFF)
+fsm_recover.transition(MissionState.SETTLE)
+fsm_recover.transition(MissionState.RUN)
+fsm_recover.transition(MissionState.HOLD)
+fsm_recover.transition(MissionState.RUN)
+assert fsm_recover.state() == MissionState.RUN
 
 print("[OK] Scheduler blocks follower resend on unchanged seq")

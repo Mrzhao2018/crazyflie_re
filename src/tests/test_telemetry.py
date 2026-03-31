@@ -1,6 +1,7 @@
 """Telemetry review helper tests"""
 
 from src.runtime.telemetry import TelemetryRecorder, TelemetryRecord
+import numpy as np
 
 
 telemetry = TelemetryRecorder()
@@ -10,21 +11,21 @@ telemetry.log(
     TelemetryRecord(
         t_wall=0.0,
         mission_state="RUN",
-        readiness={"pose_ready": True},
+        readiness={"pose_ready": np.bool_(True)},
         phase_events=telemetry.phase_events(),
         snapshot_seq=1,
         snapshot_t_meas=0.0,
-        health={1: {"pm.vbat": 4.0}},
-        frame_valid=True,
-        frame_condition_number=1.0,
+        health={1: {"pm.vbat": np.float64(4.0)}},
+        frame_valid=np.bool_(True),
+        frame_condition_number=np.float64(1.0),
         safety_action="EXECUTE",
         safety_reasons=[],
         safety_reason_codes=[],
         scheduler_reason="execute",
-        scheduler_diagnostics={},
+        scheduler_diagnostics={"fresh": np.bool_(True)},
         leader_action_count=1,
         follower_action_count=2,
-        follower_command_norms={5: 0.1, 6: 0.2},
+        follower_command_norms={5: np.float64(0.1), 6: np.float64(0.2)},
     )
 )
 

@@ -74,4 +74,6 @@ class CflibLinkManager:
 
     def get(self, drone_id: int) -> Any:
         """获取指定无人机的连接"""
+        if drone_id not in self._scfs:
+            raise KeyError(f"Drone {drone_id} is not connected")
         return self._scfs[drone_id]

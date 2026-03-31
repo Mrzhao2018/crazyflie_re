@@ -69,9 +69,13 @@ class MissionFSM:
         self._state = target
         return self._state
 
+    def force_abort(self) -> MissionState:
+        self._state = MissionState.ABORT
+        return self._state
+
     def allowed_command_policy(self) -> CommandPolicy:
         if self._state == MissionState.RUN:
-            return CommandPolicy(leader_mode="trajectory", follower_mode="velocity")
+            return CommandPolicy(leader_mode="batch_goto", follower_mode="velocity")
         if self._state in {MissionState.HOLD, MissionState.SETTLE}:
             return CommandPolicy(leader_mode="none", follower_mode="hold")
         if self._state == MissionState.TAKEOFF:

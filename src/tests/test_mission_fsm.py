@@ -33,6 +33,10 @@ policy = fsm.allowed_command_policy()
 assert policy.leader_mode == "none"
 assert policy.follower_mode == "hold"
 
+fsm3 = MissionFSM()
+assert fsm3.force_abort() == MissionState.ABORT
+assert fsm3.state() == MissionState.ABORT
+
 fsm2 = MissionFSM()
 try:
     fsm2.transition(MissionState.RUN)
