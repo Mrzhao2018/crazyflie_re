@@ -2,6 +2,7 @@
 
 import yaml
 from pathlib import Path
+from typing import cast
 from .schema import *
 
 
@@ -82,8 +83,25 @@ class ConfigLoader:
         ):
             raise ValueError("safety 边界必须满足 boundary_min < boundary_max")
 
+        if config.startup.mode == "manual_leader" and config.startup.manual is None:
+            raise ValueError("manual_leader 模式需要提供 startup.manual 配置")
+
+        if config.startup.manual is not None:
+            if config.startup.manual.translation_step <= 0:
+                raise ValueError("manual.translation_step 必须大于 0")
+            if config.startup.manual.vertical_step <= 0:
+                raise ValueError("manual.vertical_step 必须大于 0")
+            if config.startup.manual.scale_step <= 0:
+                raise ValueError("manual.scale_step 必须大于 0")
+            if config.startup.manual.rotation_step_deg <= 0:
+                raise ValueError("manual.rotation_step_deg 必须大于 0")
+            if config.startup.manual.min_scale <= 0:
+                raise ValueError("manual.min_scale 必须大于 0")
+            if config.startup.manual.min_scale >= config.startup.manual.max_scale:
+                raise ValueError("manual 必须满足 min_scale < max_scale")
+
     @staticmethod
-    def load(config_dir: str) -> AppConfig:
+    def load(config_dir: str, startup_mode_override: str | None = None) -> AppConfig:
         """加载所有配置文件"""
         config_path = Path(config_dir)
 
@@ -92,6 +110,15 @@ class ConfigLoader:
         mission_data = ConfigLoader._load_yaml_file(config_path / "mission.yaml")
         comm_data = ConfigLoader._load_yaml_file(config_path / "comm.yaml")
         safety_data = ConfigLoader._load_yaml_file(config_path / "safety.yaml")
+        startup_file = config_path / "startup.yaml"
+        startup_data = (
+            ConfigLoader._load_yaml_file(startup_file)
+            if startup_file.exists()
+            else {"mode": "auto"}
+        )
+
+        if startup_mode_override is not None:
+            startup_data = {**startup_data, "mode": startup_mode_override}
 
         # 构建配置对象
         drones = [DroneConfig(**d) for d in fleet_data["drones"]]
@@ -107,6 +134,18 @@ class ConfigLoader:
             phases=phases,
         )
         comm = CommConfig(**comm_data)
+        manual_cfg = startup_data.get("manual")
+        if manual_cfg is not None and not isinstance(manual_cfg, dict):
+            raise ValueError("startup.manual 必须是对象映射")
+
+        startup_mode = startup_data.get("mode", "auto")
+        if startup_mode not in {"auto", "manual_leader"}:
+            raise ValueError("startup.mode 只能是 auto 或 manual_leader")
+
+        startup = StartupConfig(
+            mode=cast(Literal["auto", "manual_leader"], startup_mode),
+            manual=(ManualLeaderControlConfig(**manual_cfg) if manual_cfg else None),
+        )
         safety = SafetyConfig(**safety_data)
         control = ControlConfig(
             **fleet_data.get(
@@ -115,7 +154,12 @@ class ConfigLoader:
         )
 
         app_config = AppConfig(
-            fleet=fleet, mission=mission, comm=comm, safety=safety, control=control
+            fleet=fleet,
+            mission=mission,
+            comm=comm,
+            startup=startup,
+            safety=safety,
+            control=control,
         )
 
         ConfigLoader._validate(app_config)

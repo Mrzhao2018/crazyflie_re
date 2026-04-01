@@ -1,8 +1,13 @@
 """RealMissionApp orchestration contract tests with fakes"""
 
 import numpy as np
+from pathlib import Path
 
 from src.app.run_real import RealMissionApp
+from src.runtime.manual_input_port import ManualLeaderIntent
+from src.runtime.manual_leader_reference import ManualLeaderReferenceSource
+from src.runtime.manual_leader_state import ManualLeaderState
+from src.adapters.manual_input_keyboard import KeyboardManualInputSource
 from src.runtime.mission_fsm import MissionFSM, MissionState
 from src.runtime.pose_snapshot import PoseSnapshot
 from src.runtime.safety_manager import SafetyDecision
@@ -27,6 +32,12 @@ class FakeFleet:
 
     def id_to_index(self, drone_id):
         return self._id_to_index[drone_id]
+
+    def is_leader(self, drone_id):
+        return drone_id in self._leaders
+
+    def is_follower(self, drone_id):
+        return drone_id in self._followers
 
 
 class FakeLinkManager:
@@ -269,14 +280,45 @@ class FakeScheduler:
         )()
 
 
+class FakeManualInput:
+    def __init__(self, intents=None):
+        self.intents = list(intents or [])
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def poll(self):
+        if self.intents:
+            return self.intents.pop(0)
+        return None
+
+
+class FakeKeyReader:
+    def __init__(self, keys):
+        self.keys = list(keys)
+
+    def __call__(self):
+        if self.keys:
+            return self.keys.pop(0)
+        return None
+
+
 class FakeLeaderRefGen:
+    def __init__(self, mode="trajectory"):
+        self.mode = mode
+
     def reference_at(self, t):
         return type(
             "LeaderRef",
             (),
             {
                 "leader_ids": [1, 2, 3, 4],
-                "mode": "trajectory",
+                "mode": self.mode,
                 "trajectory": {
                     "per_leader": {
                         1: {
@@ -329,7 +371,7 @@ def make_snapshot(seq, fresh=True, z=0.8):
     )
     return PoseSnapshot(
         seq=seq,
-        t_meas=0.0,
+        t_meas=float(seq - 1),
         positions=positions,
         fresh_mask=np.ones(6, dtype=bool) if fresh else np.zeros(6, dtype=bool),
         disconnected_ids=[] if fresh else [1, 2, 3, 4, 5, 6],
@@ -337,12 +379,36 @@ def make_snapshot(seq, fresh=True, z=0.8):
 
 
 def build_components(
-    start_snapshots, safety_decisions, connect_fail=False, preflight_ok=True
+    start_snapshots,
+    safety_decisions,
+    connect_fail=False,
+    preflight_ok=True,
+    startup_mode="auto",
+    leader_ref_mode=None,
+    manual_input=None,
+    manual_state=None,
 ):
+    if leader_ref_mode is None:
+        leader_ref_mode = "trajectory" if startup_mode == "auto" else "batch_goto"
+
     fake_config = type(
         "FakeConfig",
         (),
         {
+            "startup": type(
+                "FakeStartup",
+                (),
+                {
+                    "mode": startup_mode,
+                    "manual": type(
+                        "FakeManualCfg",
+                        (),
+                        {"default_axis": "z"},
+                    )()
+                    if startup_mode == "manual_leader"
+                    else None,
+                },
+            )(),
             "comm": type(
                 "FakeComm",
                 (),
@@ -351,6 +417,7 @@ def build_components(
                     "readiness_reset_estimator": True,
                 },
             )(),
+            "mission": type("FakeMission", (), {"duration": 20.0})(),
         },
     )()
 
@@ -368,8 +435,19 @@ def build_components(
 
     return {
         "config": fake_config,
+        "startup_mode": startup_mode,
         "fsm": MissionFSM(),
         "fleet": FakeFleet(),
+        "mission_profile": type(
+            "FakeMissionProfile",
+            (),
+            {
+                "phase_at": lambda self, t: type(
+                    "Phase", (), {"name": "formation_run"}
+                )(),
+                "total_time": lambda self: 20.0,
+            },
+        )(),
         "link_manager": FakeLinkManager(should_fail=connect_fail),
         "transport": FakeTransport(),
         "pose_source": FakePoseSource(),
@@ -386,7 +464,9 @@ def build_components(
         "follower_controller": FakeFollowerController(),
         "safety": FakeSafety(safety_decisions),
         "scheduler": FakeScheduler(),
-        "leader_ref_gen": FakeLeaderRefGen(),
+        "leader_ref_gen": FakeLeaderRefGen(mode=leader_ref_mode),
+        "manual_input": manual_input,
+        "manual_leader_state": manual_state,
     }
 
 
@@ -417,8 +497,12 @@ assert app.start() is True
 assert components["fsm"].state() == MissionState.SETTLE
 assert components["pose_source"].started is True
 assert components["telemetry"].opened is not None
+assert Path(components["telemetry"].opened).name.startswith("run_real_")
+assert Path(components["telemetry"].opened).suffix == ".jsonl"
+assert components["telemetry_path"] == components["telemetry"].opened
 assert components["transport"].wait_calls == components["fleet"].all_ids()
 assert components["transport"].reset_calls == components["fleet"].all_ids()
+assert any(event["event"] == "startup_mode" for event in components["telemetry"].events)
 assert any(event["event"] == "health_ready" for event in components["telemetry"].events)
 assert len(components["leader_executor"].actions) >= 1
 assert any(
@@ -465,6 +549,12 @@ app.run()
 assert components["fsm"].state() == MissionState.ABORT
 assert len(components["follower_executor"].stop_calls) == 1
 assert len(components["follower_executor"].land_calls) == 1
+abort_record = components["telemetry"].records[-1]
+assert abort_record.safety_action == "ABORT"
+assert abort_record.scheduler_reason == "emergency_land"
+assert any(
+    event["event"] == "emergency_land" for event in components["telemetry"].events
+)
 
 
 # no-new-pose should not recompute follower control twice
@@ -480,12 +570,20 @@ app = RealMissionApp(components)
 components["fsm"]._state = MissionState.SETTLE
 app.run()
 assert components["follower_controller"].calls == 1
-assert len(components["telemetry"].records) >= 1
-record = components["telemetry"].records[-1]
+assert len(components["telemetry"].records) >= 2
+record = components["telemetry"].records[-2]
+terminal_record = components["telemetry"].records[-1]
 assert record.scheduler_reason == "fake_plan"
+assert terminal_record.scheduler_reason == "emergency_land"
 assert record.mission_state in {MissionState.RUN.value, MissionState.ABORT.value}
+assert record.phase_label == "formation_run"
+assert record.measured_positions[1] == [1.0, 0.0, 0.8]
+assert record.fresh_mask[1] is True
+assert record.disconnected_ids == []
+assert record.leader_mode == "trajectory"
 assert record.health
 assert len(record.phase_events) >= 1
+assert record.startup_mode == "auto"
 assert any(
     event["event"] in {"fsm_transition", "preflight", "trajectory_prepare"}
     for event in components["telemetry"].events
@@ -542,5 +640,169 @@ assert any(
     event["event"] == "health_ready" and event["details"]["ok"] is False
     for event in components["telemetry"].events
 )
+
+
+# shutdown() from active mission performs symmetric landing and flushes telemetry
+components = build_components(
+    [make_snapshot(1), make_snapshot(1)], [SafetyDecision("EXECUTE", [])]
+)
+app = RealMissionApp(components)
+components["fsm"]._state = MissionState.RUN
+app.shutdown()
+assert components["fsm"].state() == MissionState.LAND
+assert len(components["leader_executor"].actions) >= 1
+assert any(
+    any(action.kind == "land" for action in batch)
+    for batch in components["leader_executor"].actions
+)
+assert len(components["follower_executor"].stop_calls) == 1
+assert len(components["follower_executor"].land_calls) == 1
+assert components["telemetry"].closed is True
+assert len(components["telemetry"].records) >= 1
+shutdown_record = components["telemetry"].records[-1]
+assert shutdown_record.safety_action == "SHUTDOWN"
+assert shutdown_record.scheduler_reason == "shutdown"
+assert any(
+    event["event"] == "manual_shutdown_land" for event in components["telemetry"].events
+)
+assert any(event["event"] == "shutdown" for event in components["telemetry"].events)
+
+
+# auto mode ends by mission duration and lands automatically
+components = build_components(
+    [make_snapshot(1), make_snapshot(2), make_snapshot(25)],
+    [
+        SafetyDecision("EXECUTE", []),
+        SafetyDecision("EXECUTE", []),
+        SafetyDecision("EXECUTE", []),
+    ],
+)
+app = RealMissionApp(components)
+components["fsm"]._state = MissionState.SETTLE
+app.run()
+assert any(
+    event["event"] == "mission_complete" for event in components["telemetry"].events
+)
+assert any(
+    event["event"] == "mission_complete_land"
+    for event in components["telemetry"].events
+)
+assert len(components["follower_executor"].stop_calls) == 1
+assert len(components["follower_executor"].land_calls) == 1
+mission_complete_record = components["telemetry"].records[-1]
+assert mission_complete_record.safety_action == "MISSION_COMPLETE"
+assert mission_complete_record.scheduler_reason == "mission_complete"
+
+
+# manual startup mode skips auto-only leader startup behavior
+manual_state = ManualLeaderState(default_axis="z")
+manual_input = FakeManualInput(
+    [
+        ManualLeaderIntent(axis_switch=True),
+        ManualLeaderIntent(target_switch=True),
+        ManualLeaderIntent(translation_delta=(0.2, 0.0, 0.0)),
+        ManualLeaderIntent(rotation_delta_deg=5.0),
+    ]
+)
+manual_source = ManualLeaderReferenceSource(
+    type(
+        "Formation",
+        (),
+        {
+            "nominal_position": lambda self, drone_id: np.array(
+                [float(drone_id), 0.0, 0.5]
+            )
+        },
+    )(),
+    FakeFleet(),
+    manual_state,
+)
+components = build_components(
+    [make_snapshot(1), make_snapshot(2), make_snapshot(3)],
+    [
+        SafetyDecision("EXECUTE", []),
+        SafetyDecision("EXECUTE", []),
+        SafetyDecision("ABORT", ["stop"]),
+    ],
+    startup_mode="manual_leader",
+    leader_ref_mode="batch_goto",
+    manual_input=manual_input,
+    manual_state=manual_state,
+)
+components["leader_ref_gen"] = manual_source
+app = RealMissionApp(components)
+assert app.start() is True
+assert not any(
+    event["event"] == "trajectory_prepare" for event in components["telemetry"].events
+)
+assert not any(
+    event["event"] == "formation_align" for event in components["telemetry"].events
+)
+assert any(
+    event["event"] == "manual_structure_align"
+    for event in components["telemetry"].events
+)
+assert any(
+    event["event"] == "manual_mode_armed" for event in components["telemetry"].events
+)
+app.run()
+assert manual_input.started is True
+assert any(
+    event["event"] == "manual_input_started" for event in components["telemetry"].events
+)
+assert any(
+    event["event"] == "manual_intent" for event in components["telemetry"].events
+)
+assert any(
+    event["event"] == "manual_axis_switch" for event in components["telemetry"].events
+)
+manual_record = components["telemetry"].records[-1]
+assert manual_record.startup_mode == "manual_leader"
+assert manual_record.leader_reference_source == "ManualLeaderReferenceSource"
+assert manual_record.manual_axis in {"x", "y", "z"}
+assert any(
+    event["event"] == "manual_intent" for event in components["telemetry"].events
+)
+
+
+# keyboard input adapter maps keys into ManualLeaderIntent
+reader = FakeKeyReader(["w", "q", "x", "c", "v", "?"])
+keyboard_input = KeyboardManualInputSource(
+    translation_step=0.2,
+    vertical_step=0.15,
+    scale_step=0.05,
+    rotation_step_deg=7.0,
+    key_reader=reader,
+)
+keyboard_input.start()
+intent = keyboard_input.poll()
+assert intent is not None and intent.translation_delta == (0.2, 0.0, 0.0)
+intent = keyboard_input.poll()
+assert intent is not None and intent.scale_delta == 0.05
+intent = keyboard_input.poll()
+assert intent is not None and intent.rotation_delta_deg == 7.0
+intent = keyboard_input.poll()
+assert intent is not None and intent.axis_switch is True
+intent = keyboard_input.poll()
+assert intent is not None and intent.target_switch is True
+assert keyboard_input.poll() is None
+
+
+# manual leader state supports target switching between swarm and individual leaders
+state = ManualLeaderState(default_axis="z")
+state.apply_intent(ManualLeaderIntent(target_switch=True))
+snap = state.snapshot()
+assert snap.target_mode == "leader"
+assert snap.selected_leader_id == 1
+state.apply_intent(ManualLeaderIntent(translation_delta=(0.3, 0.0, 0.0)))
+snap = state.snapshot()
+assert np.allclose(snap.per_leader_offsets[1], np.array([0.3, 0.0, 0.0]))
+state.apply_intent(ManualLeaderIntent(target_switch=True))
+state.apply_intent(ManualLeaderIntent(target_switch=True))
+state.apply_intent(ManualLeaderIntent(target_switch=True))
+state.apply_intent(ManualLeaderIntent(target_switch=True))
+snap = state.snapshot()
+assert snap.target_mode == "swarm"
+assert snap.selected_leader_id is None
 
 print("[OK] RealMissionApp orchestration contracts verified")

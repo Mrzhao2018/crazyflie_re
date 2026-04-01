@@ -28,6 +28,7 @@ def build_startup_components(connect_fail=False, preflight_ok=True, fresh=True, 
         "FakeConfig",
         (),
         {
+            "startup": type("FakeStartup", (), {"mode": "auto", "manual": None})(),
             "comm": type(
                 "FakeComm",
                 (),
@@ -53,6 +54,7 @@ def build_startup_components(connect_fail=False, preflight_ok=True, fresh=True, 
 
     return {
         "config": fake_config,
+        "startup_mode": "auto",
         "fsm": MissionFSM(),
         "fleet": FakeFleet(),
         "link_manager": FakeLinkManager(should_fail=connect_fail),
@@ -97,6 +99,7 @@ assert components["fsm"].state() == MissionState.SETTLE
 assert components["telemetry"].opened is not None
 assert components["transport"].wait_calls == components["fleet"].all_ids()
 assert components["transport"].reset_calls == components["fleet"].all_ids()
+assert any(event["event"] == "startup_mode" for event in components["telemetry"].events)
 assert any(
     event["event"] in {"wait_for_params", "reset_estimator", "fsm_transition"}
     for event in components["telemetry"].events

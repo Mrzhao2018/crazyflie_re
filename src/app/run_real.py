@@ -2,7 +2,9 @@
 
 import time
 import logging
+from datetime import datetime
 from pathlib import Path
+import numpy as np
 from ..runtime.mission_fsm import MissionState
 from ..runtime.telemetry import TelemetryRecord
 
@@ -17,6 +19,8 @@ class RealMissionApp:
         self._running = False
         self._last_processed_seq = -1
         self._trajectory_started = False
+        self._shutdown_flushed = False
+        self._terminal_land_executed = False
         self._readiness_report = {
             "wait_for_params": {},
             "reset_estimator": {},
@@ -46,9 +50,14 @@ class RealMissionApp:
     def start(self):
         """启动"""
         logger.info("=== 启动真机任务 ===")
-        telemetry_path = Path("telemetry") / "run_real.jsonl"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        telemetry_path = Path("telemetry") / f"run_real_{timestamp}.jsonl"
         telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.comp["telemetry_path"] = str(telemetry_path)
         self.comp["telemetry"].open(str(telemetry_path))
+        self.comp["telemetry"].record_event(
+            "startup_mode", mode=self.comp.get("startup_mode", "auto")
+        )
 
         # 连接
         if not self._safe_transition(MissionState.CONNECT):
@@ -111,7 +120,11 @@ class RealMissionApp:
             return self._fail_start("健康状态数据未就绪，中止任务")
 
         leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
-        if leader_ref.mode == "trajectory" and leader_ref.trajectory is not None:
+        if (
+            self.comp.get("startup_mode", "auto") == "auto"
+            and leader_ref.mode == "trajectory"
+            and leader_ref.trajectory is not None
+        ):
             per_leader = leader_ref.trajectory.get("per_leader", {})
             for drone_id in self.comp["fleet"].leader_ids():
                 spec = per_leader.get(drone_id, {})
@@ -180,7 +193,13 @@ class RealMissionApp:
 
         # 起飞后先对齐到初始编队，再进入 RUN
         initial_leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
-        if initial_leader_ref.mode == "batch_goto":
+        if self.comp.get("startup_mode", "auto") == "manual_leader":
+            initial_leader_ref = self._manual_initial_structure_reference()
+        if (
+            self.comp.get("startup_mode", "auto") == "auto"
+            and initial_leader_ref is not None
+            and initial_leader_ref.mode == "batch_goto"
+        ):
             from ..runtime.command_plan import LeaderAction
 
             align_action = LeaderAction(
@@ -191,6 +210,23 @@ class RealMissionApp:
             self.comp["leader_executor"].execute([align_action])
             self.comp["telemetry"].record_event(
                 "formation_align", ok=True, duration=2.0
+            )
+            time.sleep(2.2)
+        elif (
+            self.comp.get("startup_mode", "auto") == "manual_leader"
+            and initial_leader_ref is not None
+            and initial_leader_ref.mode == "batch_goto"
+        ):
+            from ..runtime.command_plan import LeaderAction
+
+            align_action = LeaderAction(
+                kind="batch_goto",
+                drone_ids=self.comp["fleet"].leader_ids(),
+                payload={"positions": initial_leader_ref.positions, "duration": 2.0},
+            )
+            self.comp["leader_executor"].execute([align_action])
+            self.comp["telemetry"].record_event(
+                "manual_structure_align", ok=True, duration=2.0
             )
             time.sleep(2.2)
 
@@ -206,8 +242,15 @@ class RealMissionApp:
                     self._emergency_land()
                     return False
 
+        if self.comp.get("startup_mode", "auto") == "manual_leader":
+            self._initialize_manual_mode(snapshot)
+
         leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
-        if leader_ref.mode == "trajectory" and not self._trajectory_started:
+        if (
+            self.comp.get("startup_mode", "auto") == "auto"
+            and leader_ref.mode == "trajectory"
+            and not self._trajectory_started
+        ):
             from ..runtime.command_plan import LeaderAction
 
             self.comp["leader_executor"].execute(
@@ -240,6 +283,15 @@ class RealMissionApp:
         self.comp["telemetry"].record_event("run_entered", ok=True)
 
         mission_start_time = time.time()
+        manual_input = self.comp.get("manual_input")
+        if manual_input is not None:
+            manual_input.start()
+            manual_cfg = self.comp["config"].startup.manual
+            self.comp["telemetry"].record_event(
+                "manual_input_started",
+                ok=True,
+                axis=(manual_cfg.default_axis if manual_cfg is not None else None),
+            )
 
         while self._running:
             # 1. 获取最新pose
@@ -272,7 +324,33 @@ class RealMissionApp:
                 self.comp["telemetry"].record_event("hold_recovered", ok=True)
 
             t_elapsed = time.time() - mission_start_time
+            self._poll_manual_input()
             leader_ref = self.comp["leader_ref_gen"].reference_at(t_elapsed)
+
+            if (
+                self.comp.get("startup_mode", "auto") == "auto"
+                and t_elapsed >= self.comp["mission_profile"].total_time()
+            ):
+                logger.info(
+                    "Mission duration reached (%.2fs), starting orderly landing",
+                    t_elapsed,
+                )
+                self.comp["telemetry"].record_event(
+                    "mission_complete",
+                    ok=True,
+                    elapsed=t_elapsed,
+                    total_time=self.comp["mission_profile"].total_time(),
+                )
+                self._orderly_land(
+                    reason_event="mission_complete_land",
+                    safety_action="MISSION_COMPLETE",
+                    safety_reasons=["mission_complete"],
+                    safety_reason_codes=["MISSION_COMPLETE"],
+                    scheduler_reason="mission_complete",
+                    scheduler_diagnostics={"mission_complete": True},
+                )
+                break
+
             frame = None
             follower_ref = None
             commands = None
@@ -349,14 +427,34 @@ class RealMissionApp:
                     for drone_id, cmd in commands.commands.items()
                 }
 
+            measured_positions = self._measured_positions(snapshot)
+            leader_reference_positions = self._leader_reference_positions(leader_ref)
+            follower_reference_positions = self._follower_reference_positions(
+                follower_ref
+            )
+            phase_label = self._phase_label(t_elapsed)
+            leader_mode = getattr(leader_ref, "mode", None)
+
             self.comp["telemetry"].log(
                 TelemetryRecord(
                     t_wall=time.time(),
                     mission_state=self.comp["fsm"].state().value,
+                    startup_mode=self.comp.get("startup_mode"),
+                    mission_elapsed=t_elapsed,
                     readiness=self._readiness_report,
                     phase_events=self.comp["telemetry"].phase_events(),
                     snapshot_seq=snapshot.seq,
                     snapshot_t_meas=snapshot.t_meas,
+                    measured_positions=measured_positions,
+                    fresh_mask={
+                        drone_id: bool(
+                            snapshot.fresh_mask[
+                                self.comp["fleet"].id_to_index(drone_id)
+                            ]
+                        )
+                        for drone_id in self.comp["fleet"].all_ids()
+                    },
+                    disconnected_ids=list(snapshot.disconnected_ids),
                     health={
                         drone_id: sample.values
                         for drone_id, sample in self.comp["health_bus"].latest().items()
@@ -365,11 +463,22 @@ class RealMissionApp:
                     frame_condition_number=(
                         frame.condition_number if frame is not None else None
                     ),
+                    phase_label=phase_label,
+                    leader_mode=leader_mode,
+                    leader_reference_positions=leader_reference_positions,
+                    follower_reference_positions=follower_reference_positions,
                     safety_action=safety_decision.action,
                     safety_reasons=safety_decision.reasons,
                     safety_reason_codes=safety_decision.reason_codes,
                     scheduler_reason=(plan.diagnostics or {}).get("reason"),
                     scheduler_diagnostics=plan.diagnostics or {},
+                    leader_reference_source=(
+                        type(self.comp["leader_ref_gen"]).__name__
+                        if "leader_ref_gen" in self.comp
+                        else None
+                    ),
+                    manual_axis=self._manual_axis(),
+                    manual_input_age=self._manual_input_age(),
                     leader_action_count=len(plan.leader_actions),
                     follower_action_count=len(plan.follower_actions),
                     follower_command_norms=follower_command_norms,
@@ -382,14 +491,263 @@ class RealMissionApp:
         """关闭"""
         logger.info("=== 关闭系统 ===")
         self._running = False
+        self._graceful_shutdown_land()
+        self._flush_terminal_telemetry(
+            safety_action="SHUTDOWN",
+            safety_reasons=["manual_shutdown"],
+            safety_reason_codes=["MANUAL_SHUTDOWN"],
+            scheduler_reason="shutdown",
+            scheduler_diagnostics={"shutdown": True},
+        )
         if "telemetry" in self.comp:
             self.comp["telemetry"].record_event("shutdown", ok=True)
         if "pose_source" in self.comp:
             self.comp["pose_source"].stop()
+        if self.comp.get("manual_input") is not None:
+            self.comp["manual_input"].stop()
         if "telemetry" in self.comp:
             self.comp["telemetry"].close()
         if "link_manager" in self.comp:
             self.comp["link_manager"].close_all()
+
+    def _graceful_shutdown_land(self) -> None:
+        state = self.comp["fsm"].state()
+        if state in {MissionState.INIT, MissionState.CONNECT, MissionState.ABORT}:
+            return
+
+        self._orderly_land(
+            reason_event="manual_shutdown_land",
+            safety_action="SHUTDOWN",
+            safety_reasons=["manual_shutdown"],
+            safety_reason_codes=["MANUAL_SHUTDOWN"],
+            scheduler_reason="shutdown",
+            scheduler_diagnostics={"shutdown": True},
+        )
+
+    def _orderly_land(
+        self,
+        *,
+        reason_event: str,
+        safety_action: str,
+        safety_reasons: list[str],
+        safety_reason_codes: list[str],
+        scheduler_reason: str,
+        scheduler_diagnostics: dict,
+    ) -> None:
+        if self._terminal_land_executed:
+            self._flush_terminal_telemetry(
+                safety_action=safety_action,
+                safety_reasons=safety_reasons,
+                safety_reason_codes=safety_reason_codes,
+                scheduler_reason=scheduler_reason,
+                scheduler_diagnostics=scheduler_diagnostics,
+            )
+            return
+
+        try:
+            if self.comp["fsm"].state() != MissionState.LAND:
+                self._safe_transition(MissionState.LAND)
+        except Exception:
+            logger.exception("Failed to enter LAND during shutdown")
+
+        try:
+            self.comp["telemetry"].record_event(reason_event, ok=True)
+            self.comp["follower_executor"].stop_velocity_mode(
+                self.comp["fleet"].follower_ids()
+            )
+            time.sleep(0.1)
+            self.comp["leader_executor"].execute(
+                [self._leader_land_action(self.comp["fleet"].leader_ids())]
+            )
+            self.comp["follower_executor"].land(
+                self.comp["fleet"].follower_ids(), duration=2.0
+            )
+            self._terminal_land_executed = True
+            time.sleep(3.0)
+        except Exception:
+            logger.exception("Failed graceful land during shutdown")
+
+        self._flush_terminal_telemetry(
+            safety_action=safety_action,
+            safety_reasons=safety_reasons,
+            safety_reason_codes=safety_reason_codes,
+            scheduler_reason=scheduler_reason,
+            scheduler_diagnostics=scheduler_diagnostics,
+        )
+
+    def _flush_terminal_telemetry(
+        self,
+        *,
+        safety_action: str,
+        safety_reasons: list[str],
+        safety_reason_codes: list[str],
+        scheduler_reason: str,
+        scheduler_diagnostics: dict,
+    ) -> None:
+        if self._shutdown_flushed or "telemetry" not in self.comp:
+            return
+        telemetry = self.comp["telemetry"]
+        pose_bus = self.comp.get("pose_bus")
+        if pose_bus is None:
+            return
+        snapshot = pose_bus.latest()
+        if snapshot is None:
+            return
+
+        t_elapsed = 0.0
+        measured_positions = self._measured_positions(snapshot)
+        leader_ref = self.comp["leader_ref_gen"].reference_at(t_elapsed)
+        telemetry.log(
+            TelemetryRecord(
+                t_wall=time.time(),
+                mission_state=self.comp["fsm"].state().value,
+                startup_mode=self.comp.get("startup_mode"),
+                mission_elapsed=t_elapsed,
+                readiness=self._readiness_report,
+                phase_events=telemetry.phase_events(),
+                snapshot_seq=snapshot.seq,
+                snapshot_t_meas=snapshot.t_meas,
+                measured_positions=measured_positions,
+                fresh_mask={
+                    drone_id: bool(
+                        snapshot.fresh_mask[self.comp["fleet"].id_to_index(drone_id)]
+                    )
+                    for drone_id in self.comp["fleet"].all_ids()
+                },
+                disconnected_ids=list(snapshot.disconnected_ids),
+                health={
+                    drone_id: sample.values
+                    for drone_id, sample in self.comp["health_bus"].latest().items()
+                },
+                frame_valid=None,
+                frame_condition_number=None,
+                phase_label=self._phase_label(t_elapsed),
+                leader_mode=getattr(leader_ref, "mode", None),
+                leader_reference_positions=self._leader_reference_positions(leader_ref),
+                follower_reference_positions={},
+                safety_action=safety_action,
+                safety_reasons=safety_reasons,
+                safety_reason_codes=safety_reason_codes,
+                scheduler_reason=scheduler_reason,
+                scheduler_diagnostics=scheduler_diagnostics,
+                leader_reference_source=(
+                    type(self.comp["leader_ref_gen"]).__name__
+                    if "leader_ref_gen" in self.comp
+                    else None
+                ),
+                manual_axis=self._manual_axis(),
+                manual_input_age=self._manual_input_age(),
+                leader_action_count=0,
+                follower_action_count=0,
+                follower_command_norms={},
+            )
+        )
+        self._shutdown_flushed = True
+
+    def _initialize_manual_mode(self, snapshot) -> None:
+        manual_source = self.comp.get("leader_ref_gen")
+        if manual_source is None or not hasattr(
+            manual_source, "initialize_from_measured_leaders"
+        ):
+            return
+
+        if snapshot is None:
+            return
+
+        leader_positions = {}
+        for drone_id in self.comp["fleet"].leader_ids():
+            idx = self.comp["fleet"].id_to_index(drone_id)
+            leader_positions[drone_id] = np.array(snapshot.positions[idx], dtype=float)
+        manual_source.initialize_from_measured_leaders(leader_positions)
+        self.comp["telemetry"].record_event("manual_mode_armed", ok=True)
+
+    def _poll_manual_input(self) -> None:
+        manual_input = self.comp.get("manual_input")
+        manual_state = self.comp.get("manual_leader_state")
+        if manual_input is None or manual_state is None:
+            return
+
+        intent = manual_input.poll()
+        if intent is None:
+            return
+
+        previous_axis = manual_state.snapshot().selected_axis
+        manual_state.apply_intent(intent)
+        self.comp["telemetry"].record_event(
+            "manual_intent",
+            translation_delta=list(intent.translation_delta),
+            scale_delta=intent.scale_delta,
+            rotation_delta_deg=intent.rotation_delta_deg,
+            axis_switch=intent.axis_switch,
+            target_switch=intent.target_switch,
+        )
+        current_axis = manual_state.snapshot().selected_axis
+        if intent.axis_switch and current_axis != previous_axis:
+            self.comp["telemetry"].record_event("manual_axis_switch", axis=current_axis)
+        snapshot = manual_state.snapshot()
+        if intent.target_switch:
+            self.comp["telemetry"].record_event(
+                "manual_target_switch",
+                target_mode=snapshot.target_mode,
+                leader_id=snapshot.selected_leader_id,
+            )
+
+    def _manual_axis(self) -> str | None:
+        manual_state = self.comp.get("manual_leader_state")
+        if manual_state is None:
+            return None
+        return manual_state.snapshot().selected_axis
+
+    def _phase_label(self, t_elapsed: float) -> str | None:
+        mission_profile = self.comp.get("mission_profile")
+        if mission_profile is None:
+            return None
+        return mission_profile.phase_at(t_elapsed).name
+
+    def _measured_positions(self, snapshot) -> dict[int, list[float]]:
+        return {
+            drone_id: np.array(
+                snapshot.positions[self.comp["fleet"].id_to_index(drone_id)],
+                dtype=float,
+            )
+            .round(9)
+            .tolist()
+            for drone_id in self.comp["fleet"].all_ids()
+        }
+
+    @staticmethod
+    def _leader_reference_positions(leader_ref) -> dict[int, list[float]]:
+        positions = getattr(leader_ref, "positions", {}) or {}
+        return {
+            int(drone_id): np.array(position, dtype=float).round(9).tolist()
+            for drone_id, position in positions.items()
+        }
+
+    @staticmethod
+    def _follower_reference_positions(follower_ref) -> dict[int, list[float]]:
+        if follower_ref is None or not follower_ref.valid:
+            return {}
+        return {
+            int(drone_id): np.array(position, dtype=float).round(9).tolist()
+            for drone_id, position in follower_ref.target_positions.items()
+        }
+
+    def _manual_initial_structure_reference(self):
+        manual_source = self.comp.get("leader_ref_gen")
+        if manual_source is None or not hasattr(
+            manual_source, "initial_structure_reference"
+        ):
+            return None
+        return manual_source.initial_structure_reference(0.0)
+
+    def _manual_input_age(self) -> float | None:
+        manual_state = self.comp.get("manual_leader_state")
+        if manual_state is None:
+            return None
+        snapshot = manual_state.snapshot()
+        if snapshot.last_input_t is None:
+            return None
+        return time.time() - snapshot.last_input_t
 
     def _on_pose_update(self, drone_id, pos, timestamp):
         """定位数据回调 - 直接推送到PoseBus"""
@@ -415,8 +773,17 @@ class RealMissionApp:
             self.comp["follower_executor"].land(
                 self.comp["fleet"].follower_ids(), duration=2.0
             )
+            self._terminal_land_executed = True
         except Exception as e:
             logger.error(f"Failed to land swarm: {e}")
+
+        self._flush_terminal_telemetry(
+            safety_action="ABORT",
+            safety_reasons=["emergency_land"],
+            safety_reason_codes=["EMERGENCY_LAND"],
+            scheduler_reason="emergency_land",
+            scheduler_diagnostics={"emergency_land": True},
+        )
 
         time.sleep(3.0)
 

@@ -1,5 +1,6 @@
 """主入口文件"""
 
+import argparse
 import logging
 from src.app.bootstrap import build_app
 from src.app.run_real import RealMissionApp
@@ -9,10 +10,19 @@ logging.basicConfig(
 )
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--startup-mode",
+        choices=["auto", "manual_leader"],
+        default=None,
+        help="启动模式覆盖：auto 或 manual_leader",
+    )
+    args = parser.parse_args()
+
     print("=== Crazyflie AFC Swarm ===")
     print("构建系统...")
 
-    components = build_app("config")
+    components = build_app("config", startup_mode_override=args.startup_mode)
     app = RealMissionApp(components)
 
     print("系统构建完成")

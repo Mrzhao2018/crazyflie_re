@@ -1,0 +1,9 @@
+mode: auto
+manual:
+  translation_step: 0.1
+  vertical_step: 0.1
+  scale_step: 0.05
+  rotation_step_deg: 5.0
+  default_axis: z
+  min_scale: 0.6
+  max_scale: 1.6

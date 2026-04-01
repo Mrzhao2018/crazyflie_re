@@ -15,18 +15,30 @@ except ImportError:  # pragma: no cover
 class TelemetryRecord:
     t_wall: float
     mission_state: str
+    startup_mode: str | None
+    mission_elapsed: float | None
     readiness: dict
     phase_events: list[dict]
     snapshot_seq: int
     snapshot_t_meas: float
+    measured_positions: dict
+    fresh_mask: dict
+    disconnected_ids: list[int]
     health: dict
     frame_valid: bool | None
     frame_condition_number: float | None
+    phase_label: str | None
+    leader_mode: str | None
+    leader_reference_positions: dict
+    follower_reference_positions: dict
     safety_action: str
     safety_reasons: list[str]
     safety_reason_codes: list[str]
     scheduler_reason: str | None
     scheduler_diagnostics: dict
+    leader_reference_source: str | None
+    manual_axis: str | None
+    manual_input_age: float | None
     leader_action_count: int
     follower_action_count: int
     follower_command_norms: dict

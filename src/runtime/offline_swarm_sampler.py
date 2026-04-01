@@ -104,6 +104,57 @@ def _leader_positions_at(
     return positions, leader_ref.mode
 
 
+def evaluate_offline_swarm_at_time(components: dict, t: float) -> dict[str, Any]:
+    fleet = components["fleet"]
+    frame_estimator = components["frame_estimator"]
+    follower_ref_gen = components["follower_ref_gen"]
+
+    leader_positions, leader_mode = _leader_positions_at(components, t)
+    drone_ids = fleet.all_ids()
+    ordered_positions = []
+    for drone_id in drone_ids:
+        if drone_id in leader_positions:
+            position = np.array(leader_positions[drone_id], dtype=float)
+        else:
+            position = np.zeros(3, dtype=float)
+        ordered_positions.append(position)
+
+    snapshot = PoseSnapshot(
+        seq=0,
+        t_meas=t,
+        positions=np.array(ordered_positions, dtype=float),
+        fresh_mask=np.ones(len(drone_ids), dtype=bool),
+        disconnected_ids=[],
+    )
+    frame = frame_estimator.estimate(snapshot, fleet.leader_ids())
+    follower_ref = (
+        follower_ref_gen.compute(frame.leader_positions) if frame.valid else None
+    )
+
+    return {
+        "time": float(t),
+        "phase_label": components["mission_profile"].phase_at(t).name,
+        "leader_mode": leader_mode,
+        "leader_reference_positions": {
+            drone_id: np.array(position, dtype=float).round(9).tolist()
+            for drone_id, position in leader_positions.items()
+        },
+        "follower_reference_positions": {
+            drone_id: np.array(position, dtype=float).round(9).tolist()
+            for drone_id, position in (
+                follower_ref.target_positions.items()
+                if follower_ref is not None and follower_ref.valid
+                else []
+            )
+        },
+        "follower_reference_valid": bool(follower_ref.valid)
+        if follower_ref is not None
+        else False,
+        "frame_valid": bool(frame.valid),
+        "frame_condition_number": float(frame.condition_number),
+    }
+
+
 def sample_offline_swarm(
     components: dict,
     dt: float = 0.25,

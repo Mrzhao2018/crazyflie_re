@@ -75,6 +75,27 @@ class CommConfig:
 
 
 @dataclass
+class ManualLeaderControlConfig:
+    """手动leader控制配置"""
+
+    translation_step: float = 0.1
+    vertical_step: float = 0.1
+    scale_step: float = 0.05
+    rotation_step_deg: float = 5.0
+    default_axis: Literal["x", "y", "z"] = "z"
+    min_scale: float = 0.6
+    max_scale: float = 1.6
+
+
+@dataclass
+class StartupConfig:
+    """应用启动模式配置"""
+
+    mode: Literal["auto", "manual_leader"] = "auto"
+    manual: ManualLeaderControlConfig | None = None
+
+
+@dataclass
 class SafetyConfig:
     """安全配置"""
 
@@ -103,5 +124,6 @@ class AppConfig:
     fleet: FleetConfig
     mission: MissionConfig
     comm: CommConfig
+    startup: StartupConfig
     safety: SafetyConfig
     control: ControlConfig

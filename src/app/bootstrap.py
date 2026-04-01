@@ -18,18 +18,21 @@ from ..runtime.safety_manager import SafetyManager
 from ..runtime.scheduler import CommandScheduler
 from ..runtime.telemetry import TelemetryRecorder
 from ..runtime.health_bus import HealthBus
+from ..runtime.manual_leader_state import ManualLeaderState
+from ..runtime.manual_leader_reference import ManualLeaderReferenceSource
 from .preflight import PreflightRunner
 from ..adapters.cflib_link_manager import CflibLinkManager
 from ..adapters.cflib_command_transport import CflibCommandTransport
 from ..adapters.leader_executor import LeaderExecutor
 from ..adapters.follower_executor import FollowerExecutor
 from ..adapters.lighthouse_pose_source import LighthousePoseSource
+from ..adapters.manual_input_keyboard import KeyboardManualInputSource
 
 
-def build_core_app(config_dir: str):
+def build_core_app(config_dir: str, startup_mode_override: str | None = None):
     """构建与真机无关的核心应用对象"""
     # 1. 配置
-    config = ConfigLoader.load(config_dir)
+    config = ConfigLoader.load(config_dir, startup_mode_override=startup_mode_override)
 
     # 2. Domain层
     fleet = FleetModel(config.fleet)
@@ -41,7 +44,7 @@ def build_core_app(config_dir: str):
     afc = AFCModel(stress_result, fleet)
 
     mission_profile = MissionProfile(config.mission)
-    leader_ref_gen = LeaderReferenceGenerator(mission_profile, formation, fleet)
+    auto_leader_ref_gen = LeaderReferenceGenerator(mission_profile, formation, fleet)
     follower_ref_gen = FollowerReferenceGenerator(
         formation, afc, config.safety.max_condition_number
     )
@@ -56,12 +59,28 @@ def build_core_app(config_dir: str):
     telemetry = TelemetryRecorder()
     health_bus = HealthBus()
 
+    startup_mode = config.startup.mode
+    manual_state = None
+    manual_input = None
+    leader_ref_gen = auto_leader_ref_gen
+    if startup_mode == "manual_leader":
+        if config.startup.manual is None:
+            raise ValueError("manual_leader 模式缺少 startup.manual 配置")
+        manual_state = ManualLeaderState(
+            default_axis=config.startup.manual.default_axis,
+            min_scale=config.startup.manual.min_scale,
+            max_scale=config.startup.manual.max_scale,
+        )
+        leader_ref_gen = ManualLeaderReferenceSource(formation, fleet, manual_state)
+
     components = {
         "config": config,
+        "startup_mode": startup_mode,
         "fleet": fleet,
         "formation": formation,
         "afc": afc,
         "mission_profile": mission_profile,
+        "auto_leader_ref_gen": auto_leader_ref_gen,
         "leader_ref_gen": leader_ref_gen,
         "follower_ref_gen": follower_ref_gen,
         "pose_bus": pose_bus,
@@ -72,15 +91,17 @@ def build_core_app(config_dir: str):
         "scheduler": scheduler,
         "telemetry": telemetry,
         "health_bus": health_bus,
+        "manual_leader_state": manual_state,
+        "manual_input": manual_input,
     }
 
     components["preflight"] = PreflightRunner(components)
     return components
 
 
-def build_real_app(config_dir: str):
+def build_real_app(config_dir: str, startup_mode_override: str | None = None):
     """构建包含真机适配层的完整应用对象"""
-    components = build_core_app(config_dir)
+    components = build_core_app(config_dir, startup_mode_override=startup_mode_override)
 
     link_manager = CflibLinkManager(components["fleet"])
     transport = CflibCommandTransport(link_manager)
@@ -100,6 +121,17 @@ def build_real_app(config_dir: str):
         }
     )
 
+    if components["startup_mode"] == "manual_leader":
+        manual_cfg = components["config"].startup.manual
+        if manual_cfg is None:
+            raise ValueError("manual_leader 模式缺少 startup.manual 配置")
+        components["manual_input"] = KeyboardManualInputSource(
+            translation_step=manual_cfg.translation_step,
+            vertical_step=manual_cfg.vertical_step,
+            scale_step=manual_cfg.scale_step,
+            rotation_step_deg=manual_cfg.rotation_step_deg,
+        )
+
     pose_source.register_health_callback(
         lambda drone_id, health, timestamp: components["health_bus"].update(
             drone_id, health, timestamp
@@ -109,6 +141,6 @@ def build_real_app(config_dir: str):
     return components
 
 
-def build_app(config_dir: str):
+def build_app(config_dir: str, startup_mode_override: str | None = None):
     """向后兼容：默认构建完整真机应用对象"""
-    return build_real_app(config_dir)
+    return build_real_app(config_dir, startup_mode_override=startup_mode_override)
