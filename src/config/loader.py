@@ -48,7 +48,15 @@ class ConfigLoader:
                 raise ValueError(f"阶段 {phase.name} 必须满足 t_start < t_end")
             if previous_end is not None and phase.t_start < previous_end:
                 raise ValueError("mission.phases 不能重叠且必须按时间排序")
+            if previous_end is not None and abs(phase.t_start - previous_end) > 1e-6:
+                raise ValueError("mission.phases 必须连续，不能留时间空档")
             previous_end = phase.t_end
+
+        if config.mission.phases[0].t_start != 0.0:
+            raise ValueError("mission.phases 必须从 t_start=0.0 开始")
+
+        if abs(config.mission.duration - config.mission.phases[-1].t_end) > 1e-6:
+            raise ValueError("mission.duration 必须等于最后一个 phase 的 t_end")
 
         if (
             config.mission.leader_motion.translation is not None
@@ -64,6 +72,9 @@ class ConfigLoader:
 
         if config.safety.min_vbat < 0:
             raise ValueError("min_vbat 不能小于 0；设为 0 可关闭电量检查")
+
+        if config.safety.hold_auto_land_timeout <= 0:
+            raise ValueError("hold_auto_land_timeout 必须大于 0")
 
         for freq_name in (
             "pose_log_freq",

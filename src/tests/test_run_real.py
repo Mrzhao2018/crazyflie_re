@@ -418,6 +418,7 @@ def build_components(
                 },
             )(),
             "mission": type("FakeMission", (), {"duration": 20.0})(),
+            "safety": type("FakeSafetyCfg", (), {"hold_auto_land_timeout": 0.2})(),
         },
     )()
 
@@ -513,6 +514,31 @@ assert any(
     event["event"] in {"trajectory_prepare", "formation_align"}
     for event in components["telemetry"].events
 )
+assert any(
+    event["event"] == "trajectory_budget_check"
+    for event in components["telemetry"].events
+)
+budget_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "trajectory_budget_check"
+)
+assert budget_event["details"]["fits_memory"] is True
+assert any(
+    event["event"] == "trajectory_readiness_summary"
+    for event in components["telemetry"].events
+)
+assert any(
+    event["event"] == "trajectory_state" and event["details"]["state"] == "ready"
+    for event in components["telemetry"].events
+)
+readiness_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "trajectory_readiness_summary"
+)
+assert readiness_event["details"]["ok"] is True
+assert set(readiness_event["details"]["leaders"].keys()) == {1, 2, 3, 4}
 assert len(components["follower_executor"].takeoff_calls) == 1
 
 
@@ -552,6 +578,8 @@ assert len(components["follower_executor"].land_calls) == 1
 abort_record = components["telemetry"].records[-1]
 assert abort_record.safety_action == "ABORT"
 assert abort_record.scheduler_reason == "emergency_land"
+assert abort_record.trajectory_state == "terminated"
+assert abort_record.trajectory_terminal_reason == "abort"
 assert any(
     event["event"] == "emergency_land" for event in components["telemetry"].events
 )
@@ -575,6 +603,8 @@ record = components["telemetry"].records[-2]
 terminal_record = components["telemetry"].records[-1]
 assert record.scheduler_reason == "fake_plan"
 assert terminal_record.scheduler_reason == "emergency_land"
+assert terminal_record.trajectory_state == "terminated"
+assert terminal_record.trajectory_terminal_reason == "abort"
 assert record.mission_state in {MissionState.RUN.value, MissionState.ABORT.value}
 assert record.phase_label == "formation_run"
 assert record.measured_positions[1] == [1.0, 0.0, 0.8]
@@ -611,7 +641,31 @@ app.run()
 assert any(
     event["event"] == "hold_recovered" for event in components["telemetry"].events
 )
+assert any(event["event"] == "hold_entered" for event in components["telemetry"].events)
 assert components["follower_controller"].calls >= 1
+
+
+# sustained HOLD auto-lands after timeout
+components = build_components(
+    [make_snapshot(1), make_snapshot(2), make_snapshot(3), make_snapshot(4)],
+    [
+        SafetyDecision("HOLD", ["frame"]),
+        SafetyDecision("HOLD", ["frame"]),
+        SafetyDecision("HOLD", ["frame"]),
+        SafetyDecision("HOLD", ["frame"]),
+    ],
+)
+app = RealMissionApp(components)
+components["fsm"]._state = MissionState.SETTLE
+app.run()
+assert any(
+    event["event"] == "hold_timeout_land" for event in components["telemetry"].events
+)
+timeout_record = components["telemetry"].records[-1]
+assert timeout_record.safety_action == "HOLD_TIMEOUT"
+assert timeout_record.scheduler_reason == "hold_timeout"
+assert timeout_record.trajectory_terminal_reason == "hold_timeout"
+assert len(components["follower_executor"].land_calls) == 1
 
 # start() failure path cleans up resources
 components = build_components(
@@ -662,6 +716,8 @@ assert len(components["telemetry"].records) >= 1
 shutdown_record = components["telemetry"].records[-1]
 assert shutdown_record.safety_action == "SHUTDOWN"
 assert shutdown_record.scheduler_reason == "shutdown"
+assert shutdown_record.trajectory_state == "terminated"
+assert shutdown_record.trajectory_terminal_reason == "shutdown"
 assert any(
     event["event"] == "manual_shutdown_land" for event in components["telemetry"].events
 )
@@ -692,6 +748,8 @@ assert len(components["follower_executor"].land_calls) == 1
 mission_complete_record = components["telemetry"].records[-1]
 assert mission_complete_record.safety_action == "MISSION_COMPLETE"
 assert mission_complete_record.scheduler_reason == "mission_complete"
+assert mission_complete_record.trajectory_state == "terminated"
+assert mission_complete_record.trajectory_terminal_reason == "mission_complete"
 
 
 # manual startup mode skips auto-only leader startup behavior

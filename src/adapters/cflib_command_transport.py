@@ -7,6 +7,10 @@ from cflib.utils.reset_estimator import reset_estimator
 logger = logging.getLogger(__name__)
 
 
+POLY4D_RAW_PIECE_BYTES = 132
+TRAJECTORY_MEMORY_BYTES = 4096
+
+
 class CflibCommandTransport:
     """封装cflib命令，上层不直接调用cflib"""
 
@@ -82,6 +86,14 @@ class CflibCommandTransport:
         trajectory_mems = scf.cf.mem.get_mems(MemoryElement.TYPE_TRAJ)
         if not trajectory_mems:
             raise RuntimeError(f"Drone {drone_id} has no trajectory memory")
+
+        estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
+        if start_addr + estimated_bytes > TRAJECTORY_MEMORY_BYTES:
+            raise RuntimeError(
+                "Trajectory too large for drone "
+                f"{drone_id}: {len(pieces)} pieces, estimated {estimated_bytes} bytes, "
+                f"start_addr={start_addr}, capacity={TRAJECTORY_MEMORY_BYTES} bytes"
+            )
 
         trajectory_mem = trajectory_mems[0]
         trajectory_mem.trajectory = []

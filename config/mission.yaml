@@ -13,7 +13,7 @@ leader_motion:
   trajectory_type: "poly4d"
   trajectory_start_addr: 0
   trajectory_pieces: []
-  trajectory_sample_dt: 1.0
+  trajectory_sample_dt: 1.5
 phases:
   - name: "settle"
     t_start: 0.0

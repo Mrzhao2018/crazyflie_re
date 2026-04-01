@@ -4,6 +4,7 @@ import argparse
 import logging
 from src.app.bootstrap import build_app
 from src.app.run_real import RealMissionApp
+from src.app.trajectory_budget_summary import print_trajectory_budget_summary
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -17,7 +18,15 @@ if __name__ == "__main__":
         default=None,
         help="启动模式覆盖：auto 或 manual_leader",
     )
+    parser.add_argument(
+        "--trajectory-budget",
+        action="store_true",
+        help="只输出 trajectory 预算摘要，不连接真机",
+    )
     args = parser.parse_args()
+
+    if args.trajectory_budget:
+        raise SystemExit(print_trajectory_budget_summary("config"))
 
     print("=== Crazyflie AFC Swarm ===")
     print("构建系统...")

@@ -58,6 +58,22 @@ class FakeCF:
     def __init__(self):
         self.high_level_commander = FakeHighLevelCommander()
         self.commander = FakeCommander()
+        self.mem = type(
+            "FakeMem",
+            (),
+            {
+                "get_mems": lambda self, mem_type: [
+                    type(
+                        "FakeTrajectoryMem",
+                        (),
+                        {
+                            "trajectory": [],
+                            "write_data_sync": lambda self, start_addr=0: True,
+                        },
+                    )()
+                ]
+            },
+        )()
 
 
 class FakeSCF:
@@ -107,5 +123,21 @@ executor.execute(
     ]
 )
 assert link_manager.scfs[1].cf.high_level_commander.calls[-1][0] == "start_trajectory"
+
+
+class FakePiece:
+    def __init__(self):
+        self.duration = 1.0
+        self.x = [0.0] * 8
+        self.y = [0.0] * 8
+        self.z = [0.0] * 8
+        self.yaw = [0.0] * 8
+
+
+try:
+    transport.upload_trajectory(1, [FakePiece() for _ in range(40)], start_addr=0)
+    raise AssertionError("Expected oversized trajectory upload to fail")
+except RuntimeError as exc:
+    assert "Trajectory too large" in str(exc)
 
 print("[OK] cflib transport/executor trajectory support verified")

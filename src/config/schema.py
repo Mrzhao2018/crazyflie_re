@@ -106,6 +106,7 @@ class SafetyConfig:
     max_command_norm: float = 2.0
     estimator_variance_threshold: float = 0.001
     min_vbat: float = 3.6
+    hold_auto_land_timeout: float = 3.0
 
 
 @dataclass

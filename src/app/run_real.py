@@ -7,6 +7,10 @@ from pathlib import Path
 import numpy as np
 from ..runtime.mission_fsm import MissionState
 from ..runtime.telemetry import TelemetryRecord
+from ..adapters.cflib_command_transport import (
+    POLY4D_RAW_PIECE_BYTES,
+    TRAJECTORY_MEMORY_BYTES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,9 @@ class RealMissionApp:
         self._trajectory_started = False
         self._shutdown_flushed = False
         self._terminal_land_executed = False
+        self._trajectory_state = "inactive"
+        self._trajectory_terminal_reason = None
+        self._hold_entered_at: float | None = None
         self._readiness_report = {
             "wait_for_params": {},
             "reset_estimator": {},
@@ -131,6 +138,17 @@ class RealMissionApp:
                 pieces = spec.get("pieces", [])
                 start_addr = spec.get("start_addr", 0)
                 trajectory_id = spec.get("trajectory_id", 1)
+                estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
+                fits_memory = start_addr + estimated_bytes <= TRAJECTORY_MEMORY_BYTES
+                self.comp["telemetry"].record_event(
+                    "trajectory_budget_check",
+                    drone_id=drone_id,
+                    pieces=len(pieces),
+                    estimated_bytes=estimated_bytes,
+                    start_addr=start_addr,
+                    capacity=TRAJECTORY_MEMORY_BYTES,
+                    fits_memory=fits_memory,
+                )
                 piece_count = self.comp["transport"].upload_trajectory(
                     drone_id, pieces, start_addr=start_addr
                 )
@@ -141,6 +159,8 @@ class RealMissionApp:
                     "uploaded": True,
                     "defined": True,
                     "pieces": piece_count,
+                    "estimated_bytes": estimated_bytes,
+                    "fits_memory": fits_memory,
                     "trajectory_id": trajectory_id,
                     "nominal_position": spec.get("nominal_position"),
                 }
@@ -150,8 +170,33 @@ class RealMissionApp:
                     uploaded=True,
                     defined=True,
                     pieces=piece_count,
+                    estimated_bytes=estimated_bytes,
+                    fits_memory=fits_memory,
                     trajectory_id=trajectory_id,
                     nominal_position=spec.get("nominal_position"),
+                )
+
+            self._set_trajectory_state("prepared")
+
+            self.comp["telemetry"].record_event(
+                "trajectory_readiness_summary",
+                ok=all(
+                    item.get("uploaded") and item.get("defined")
+                    for item in self._readiness_report["trajectory_prepare"].values()
+                ),
+                leaders=self._readiness_report["trajectory_prepare"],
+            )
+            self._set_trajectory_state("ready")
+            logger.info("=== Trajectory readiness summary ===")
+            for drone_id, item in self._readiness_report["trajectory_prepare"].items():
+                logger.info(
+                    "leader=%s pieces=%s est_bytes=%s fits=%s uploaded=%s defined=%s",
+                    drone_id,
+                    item.get("pieces"),
+                    item.get("estimated_bytes"),
+                    item.get("fits_memory"),
+                    item.get("uploaded"),
+                    item.get("defined"),
                 )
 
         if not self._safe_transition(MissionState.POSE_READY):
@@ -263,6 +308,7 @@ class RealMissionApp:
                 ]
             )
             self._trajectory_started = True
+            self._set_trajectory_state("running")
             self.comp["telemetry"].record_event("trajectory_start", ok=True)
 
         logger.info("系统就绪")
@@ -316,12 +362,15 @@ class RealMissionApp:
             if pre_safety.action == "HOLD":
                 logger.warning(f"Pre-safety HOLD: {pre_safety.reasons}")
                 self._enter_hold_mode()
+                if self._check_hold_timeout(time.time() - mission_start_time):
+                    break
                 time.sleep(0.1)
                 continue
 
             if self.comp["fsm"].state() == MissionState.HOLD:
                 self._safe_transition(MissionState.RUN)
                 self.comp["telemetry"].record_event("hold_recovered", ok=True)
+                self._clear_hold_tracking()
 
             t_elapsed = time.time() - mission_start_time
             self._poll_manual_input()
@@ -348,6 +397,7 @@ class RealMissionApp:
                     safety_reason_codes=["MISSION_COMPLETE"],
                     scheduler_reason="mission_complete",
                     scheduler_diagnostics={"mission_complete": True},
+                    trajectory_terminal_reason="mission_complete",
                 )
                 break
 
@@ -392,12 +442,15 @@ class RealMissionApp:
             if safety_decision.action == "HOLD":
                 logger.warning(f"HOLD triggered: {safety_decision.reasons}")
                 self._enter_hold_mode()
+                if self._check_hold_timeout(t_elapsed):
+                    break
                 time.sleep(0.1)
                 continue
 
             if self.comp["fsm"].state() == MissionState.HOLD:
                 self._safe_transition(MissionState.RUN)
                 self.comp["telemetry"].record_event("hold_recovered", ok=True)
+                self._clear_hold_tracking()
 
             # 8. 调度器生成发送计划
             plan = self.comp["scheduler"].plan(
@@ -441,6 +494,8 @@ class RealMissionApp:
                     mission_state=self.comp["fsm"].state().value,
                     startup_mode=self.comp.get("startup_mode"),
                     mission_elapsed=t_elapsed,
+                    trajectory_state=self._trajectory_state,
+                    trajectory_terminal_reason=self._trajectory_terminal_reason,
                     readiness=self._readiness_report,
                     phase_events=self.comp["telemetry"].phase_events(),
                     snapshot_seq=snapshot.seq,
@@ -522,6 +577,7 @@ class RealMissionApp:
             safety_reason_codes=["MANUAL_SHUTDOWN"],
             scheduler_reason="shutdown",
             scheduler_diagnostics={"shutdown": True},
+            trajectory_terminal_reason="shutdown",
         )
 
     def _orderly_land(
@@ -533,8 +589,10 @@ class RealMissionApp:
         safety_reason_codes: list[str],
         scheduler_reason: str,
         scheduler_diagnostics: dict,
+        trajectory_terminal_reason: str,
     ) -> None:
         if self._terminal_land_executed:
+            self._set_trajectory_state("terminated", trajectory_terminal_reason)
             self._flush_terminal_telemetry(
                 safety_action=safety_action,
                 safety_reasons=safety_reasons,
@@ -563,9 +621,11 @@ class RealMissionApp:
                 self.comp["fleet"].follower_ids(), duration=2.0
             )
             self._terminal_land_executed = True
+            self._set_trajectory_state("terminated", trajectory_terminal_reason)
             time.sleep(3.0)
         except Exception:
             logger.exception("Failed graceful land during shutdown")
+            self._set_trajectory_state("failed", trajectory_terminal_reason)
 
         self._flush_terminal_telemetry(
             safety_action=safety_action,
@@ -603,6 +663,8 @@ class RealMissionApp:
                 mission_state=self.comp["fsm"].state().value,
                 startup_mode=self.comp.get("startup_mode"),
                 mission_elapsed=t_elapsed,
+                trajectory_state=self._trajectory_state,
+                trajectory_terminal_reason=self._trajectory_terminal_reason,
                 readiness=self._readiness_report,
                 phase_events=telemetry.phase_events(),
                 snapshot_seq=snapshot.seq,
@@ -698,6 +760,18 @@ class RealMissionApp:
             return None
         return manual_state.snapshot().selected_axis
 
+    def _set_trajectory_state(
+        self, state: str, terminal_reason: str | None = None
+    ) -> None:
+        self._trajectory_state = state
+        if terminal_reason is not None:
+            self._trajectory_terminal_reason = terminal_reason
+        self.comp["telemetry"].record_event(
+            "trajectory_state",
+            state=state,
+            terminal_reason=self._trajectory_terminal_reason,
+        )
+
     def _phase_label(self, t_elapsed: float) -> str | None:
         mission_profile = self.comp.get("mission_profile")
         if mission_profile is None:
@@ -758,6 +832,7 @@ class RealMissionApp:
         logger.error("=== 紧急降落 ===")
         self.comp["telemetry"].record_event("emergency_land", ok=True)
         self.comp["fsm"].force_abort()
+        self._set_trajectory_state("terminated", "abort")
 
         # Followers先停velocity，恢复high-level权限
         self.comp["follower_executor"].stop_velocity_mode(
@@ -790,6 +865,11 @@ class RealMissionApp:
     def _enter_hold_mode(self):
         if self.comp["fsm"].state() != MissionState.HOLD:
             self._safe_transition(MissionState.HOLD)
+        if self._hold_entered_at is None:
+            self._hold_entered_at = time.time()
+            self.comp["telemetry"].record_event("hold_entered", ok=True)
+        if self._trajectory_started:
+            self._set_trajectory_state("paused")
 
         from ..runtime.command_plan import HoldAction
 
@@ -797,6 +877,39 @@ class RealMissionApp:
             HoldAction(drone_id=fid) for fid in self.comp["fleet"].follower_ids()
         ]
         self.comp["follower_executor"].execute_hold(hold_actions)
+
+    def _check_hold_timeout(self, mission_elapsed: float) -> bool:
+        if self._hold_entered_at is None:
+            return False
+
+        hold_duration = time.time() - self._hold_entered_at
+        timeout = self.comp["config"].safety.hold_auto_land_timeout
+        if hold_duration < timeout:
+            return False
+
+        self.comp["telemetry"].record_event(
+            "hold_timeout_land",
+            ok=True,
+            hold_duration=hold_duration,
+            timeout=timeout,
+            mission_elapsed=mission_elapsed,
+        )
+        self._orderly_land(
+            reason_event="hold_timeout_land",
+            safety_action="HOLD_TIMEOUT",
+            safety_reasons=["hold_timeout"],
+            safety_reason_codes=["HOLD_TIMEOUT"],
+            scheduler_reason="hold_timeout",
+            scheduler_diagnostics={
+                "hold_timeout": True,
+                "hold_duration": hold_duration,
+            },
+            trajectory_terminal_reason="hold_timeout",
+        )
+        return True
+
+    def _clear_hold_tracking(self) -> None:
+        self._hold_entered_at = None
 
     @staticmethod
     def _leader_takeoff_action(leader_ids: list[int]):

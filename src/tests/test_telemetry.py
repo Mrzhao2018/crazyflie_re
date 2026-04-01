@@ -13,6 +13,8 @@ telemetry.log(
         mission_state="RUN",
         startup_mode="auto",
         mission_elapsed=1.25,
+        trajectory_state="running",
+        trajectory_terminal_reason=None,
         readiness={"pose_ready": np.bool_(True)},
         phase_events=telemetry.phase_events(),
         snapshot_seq=1,
@@ -50,6 +52,7 @@ replay = telemetry.export_replay()
 assert len(replay["phase_events"]) == 2
 assert len(replay["records"]) == 1
 assert replay["records"][0]["mission_elapsed"] == 1.25
+assert replay["records"][0]["trajectory_state"] == "running"
 assert replay["records"][0]["measured_positions"][1] == [0.0, 0.0, 0.5]
 assert replay["records"][0]["leader_reference_positions"][1] == [0.1, 0.0, 0.5]
 

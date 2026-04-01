@@ -36,6 +36,23 @@ def _default_output_dir_for_telemetry(telemetry_path: str | Path) -> Path:
     return Path("artifacts") / telemetry_file.stem
 
 
+def resolve_telemetry_path(telemetry_path: str | None) -> Path:
+    if telemetry_path:
+        return Path(telemetry_path)
+
+    telemetry_dir = Path("telemetry")
+    candidates = sorted(
+        telemetry_dir.glob("run_real_*.jsonl"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            "No telemetry file provided and no telemetry/run_real_*.jsonl files found"
+        )
+    return candidates[0]
+
+
 def _sample_time_from_record(record: dict) -> float:
     if record.get("mission_elapsed") is not None:
         return float(record["mission_elapsed"])
@@ -199,12 +216,15 @@ def build_thesis_summary(records: list[dict]) -> dict:
 
 
 def generate_thesis_analysis(
-    telemetry_path: str = "telemetry/run_real.jsonl",
+    telemetry_path: str | None = None,
     output_dir: str | Path | None = None,
     config_dir: str = "config",
     include_all_phases: bool = False,
 ) -> ComparisonArtifacts:
-    records = _aligned_reference_records(load_records(telemetry_path), config_dir)
+    resolved_telemetry_path = resolve_telemetry_path(telemetry_path)
+    records = _aligned_reference_records(
+        load_records(str(resolved_telemetry_path)), config_dir
+    )
     formation_run_records = _filter_records_by_phase(records, "formation_run")
     active_records = records if include_all_phases else formation_run_records
 
@@ -224,7 +244,7 @@ def generate_thesis_analysis(
     output_root = (
         Path(output_dir)
         if output_dir is not None
-        else _default_output_dir_for_telemetry(telemetry_path)
+        else _default_output_dir_for_telemetry(resolved_telemetry_path)
     )
     output_root.mkdir(parents=True, exist_ok=True)
     summary_path = output_root / "trajectory_comparison_summary.json"
@@ -258,7 +278,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate thesis-grade trajectory comparison outputs."
     )
-    parser.add_argument("telemetry_path", nargs="?", default="telemetry/run_real.jsonl")
+    parser.add_argument(
+        "telemetry_path",
+        nargs="?",
+        default=None,
+        help="默认自动选择 telemetry/ 下最新的 run_real_*.jsonl",
+    )
     parser.add_argument(
         "--output-dir",
         default=None,
@@ -281,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
         config_dir=args.config_dir,
         include_all_phases=args.include_all_phases,
     )
+    selected = resolve_telemetry_path(args.telemetry_path)
+    print(f"Telemetry source: {selected}")
     print(f"Summary saved to {outputs.summary_path}")
     print(f"Overlay plot saved to {outputs.overlay_png_path}")
     print(f"Error plot saved to {outputs.error_png_path}")

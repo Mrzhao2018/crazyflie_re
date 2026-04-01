@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from src.app.trajectory_comparison import generate_thesis_analysis
+from src.app.trajectory_comparison import generate_thesis_analysis, resolve_telemetry_path
 
 
 with tempfile.TemporaryDirectory() as tmp_dir:
@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     records = [
         {
             "mission_state": "RUN",
-            "mission_elapsed": 3.5,
+            "mission_elapsed": 5.0,
             "snapshot_seq": 1,
             "snapshot_t_meas": 0.0,
             "measured_positions": {"1": [1.0, 0.0, 0.35], "5": [0.0, 0.72, 0.82]},
@@ -205,3 +205,27 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     assert outputs.summary["full_mission_summary"]["record_count"] == 2
 
 print("[OK] Trajectory-mode offline alignment verified")
+
+
+with tempfile.TemporaryDirectory() as tmp_dir:
+    tmp_root = Path(tmp_dir)
+    telemetry_dir = tmp_root / "telemetry"
+    telemetry_dir.mkdir()
+    older = telemetry_dir / "run_real_older.jsonl"
+    newer = telemetry_dir / "run_real_newer.jsonl"
+    older.write_text("{}\n", encoding="utf-8")
+    newer.write_text("{}\n", encoding="utf-8")
+    older.touch()
+    newer.touch()
+
+    cwd = Path.cwd()
+    try:
+        import os
+
+        os.chdir(tmp_root)
+        resolved = resolve_telemetry_path(None)
+        assert resolved.name == "run_real_newer.jsonl"
+    finally:
+        os.chdir(cwd)
+
+print("[OK] Latest telemetry resolution verified")

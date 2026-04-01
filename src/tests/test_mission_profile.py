@@ -4,6 +4,7 @@ import numpy as np
 
 from src.config.loader import ConfigLoader
 from src.domain.mission_profile import MissionProfile
+from src.config.schema import MissionConfig, MissionPhaseConfig
 
 
 config = ConfigLoader.load("config")
@@ -57,3 +58,45 @@ assert any(
 )
 
 print("[OK] MissionProfile contracts verified")
+
+
+broken_config = ConfigLoader.load("config")
+broken_config.mission = MissionConfig(
+    duration=10.0,
+    formation_type=broken_config.mission.formation_type,
+    nominal_positions=broken_config.mission.nominal_positions,
+    leader_motion=broken_config.mission.leader_motion,
+    phases=[
+        MissionPhaseConfig(name="settle", t_start=1.0, t_end=3.0, mode="settle"),
+        MissionPhaseConfig(
+            name="formation_run", t_start=3.0, t_end=12.0, mode="formation_run"
+        ),
+    ],
+)
+
+try:
+    ConfigLoader._validate(broken_config)
+    raise AssertionError("Expected invalid mission timing to be rejected")
+except ValueError as exc:
+    assert "duration" in str(exc) or "t_start=0.0" in str(exc)
+
+
+gap_config = ConfigLoader.load("config")
+gap_config.mission = MissionConfig(
+    duration=12.0,
+    formation_type=gap_config.mission.formation_type,
+    nominal_positions=gap_config.mission.nominal_positions,
+    leader_motion=gap_config.mission.leader_motion,
+    phases=[
+        MissionPhaseConfig(name="settle", t_start=0.0, t_end=3.0, mode="settle"),
+        MissionPhaseConfig(
+            name="formation_run", t_start=4.0, t_end=12.0, mode="formation_run"
+        ),
+    ],
+)
+
+try:
+    ConfigLoader._validate(gap_config)
+    raise AssertionError("Expected phase gap to be rejected")
+except ValueError as exc:
+    assert "连续" in str(exc)

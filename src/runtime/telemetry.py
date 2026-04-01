@@ -17,6 +17,8 @@ class TelemetryRecord:
     mission_state: str
     startup_mode: str | None
     mission_elapsed: float | None
+    trajectory_state: str | None
+    trajectory_terminal_reason: str | None
     readiness: dict
     phase_events: list[dict]
     snapshot_seq: int
