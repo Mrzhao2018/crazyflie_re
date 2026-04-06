@@ -11,6 +11,7 @@ from ..adapters.cflib_command_transport import (
     POLY4D_RAW_PIECE_BYTES,
     TRAJECTORY_MEMORY_BYTES,
 )
+from ..runtime.offline_swarm_sampler import _evaluate_trajectory_spec
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +275,30 @@ class RealMissionApp:
                 "manual_structure_align", ok=True, duration=2.0
             )
             time.sleep(2.2)
+        elif (
+            self.comp.get("startup_mode", "auto") == "auto"
+            and initial_leader_ref is not None
+            and initial_leader_ref.mode == "trajectory"
+        ):
+            trajectory_entry_positions = self._trajectory_entry_start_positions(
+                initial_leader_ref
+            )
+            if trajectory_entry_positions:
+                from ..runtime.command_plan import LeaderAction
+
+                align_action = LeaderAction(
+                    kind="batch_goto",
+                    drone_ids=self.comp["fleet"].leader_ids(),
+                    payload={"positions": trajectory_entry_positions, "duration": 2.0},
+                )
+                self.comp["leader_executor"].execute([align_action])
+                self.comp["telemetry"].record_event(
+                    "trajectory_entry_align",
+                    ok=True,
+                    duration=2.0,
+                    positions=trajectory_entry_positions,
+                )
+                time.sleep(2.2)
 
         # 验证所有无人机在空中
         snapshot = self.comp["pose_bus"].latest()
@@ -289,27 +314,6 @@ class RealMissionApp:
 
         if self.comp.get("startup_mode", "auto") == "manual_leader":
             self._initialize_manual_mode(snapshot)
-
-        leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
-        if (
-            self.comp.get("startup_mode", "auto") == "auto"
-            and leader_ref.mode == "trajectory"
-            and not self._trajectory_started
-        ):
-            from ..runtime.command_plan import LeaderAction
-
-            self.comp["leader_executor"].execute(
-                [
-                    LeaderAction(
-                        kind="start_trajectory",
-                        drone_ids=self.comp["fleet"].leader_ids(),
-                        payload=leader_ref.trajectory or {},
-                    )
-                ]
-            )
-            self._trajectory_started = True
-            self._set_trajectory_state("running")
-            self.comp["telemetry"].record_event("trajectory_start", ok=True)
 
         logger.info("系统就绪")
         self.comp["telemetry"].record_event("startup_complete", ok=True)
@@ -378,6 +382,32 @@ class RealMissionApp:
 
             if (
                 self.comp.get("startup_mode", "auto") == "auto"
+                and leader_ref.mode == "trajectory"
+                and not self._trajectory_started
+                and self._phase_label(t_elapsed) == "formation_run"
+            ):
+                from ..runtime.command_plan import LeaderAction
+
+                self.comp["leader_executor"].execute(
+                    [
+                        LeaderAction(
+                            kind="start_trajectory",
+                            drone_ids=self.comp["fleet"].leader_ids(),
+                            payload=leader_ref.trajectory or {},
+                        )
+                    ]
+                )
+                self._trajectory_started = True
+                self._set_trajectory_state("running")
+                self.comp["telemetry"].record_event(
+                    "trajectory_start",
+                    ok=True,
+                    mission_elapsed=t_elapsed,
+                    phase_label=self._phase_label(t_elapsed),
+                )
+
+            if (
+                self.comp.get("startup_mode", "auto") == "auto"
                 and t_elapsed >= self.comp["mission_profile"].total_time()
             ):
                 logger.info(
@@ -413,7 +443,8 @@ class RealMissionApp:
 
                 if frame.valid:
                     follower_ref = self.comp["follower_ref_gen"].compute(
-                        frame.leader_positions
+                        frame.leader_positions,
+                        snapshot.t_meas,
                     )
 
                 if follower_ref is not None and follower_ref.valid:
@@ -813,6 +844,15 @@ class RealMissionApp:
         ):
             return None
         return manual_source.initial_structure_reference(0.0)
+
+    def _trajectory_entry_start_positions(self, leader_ref) -> dict[int, list[float]]:
+        per_leader = (leader_ref.trajectory or {}).get("per_leader", {})
+        positions = {}
+        for drone_id, spec in per_leader.items():
+            positions[int(drone_id)] = (
+                _evaluate_trajectory_spec(spec, 0.0).round(9).tolist()
+            )
+        return positions
 
     def _manual_input_age(self) -> float | None:
         manual_state = self.comp.get("manual_leader_state")

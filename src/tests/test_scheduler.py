@@ -18,6 +18,9 @@ from src.runtime.safety_manager import SafetyDecision
 
 
 config = ConfigLoader.load("config")
+config.mission.leader_motion.trajectory_enabled = False
+config.control.gain_xy = 1.2
+config.control.gain_z = 0.4
 fleet = FleetModel(config.fleet)
 nominal = np.array(config.mission.nominal_positions)
 formation = FormationModel(nominal, fleet.leader_ids(), fleet)
@@ -47,7 +50,7 @@ snapshot = PoseSnapshot(
 )
 
 leader_ref = leader_gen.reference_at(0.0)
-follower_ref = follower_gen.compute(leader_ref.positions)
+follower_ref = follower_gen.compute(leader_ref.positions, 0.0)
 commands = controller.compute(snapshot, follower_ref, fleet.follower_ids(), fleet)
 safety = SafetyDecision(action="EXECUTE", reasons=[])
 
@@ -79,7 +82,7 @@ commands_changed = FollowerCommandSet(
         drone_id: vel + np.array([0.1, 0.0, 0.0])
         for drone_id, vel in commands.commands.items()
     },
-    diagnostics={},
+    diagnostics={"feedforward_followers": fleet.follower_ids()},
 )
 snapshot_newer = PoseSnapshot(
     seq=3,

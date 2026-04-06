@@ -47,7 +47,9 @@ class MissionPhaseConfig:
     name: str
     t_start: float
     t_end: float
-    mode: Literal["settle", "formation_run", "hold", "land"]
+    mode: Literal[
+        "settle", "trajectory_entry", "run_entry", "formation_run", "hold", "land"
+    ]
 
 
 @dataclass
@@ -116,6 +118,16 @@ class ControlConfig:
     gain: float
     damping: float
     max_velocity: float
+    feedforward_gain: float = 1.0
+    max_feedforward_velocity: float = 0.3
+    gain_xy: float | None = None
+    gain_z: float | None = None
+    feedforward_gain_xy: float | None = None
+    feedforward_gain_z: float | None = None
+    max_feedforward_velocity_xy: float | None = None
+    max_feedforward_velocity_z: float | None = None
+    radial_gain_scale_xy: float = 0.0
+    radial_feedforward_scale_xy: float = 0.0
 
 
 @dataclass

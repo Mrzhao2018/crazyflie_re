@@ -85,6 +85,24 @@ class ConfigLoader:
             if getattr(config.comm, freq_name) <= 0:
                 raise ValueError(f"{freq_name} 必须大于 0")
 
+        if config.control.feedforward_gain < 0:
+            raise ValueError("feedforward_gain 不能小于 0")
+        if config.control.max_feedforward_velocity < 0:
+            raise ValueError("max_feedforward_velocity 不能小于 0")
+        for attr in (
+            "gain_xy",
+            "gain_z",
+            "feedforward_gain_xy",
+            "feedforward_gain_z",
+            "max_feedforward_velocity_xy",
+            "max_feedforward_velocity_z",
+            "radial_gain_scale_xy",
+            "radial_feedforward_scale_xy",
+        ):
+            value = getattr(config.control, attr)
+            if value is not None and value < 0:
+                raise ValueError(f"{attr} 不能小于 0")
+
         if len(config.safety.boundary_min) != 3 or len(config.safety.boundary_max) != 3:
             raise ValueError("boundary_min 和 boundary_max 必须都是 3 维向量")
 

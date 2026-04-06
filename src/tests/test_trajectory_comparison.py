@@ -4,7 +4,10 @@ import json
 import tempfile
 from pathlib import Path
 
-from src.app.trajectory_comparison import generate_thesis_analysis, resolve_telemetry_path
+from src.app.trajectory_comparison import (
+    generate_thesis_analysis,
+    resolve_telemetry_path,
+)
 
 
 with tempfile.TemporaryDirectory() as tmp_dir:
@@ -99,7 +102,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     records = [
         {
             "mission_state": "RUN",
-            "mission_elapsed": 5.0,
+            "mission_elapsed": 6.5,
             "snapshot_seq": 1,
             "snapshot_t_meas": 0.0,
             "measured_positions": {"1": [1.0, 0.0, 0.35], "5": [0.0, 0.72, 0.82]},
@@ -133,6 +136,9 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     assert summary["formation_run_summary"]["record_count"] == 1
     assert summary["full_mission_summary"]["record_count"] == 1
     assert "formation_run" in summary["full_mission_summary"]["phase_tracking_error"]
+    assert (
+        summary["formation_run_summary"]["role_tracking_error"]["leader"]["count"] == 1
+    )
     assert outputs.overlay_png_path.exists()
     assert outputs.error_png_path.exists()
     telemetry_records = [
@@ -169,8 +175,27 @@ with tempfile.TemporaryDirectory() as tmp_dir:
         },
         {
             "mission_state": "RUN",
-            "mission_elapsed": 1.0,
+            "mission_elapsed": 0.5,
             "snapshot_seq": 2,
+            "snapshot_t_meas": 0.5,
+            "measured_positions": {"1": [0.05, 0.0, 0.5]},
+            "fresh_mask": {"1": True},
+            "disconnected_ids": [],
+            "phase_events": [],
+            "phase_label": "trajectory_entry",
+            "leader_mode": "batch_goto",
+            "leader_reference_positions": {"1": [0.0, 0.0, 0.5]},
+            "follower_reference_positions": {},
+            "safety_action": "EXECUTE",
+            "scheduler_reason": "execute",
+            "frame_valid": True,
+            "frame_condition_number": 1.0,
+            "follower_command_norms": {},
+        },
+        {
+            "mission_state": "RUN",
+            "mission_elapsed": 1.0,
+            "snapshot_seq": 3,
             "snapshot_t_meas": 1.0,
             "measured_positions": {"1": [0.1, 0.0, 0.5]},
             "fresh_mask": {"1": True},
@@ -202,7 +227,11 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     assert outputs.summary["default_phase_scope"] == "full_mission"
     assert outputs.summary_path.parent == output_dir
     assert outputs.summary["formation_run_summary"]["record_count"] == 1
-    assert outputs.summary["full_mission_summary"]["record_count"] == 2
+    assert outputs.summary["full_mission_summary"]["record_count"] == 3
+    assert (
+        "trajectory_entry"
+        in outputs.summary["full_mission_summary"]["phase_tracking_error"]
+    )
 
 print("[OK] Trajectory-mode offline alignment verified")
 

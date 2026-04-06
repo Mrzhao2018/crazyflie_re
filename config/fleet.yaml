@@ -42,5 +42,15 @@ drones:
 
 control:
   gain: 1.0
+  gain_xy: 1.2
+  gain_z: 0.9
+  radial_gain_scale_xy: 0.30
   damping: 2.0
-  max_velocity: 0.5
+  max_velocity: 0.7
+  feedforward_gain: 0.6
+  feedforward_gain_xy: 0.7
+  feedforward_gain_z: 0.35
+  radial_feedforward_scale_xy: 0.20
+  max_feedforward_velocity: 0.28
+  max_feedforward_velocity_xy: 0.30
+  max_feedforward_velocity_z: 0.12

@@ -212,7 +212,7 @@ class FakeFrameEstimator:
 
 
 class FakeFollowerRefGen:
-    def compute(self, leader_positions):
+    def compute(self, leader_positions, t_meas=None):
         return type(
             "FollowerRef",
             (),
@@ -223,6 +223,7 @@ class FakeFollowerRefGen:
                     5: np.array([0.0, 0.0, 1.0]),
                     6: np.array([0.0, 0.0, 1.0]),
                 },
+                "target_velocities": None,
             },
         )()
 
@@ -511,7 +512,12 @@ assert any(
     for batch in components["leader_executor"].actions
 )
 assert any(
-    event["event"] in {"trajectory_prepare", "formation_align"}
+    event["event"]
+    in {"trajectory_prepare", "formation_align", "trajectory_entry_align"}
+    for event in components["telemetry"].events
+)
+assert any(
+    event["event"] == "trajectory_entry_align"
     for event in components["telemetry"].events
 )
 assert any(
@@ -539,6 +545,9 @@ readiness_event = next(
 )
 assert readiness_event["details"]["ok"] is True
 assert set(readiness_event["details"]["leaders"].keys()) == {1, 2, 3, 4}
+assert not any(
+    event["event"] == "trajectory_start" for event in components["telemetry"].events
+)
 assert len(components["follower_executor"].takeoff_calls) == 1
 
 
@@ -736,6 +745,9 @@ components = build_components(
 app = RealMissionApp(components)
 components["fsm"]._state = MissionState.SETTLE
 app.run()
+assert any(
+    event["event"] == "trajectory_start" for event in components["telemetry"].events
+)
 assert any(
     event["event"] == "mission_complete" for event in components["telemetry"].events
 )

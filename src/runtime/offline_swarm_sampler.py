@@ -97,8 +97,17 @@ def _leader_positions_at(
         }, leader_ref.mode
 
     per_leader = (leader_ref.trajectory or {}).get("per_leader", {})
+    t0 = components["mission_profile"].trajectory_start_time()
+    if t < t0:
+        positions = {
+            drone_id: _evaluate_trajectory_spec(spec, 0.0)
+            for drone_id, spec in per_leader.items()
+        }
+        return positions, leader_ref.mode
+
+    t_traj = t - t0
     positions = {
-        drone_id: _evaluate_trajectory_spec(spec, t)
+        drone_id: _evaluate_trajectory_spec(spec, t_traj)
         for drone_id, spec in per_leader.items()
     }
     return positions, leader_ref.mode
@@ -128,7 +137,7 @@ def evaluate_offline_swarm_at_time(components: dict, t: float) -> dict[str, Any]
     )
     frame = frame_estimator.estimate(snapshot, fleet.leader_ids())
     follower_ref = (
-        follower_ref_gen.compute(frame.leader_positions) if frame.valid else None
+        follower_ref_gen.compute(frame.leader_positions, t) if frame.valid else None
     )
 
     return {
@@ -213,7 +222,7 @@ def sample_offline_swarm(
 
         frame = frame_estimator.estimate(snapshot, leader_ids)
         follower_ref = (
-            follower_ref_gen.compute(frame.leader_positions) if frame.valid else None
+            follower_ref_gen.compute(frame.leader_positions, t) if frame.valid else None
         )
 
         for drone_id in leader_ids:

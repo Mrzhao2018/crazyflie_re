@@ -103,7 +103,7 @@ class MissionProfile:
         self, nominal_position: np.ndarray
     ) -> list[TrajectoryPiece]:
         pieces: list[TrajectoryPiece] = []
-        phases = self._phases
+        phases = [phase for phase in self._phases if phase.mode == "formation_run"]
         sample_dt = self._leader_motion.trajectory_sample_dt
 
         for idx, phase in enumerate(phases):
@@ -121,10 +121,14 @@ class MissionProfile:
                 )
                 duration = max(seg_end_raw - seg_start, 0.1)
 
-                start_transform = self.affine_transform_at(seg_start)
-                end_transform = self.affine_transform_at(seg_end)
-                start_velocity = self.affine_velocity_at(seg_start, nominal_position)
-                end_velocity = self.affine_velocity_at(seg_end, nominal_position)
+                local_start = seg_start - phase.t_start
+                local_end = seg_end - phase.t_start
+                start_transform = self._trajectory_transform_at(local_start)
+                end_transform = self._trajectory_transform_at(local_end)
+                start_velocity = self._trajectory_velocity_at(
+                    local_start, nominal_position
+                )
+                end_velocity = self._trajectory_velocity_at(local_end, nominal_position)
 
                 start_pos = start_transform.A @ nominal_position + start_transform.b
                 end_pos = end_transform.A @ nominal_position + end_transform.b
@@ -159,13 +163,19 @@ class MissionProfile:
 
         return pieces or [
             TrajectoryPiece(
-                duration=max(self.total_time(), 0.1),
+                duration=0.1,
                 x=[0.0] * 8,
                 y=[0.0] * 8,
                 z=[0.0] * 8,
                 yaw=[0.0] * 8,
             )
         ]
+
+    def trajectory_start_time(self) -> float:
+        for phase in self._phases:
+            if phase.mode == "formation_run":
+                return phase.t_start
+        return 0.0
 
     @staticmethod
     def _linear_coeffs(displacement: float, duration: float) -> list[float]:
@@ -197,6 +207,29 @@ class MissionProfile:
             return dA @ nominal_position
         return np.zeros(3)
 
+    def _trajectory_transform_at(self, t: float) -> AffineTransform:
+        if self._leader_motion.mode == "affine_rotation":
+            return self._rotation_transform(t, self._leader_motion)
+        if self._leader_motion.mode == "hold":
+            return AffineTransform(A=np.eye(3), b=np.zeros(3))
+        raise ValueError(f"Unsupported leader motion mode: {self._leader_motion.mode}")
+
+    def _trajectory_velocity_at(
+        self, t: float, nominal_position: np.ndarray
+    ) -> np.ndarray:
+        if self._leader_motion.mode == "affine_rotation":
+            omega = self._leader_motion.angular_rate
+            angle = omega * t
+            dA = np.array(
+                [
+                    [-omega * np.sin(angle), -omega * np.cos(angle), 0.0],
+                    [omega * np.cos(angle), -omega * np.sin(angle), 0.0],
+                    [0.0, 0.0, 0.0],
+                ]
+            )
+            return dA @ nominal_position
+        return np.zeros(3)
+
     def phase_at(self, t: float) -> MissionPhase:
         for phase in self._phases:
             if phase.t_start <= t < phase.t_end:
@@ -206,7 +239,10 @@ class MissionProfile:
     def affine_transform_at(self, t: float) -> AffineTransform:
         phase = self.phase_at(t)
 
-        if phase.mode == "settle" or self._leader_motion.mode == "hold":
+        if (
+            phase.mode in {"settle", "trajectory_entry", "run_entry"}
+            or self._leader_motion.mode == "hold"
+        ):
             return AffineTransform(A=np.eye(3), b=np.zeros(3))
 
         if self._leader_motion.mode == "affine_rotation":

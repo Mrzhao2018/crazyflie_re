@@ -19,6 +19,32 @@ class FollowerController:
     def __init__(self, config: ControlConfig):
         self.gain = config.gain
         self.max_velocity = config.max_velocity
+        self.feedforward_gain = config.feedforward_gain
+        self.max_feedforward_velocity = config.max_feedforward_velocity
+        self.gain_xy = config.gain_xy if config.gain_xy is not None else config.gain
+        self.gain_z = config.gain_z if config.gain_z is not None else config.gain
+        self.feedforward_gain_xy = (
+            config.feedforward_gain_xy
+            if config.feedforward_gain_xy is not None
+            else config.feedforward_gain
+        )
+        self.feedforward_gain_z = (
+            config.feedforward_gain_z
+            if config.feedforward_gain_z is not None
+            else config.feedforward_gain
+        )
+        self.max_feedforward_velocity_xy = (
+            config.max_feedforward_velocity_xy
+            if config.max_feedforward_velocity_xy is not None
+            else config.max_feedforward_velocity
+        )
+        self.max_feedforward_velocity_z = (
+            config.max_feedforward_velocity_z
+            if config.max_feedforward_velocity_z is not None
+            else config.max_feedforward_velocity
+        )
+        self.radial_gain_scale_xy = config.radial_gain_scale_xy
+        self.radial_feedforward_scale_xy = config.radial_feedforward_scale_xy
 
     def compute(
         self,
@@ -34,6 +60,18 @@ class FollowerController:
         commands = {}
         skipped_stale = []
         missing_reference = []
+        feedforward_applied = []
+        radial_scaled_followers = []
+        follower_radii = {
+            fid: float(
+                np.linalg.norm(
+                    np.array(references.target_positions[fid], dtype=float)[:2]
+                )
+            )
+            for fid in active_follower_ids
+            if fid in references.target_positions
+        }
+        max_radius = max(follower_radii.values(), default=0.0)
 
         for fid in active_follower_ids:
             if fid not in references.target_positions:
@@ -47,10 +85,49 @@ class FollowerController:
 
             p_current = snapshot.positions[idx]
             p_target = references.target_positions[fid]
+            radius_xy = follower_radii.get(fid, 0.0)
+            radius_ratio = radius_xy / max_radius if max_radius > 1e-9 else 0.0
+            gain_scale_xy = 1.0 + self.radial_gain_scale_xy * radius_ratio
+            ff_scale_xy = 1.0 + self.radial_feedforward_scale_xy * radius_ratio
+            if gain_scale_xy > 1.0 or ff_scale_xy > 1.0:
+                radial_scaled_followers.append(fid)
 
             # P控制
             error = p_current - p_target
-            velocity = -self.gain * error
+            velocity = np.array(
+                [
+                    -(self.gain_xy * gain_scale_xy) * error[0],
+                    -(self.gain_xy * gain_scale_xy) * error[1],
+                    -self.gain_z * error[2],
+                ],
+                dtype=float,
+            )
+
+            if references.target_velocities is not None:
+                target_velocity = references.target_velocities.get(fid)
+                if target_velocity is not None:
+                    target_velocity = np.array(target_velocity, dtype=float)
+                    xy_norm = np.linalg.norm(target_velocity[:2])
+                    if xy_norm > self.max_feedforward_velocity_xy > 0:
+                        target_velocity[:2] = (
+                            target_velocity[:2]
+                            / xy_norm
+                            * self.max_feedforward_velocity_xy
+                        )
+                    if abs(target_velocity[2]) > self.max_feedforward_velocity_z > 0:
+                        target_velocity[2] = (
+                            np.sign(target_velocity[2])
+                            * self.max_feedforward_velocity_z
+                        )
+                    velocity = velocity + np.array(
+                        [
+                            self.feedforward_gain_xy * ff_scale_xy * target_velocity[0],
+                            self.feedforward_gain_xy * ff_scale_xy * target_velocity[1],
+                            self.feedforward_gain_z * target_velocity[2],
+                        ],
+                        dtype=float,
+                    )
+                    feedforward_applied.append(fid)
 
             # 限幅
             speed = np.linalg.norm(velocity)
@@ -64,5 +141,7 @@ class FollowerController:
             diagnostics={
                 "skipped_stale_followers": skipped_stale,
                 "missing_reference_followers": missing_reference,
+                "feedforward_followers": feedforward_applied,
+                "radial_scaled_followers": radial_scaled_followers,
             },
         )

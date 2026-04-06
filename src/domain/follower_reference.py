@@ -22,8 +22,12 @@ class FollowerReferenceGenerator:
         self.formation = formation_model
         self.afc = afc_model
         self.max_cond = max_condition_number
+        self._last_target_positions: dict[int, np.ndarray] | None = None
+        self._last_t_meas: float | None = None
 
-    def compute(self, leader_measurements: dict) -> FollowerReferenceSet:
+    def compute(
+        self, leader_measurements: dict, t_meas: float | None = None
+    ) -> FollowerReferenceSet:
         """从leader实测位置计算follower目标
 
         使用AFC稳态解：p_f* = -Omega_ff^{-1} Omega_fl p_l
@@ -55,11 +59,38 @@ class FollowerReferenceGenerator:
 
         # 计算稳态
         target_positions = self.afc.steady_state(leader_measurements)
+        target_velocities = self._estimate_target_velocities(target_positions, t_meas)
 
         return FollowerReferenceSet(
             follower_ids=list(target_positions.keys()),
             target_positions=target_positions,
-            target_velocities=None,
+            target_velocities=target_velocities,
             frame_condition_number=cond,
             valid=True,
         )
+
+    def _estimate_target_velocities(
+        self,
+        target_positions: dict[int, np.ndarray],
+        t_meas: float | None,
+    ) -> dict[int, np.ndarray] | None:
+        velocities = None
+        if self._last_target_positions is not None and self._last_t_meas is not None:
+            if t_meas is not None:
+                dt = float(t_meas) - self._last_t_meas
+            else:
+                dt = 0.0
+            if dt > 1e-9:
+                velocities = {}
+                for drone_id, target in target_positions.items():
+                    previous = self._last_target_positions.get(drone_id)
+                    if previous is None:
+                        continue
+                    velocities[drone_id] = (target - previous) / dt
+
+        self._last_target_positions = {
+            drone_id: np.array(target, dtype=float).copy()
+            for drone_id, target in target_positions.items()
+        }
+        self._last_t_meas = float(t_meas) if t_meas is not None else None
+        return velocities

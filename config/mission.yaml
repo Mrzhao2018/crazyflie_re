@@ -6,21 +6,25 @@ leader_motion:
   translation: [0.0, 0.0, 0.0]
   trajectory_enabled: true
   trajectory_id: 1
-  trajectory_time_scale: 1.2
+  trajectory_time_scale: 0.95
   trajectory_relative_position: false
   trajectory_relative_yaw: false
   trajectory_reversed: false
   trajectory_type: "poly4d"
   trajectory_start_addr: 0
   trajectory_pieces: []
-  trajectory_sample_dt: 1.5
+  trajectory_sample_dt: 1.2
 phases:
   - name: "settle"
     t_start: 0.0
     t_end: 4.0
     mode: "settle"
-  - name: "formation_run"
+  - name: "trajectory_entry"
     t_start: 4.0
+    t_end: 6.0
+    mode: "trajectory_entry"
+  - name: "formation_run"
+    t_start: 6.0
     t_end: 40.0
     mode: "formation_run"
 nominal_positions:
