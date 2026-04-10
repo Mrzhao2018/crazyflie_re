@@ -20,6 +20,7 @@ class TelemetryRecord:
     trajectory_state: str | None
     trajectory_terminal_reason: str | None
     readiness: dict
+    config_fingerprint: dict
     phase_events: list[dict]
     snapshot_seq: int
     snapshot_t_meas: float

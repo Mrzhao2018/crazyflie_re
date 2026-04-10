@@ -1,6 +1,7 @@
 """Startup flow quasi-system tests"""
 
 from src.app.run_real import RealMissionApp
+from src.app.mission_errors import MissionErrors
 from src.runtime.mission_fsm import MissionFSM, MissionState
 from src.tests.test_run_real import (
     FakeFleet,
@@ -37,6 +38,16 @@ def build_startup_components(connect_fail=False, preflight_ok=True, fresh=True, 
                     "readiness_reset_estimator": True,
                 },
             )(),
+            "mission": type(
+                "FakeMission",
+                (),
+                {
+                    "duration": 20.0,
+                    "leader_motion": type(
+                        "FakeLeaderMotion", (), {"trajectory_enabled": True}
+                    )(),
+                },
+            )(),
         },
     )()
 
@@ -54,6 +65,8 @@ def build_startup_components(connect_fail=False, preflight_ok=True, fresh=True, 
 
     return {
         "config": fake_config,
+        "config_dir": "config",
+        "repo_root": "repo",
         "startup_mode": "auto",
         "fsm": MissionFSM(),
         "fleet": FakeFleet(),
@@ -81,16 +94,31 @@ components = build_startup_components(connect_fail=True)
 app = RealMissionApp(components)
 assert app.start() is False
 assert components["fsm"].state() == MissionState.ABORT
+assert any(
+    event["event"] == "mission_error"
+    and event["details"]["code"] == MissionErrors.Connection.CONNECT_ALL_FAILED.code
+    for event in components["telemetry"].events
+)
 
 components = build_startup_components(preflight_ok=False)
 app = RealMissionApp(components)
 assert app.start() is False
 assert components["fsm"].state() == MissionState.ABORT
+assert any(
+    event["event"] == "mission_error"
+    and event["details"]["code"] == MissionErrors.Readiness.PREFLIGHT_FAILED.code
+    for event in components["telemetry"].events
+)
 
 components = build_startup_components(z=0.1)
 app = RealMissionApp(components)
 assert app.start() is False
 assert components["fsm"].state() == MissionState.ABORT
+assert any(
+    event["event"] == "mission_error"
+    and event["details"]["code"] == MissionErrors.Readiness.TAKEOFF_VALIDATION_FAILED.code
+    for event in components["telemetry"].events
+)
 
 components = build_startup_components()
 app = RealMissionApp(components)
@@ -100,6 +128,7 @@ assert components["telemetry"].opened is not None
 assert components["transport"].wait_calls == components["fleet"].all_ids()
 assert components["transport"].reset_calls == components["fleet"].all_ids()
 assert any(event["event"] == "startup_mode" for event in components["telemetry"].events)
+assert any(event["event"] == "config_fingerprint" for event in components["telemetry"].events)
 assert any(
     event["event"] in {"wait_for_params", "reset_estimator", "fsm_transition"}
     for event in components["telemetry"].events

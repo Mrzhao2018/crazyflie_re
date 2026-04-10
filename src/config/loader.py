@@ -10,6 +10,40 @@ class ConfigLoader:
     """从YAML文件加载配置"""
 
     @staticmethod
+    def _validate_frequency(name: str, value: float) -> None:
+        if value <= 0:
+            raise ValueError(f"{name} 必须大于 0")
+
+    @staticmethod
+    def _validate_cross_config(config: AppConfig) -> None:
+        pose_period = 1.0 / config.comm.pose_log_freq
+        follower_period = 1.0 / config.comm.follower_tx_freq
+        leader_period = 1.0 / config.comm.leader_update_freq
+
+        if config.safety.pose_timeout <= pose_period:
+            raise ValueError(
+                "pose_timeout 必须大于 pose_log_freq 对应的采样周期，否则新鲜度判断会误触发"
+            )
+
+        if config.comm.leader_update_freq > config.comm.follower_tx_freq:
+            raise ValueError("leader_update_freq 不能高于 follower_tx_freq")
+
+        if config.mission.leader_motion.trajectory_enabled:
+            sample_dt = config.mission.leader_motion.trajectory_sample_dt
+            if sample_dt < pose_period:
+                raise ValueError(
+                    "trajectory_sample_dt 不能小于 pose 采样周期，否则参考轨迹采样没有实际收益"
+                )
+            if sample_dt < follower_period:
+                raise ValueError(
+                    "trajectory_sample_dt 不能小于 follower 指令周期，否则会导致参考更新与控制周期不匹配"
+                )
+            if sample_dt < leader_period:
+                raise ValueError(
+                    "trajectory_sample_dt 不能小于 leader 更新周期，否则会导致轨迹段采样过密"
+                )
+
+    @staticmethod
     def _load_yaml_file(path: Path) -> dict:
         if not path.exists():
             raise FileNotFoundError(f"配置文件不存在: {path}")
@@ -82,8 +116,7 @@ class ConfigLoader:
             "leader_update_freq",
             "parked_hold_freq",
         ):
-            if getattr(config.comm, freq_name) <= 0:
-                raise ValueError(f"{freq_name} 必须大于 0")
+            ConfigLoader._validate_frequency(freq_name, getattr(config.comm, freq_name))
 
         if config.control.feedforward_gain < 0:
             raise ValueError("feedforward_gain 不能小于 0")
@@ -128,6 +161,8 @@ class ConfigLoader:
                 raise ValueError("manual.min_scale 必须大于 0")
             if config.startup.manual.min_scale >= config.startup.manual.max_scale:
                 raise ValueError("manual 必须满足 min_scale < max_scale")
+
+        ConfigLoader._validate_cross_config(config)
 
     @staticmethod
     def load(config_dir: str, startup_mode_override: str | None = None) -> AppConfig:

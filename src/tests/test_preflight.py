@@ -51,6 +51,8 @@ for drone_id in fleet.all_ids():
 report = runner.run()
 assert report.ok is True
 assert report.failed_codes == []
+leader_count_check = next(check for check in report.checks if check.code == "LEADER_COUNT")
+assert leader_count_check.passed is True
 assert any(check.code == "AFFINE_SPAN" for check in report.checks)
 assert any(check.code == "TRAJECTORY_READY" for check in report.checks)
 

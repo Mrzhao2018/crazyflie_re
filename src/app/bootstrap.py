@@ -1,5 +1,7 @@
 """依赖注入和对象组装"""
 
+from pathlib import Path
+
 import numpy as np
 
 from ..config.loader import ConfigLoader
@@ -31,8 +33,11 @@ from ..adapters.manual_input_keyboard import KeyboardManualInputSource
 
 def build_core_app(config_dir: str, startup_mode_override: str | None = None):
     """构建与真机无关的核心应用对象"""
+    resolved_config_dir = str(Path(config_dir).resolve())
+    repo_root = str(Path(resolved_config_dir).parent)
+
     # 1. 配置
-    config = ConfigLoader.load(config_dir, startup_mode_override=startup_mode_override)
+    config = ConfigLoader.load(resolved_config_dir, startup_mode_override=startup_mode_override)
 
     # 2. Domain层
     fleet = FleetModel(config.fleet)
@@ -75,6 +80,8 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
 
     components = {
         "config": config,
+        "config_dir": resolved_config_dir,
+        "repo_root": repo_root,
         "startup_mode": startup_mode,
         "fleet": fleet,
         "formation": formation,

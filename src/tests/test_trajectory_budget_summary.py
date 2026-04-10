@@ -5,6 +5,8 @@ from src.app.trajectory_budget_summary import build_trajectory_budget_summary
 
 summary = build_trajectory_budget_summary("config")
 assert "trajectory_enabled" in summary
+assert "config_dir" in summary
+assert "startup_mode" in summary
 assert "mission_duration" in summary
 assert "trajectory_sample_dt" in summary
 assert "trajectory_time_scale" in summary

@@ -4,4 +4,5 @@ pose_timeout: 1.0
 max_condition_number: 100.0
 max_command_norm: 2.5
 estimator_variance_threshold: 0.001
+hold_auto_land_timeout: 3.0
 min_vbat: 0.0

@@ -13,6 +13,7 @@ records = [
     {
         "mission_state": "RUN",
         "mission_elapsed": 0.0,
+        "config_fingerprint": {"config_sha256": "abc123", "startup_mode": "auto"},
         "snapshot_seq": 1,
         "snapshot_t_meas": 0.0,
         "measured_positions": {"1": [0.0, 0.0, 0.5], "5": [0.2, 0.0, 0.5]},
@@ -35,6 +36,7 @@ records = [
     {
         "mission_state": "ABORT",
         "mission_elapsed": 0.1,
+        "config_fingerprint": {"config_sha256": "abc123", "startup_mode": "auto"},
         "snapshot_seq": 2,
         "snapshot_t_meas": 0.1,
         "measured_positions": {"1": [0.2, 0.0, 0.5], "5": [0.5, 0.0, 0.5]},
@@ -65,6 +67,7 @@ assert len(loaded) == 2
 
 summary = analyze_records(loaded)
 assert summary["record_count"] == 2
+assert summary["config_fingerprint"]["config_sha256"] == "abc123"
 assert summary["event_counts"]["wait_for_params"] == 1
 assert summary["safety_counts"]["EXECUTE"] == 1
 assert summary["safety_counts"]["ABORT"] == 1

@@ -31,10 +31,18 @@ def _extract_metrics(summary: dict, source_path: Path) -> dict:
     role = formation.get("role_tracking_error", {})
     leader = role.get("leader", {})
     follower = role.get("follower", {})
+    config_fingerprint = formation.get("config_fingerprint") or summary.get(
+        "config_fingerprint"
+    )
     return {
         "run": source_path.parent.name,
         "summary_path": str(source_path),
         "alignment_time_base": summary.get("alignment_time_base"),
+        "config_sha256": (
+            (config_fingerprint or {}).get("config_sha256")
+            if isinstance(config_fingerprint, dict)
+            else None
+        ),
         "record_count": formation.get("record_count"),
         "frame_valid_rate": formation.get("frame_valid_rate"),
         "formation_mean": (formation.get("formation_error") or {}).get("mean"),
@@ -48,7 +56,45 @@ def _extract_metrics(summary: dict, source_path: Path) -> dict:
     }
 
 
-def compare_run_summaries(paths: list[str]) -> dict:
+def _evaluate_regression(row: dict, thresholds: dict[str, float | None]) -> dict:
+    checks = {}
+    failed = []
+    comparisons = {
+        "formation_rmse": ("<=", thresholds.get("formation_rmse")),
+        "frame_valid_rate": (">=", thresholds.get("frame_valid_rate")),
+        "leader_rmse": ("<=", thresholds.get("leader_rmse")),
+        "follower_rmse": ("<=", thresholds.get("follower_rmse")),
+    }
+    for metric, (op, threshold) in comparisons.items():
+        if threshold is None:
+            continue
+        value = row.get(metric)
+        passed = value is not None and (
+            value <= threshold if op == "<=" else value >= threshold
+        )
+        checks[metric] = {
+            "operator": op,
+            "threshold": threshold,
+            "value": value,
+            "passed": passed,
+        }
+        if not passed:
+            failed.append(metric)
+    return {
+        "checked": bool(checks),
+        "passed": not failed,
+        "failed_metrics": failed,
+        "checks": checks,
+    }
+
+
+def compare_run_summaries(
+    paths: list[str],
+    formation_rmse_threshold: float | None = None,
+    frame_valid_threshold: float | None = None,
+    leader_rmse_threshold: float | None = None,
+    follower_rmse_threshold: float | None = None,
+) -> dict:
     resolved = [_resolve_summary_path(path) for path in paths]
     rows = [_extract_metrics(_load_summary(path), path) for path in resolved]
     best_by_rmse = None
@@ -56,9 +102,27 @@ def compare_run_summaries(paths: list[str]) -> dict:
         valid_rows = [row for row in rows if row.get("formation_rmse") is not None]
         if valid_rows:
             best_by_rmse = min(valid_rows, key=lambda row: row["formation_rmse"])["run"]
+
+    thresholds = {
+        "formation_rmse": formation_rmse_threshold,
+        "frame_valid_rate": frame_valid_threshold,
+        "leader_rmse": leader_rmse_threshold,
+        "follower_rmse": follower_rmse_threshold,
+    }
+    regression_checked = any(value is not None for value in thresholds.values())
+    failing_runs = []
+    for row in rows:
+        if regression_checked:
+            row["regression"] = _evaluate_regression(row, thresholds)
+            if not row["regression"]["passed"]:
+                failing_runs.append(row["run"])
+
     return {
         "run_count": len(rows),
         "best_formation_rmse_run": best_by_rmse,
+        "regression_thresholds": thresholds,
+        "regression_checked": regression_checked,
+        "failing_runs": failing_runs,
         "runs": rows,
     }
 
@@ -127,12 +191,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional output json path; default prints to stdout only",
     )
+    parser.add_argument("--formation-rmse-threshold", type=float, default=None)
+    parser.add_argument("--frame-valid-threshold", type=float, default=None)
+    parser.add_argument("--leader-rmse-threshold", type=float, default=None)
+    parser.add_argument("--follower-rmse-threshold", type=float, default=None)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result = compare_run_summaries(args.paths)
+    result = compare_run_summaries(
+        args.paths,
+        formation_rmse_threshold=args.formation_rmse_threshold,
+        frame_valid_threshold=args.frame_valid_threshold,
+        leader_rmse_threshold=args.leader_rmse_threshold,
+        follower_rmse_threshold=args.follower_rmse_threshold,
+    )
     rendered = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:
         output_path = Path(args.output)

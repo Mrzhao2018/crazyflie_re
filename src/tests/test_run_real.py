@@ -12,6 +12,7 @@ from src.runtime.mission_fsm import MissionFSM, MissionState
 from src.runtime.pose_snapshot import PoseSnapshot
 from src.runtime.safety_manager import SafetyDecision
 from src.runtime.follower_controller import FollowerCommandSet
+from src.app.mission_errors import MissionErrors
 
 
 class FakeFleet:
@@ -158,6 +159,15 @@ class FakeTelemetry:
 
     def close(self):
         self.closed = True
+
+
+class FakeMission:
+    duration = 20.0
+    leader_motion = type("FakeLeaderMotion", (), {"trajectory_enabled": True})()
+
+
+class FakeConfigFingerprintCarrier:
+    mission = FakeMission()
 
 
 class FakeLeaderExecutor:
@@ -418,7 +428,18 @@ def build_components(
                     "readiness_reset_estimator": True,
                 },
             )(),
-            "mission": type("FakeMission", (), {"duration": 20.0})(),
+            "mission": type(
+                "FakeMission",
+                (),
+                {
+                    "duration": 20.0,
+                    "leader_motion": type(
+                        "FakeLeaderMotion",
+                        (),
+                        {"trajectory_enabled": leader_ref_mode == "trajectory"},
+                    )(),
+                },
+            )(),
             "safety": type("FakeSafetyCfg", (), {"hold_auto_land_timeout": 0.2})(),
         },
     )()
@@ -437,6 +458,8 @@ def build_components(
 
     return {
         "config": fake_config,
+        "config_dir": "config",
+        "repo_root": "repo",
         "startup_mode": startup_mode,
         "fsm": MissionFSM(),
         "fleet": FakeFleet(),
@@ -479,6 +502,14 @@ components = build_components(
 app = RealMissionApp(components)
 assert app.start() is False
 assert components["fsm"].state() == MissionState.ABORT
+connect_error = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "mission_error"
+)
+assert connect_error["details"]["category"] == MissionErrors.Connection.CONNECT_ALL_FAILED.category
+assert connect_error["details"]["code"] == MissionErrors.Connection.CONNECT_ALL_FAILED.code
+assert connect_error["details"]["stage"] == MissionErrors.Connection.CONNECT_ALL_FAILED.stage
 
 
 # start() preflight failure -> ABORT
@@ -488,6 +519,15 @@ components = build_components(
 app = RealMissionApp(components)
 assert app.start() is False
 assert components["fsm"].state() == MissionState.ABORT
+preflight_error = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "mission_error"
+)
+assert preflight_error["details"]["category"] == MissionErrors.Readiness.PREFLIGHT_FAILED.category
+assert preflight_error["details"]["code"] == MissionErrors.Readiness.PREFLIGHT_FAILED.code
+assert preflight_error["details"]["stage"] == MissionErrors.Readiness.PREFLIGHT_FAILED.stage
+assert preflight_error["details"]["failed_codes"] == ["BAD"]
 
 
 # start() success drives startup stages and telemetry open
@@ -505,6 +545,11 @@ assert components["telemetry_path"] == components["telemetry"].opened
 assert components["transport"].wait_calls == components["fleet"].all_ids()
 assert components["transport"].reset_calls == components["fleet"].all_ids()
 assert any(event["event"] == "startup_mode" for event in components["telemetry"].events)
+assert any(
+    event["event"] == "config_fingerprint"
+    and event["details"]["fingerprint"]["startup_mode"] == "auto"
+    for event in components["telemetry"].events
+)
 assert any(event["event"] == "health_ready" for event in components["telemetry"].events)
 assert len(components["leader_executor"].actions) >= 1
 assert any(
@@ -620,6 +665,8 @@ assert record.measured_positions[1] == [1.0, 0.0, 0.8]
 assert record.fresh_mask[1] is True
 assert record.disconnected_ids == []
 assert record.leader_mode == "trajectory"
+assert record.config_fingerprint["startup_mode"] == "auto"
+assert record.config_fingerprint["leader_count"] == 4
 assert record.health
 assert len(record.phase_events) >= 1
 assert record.startup_mode == "auto"
@@ -703,6 +750,48 @@ assert any(
     event["event"] == "health_ready" and event["details"]["ok"] is False
     for event in components["telemetry"].events
 )
+health_error = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "mission_error"
+)
+assert health_error["details"]["code"] == MissionErrors.Readiness.HEALTH_TIMEOUT.code
+assert health_error["details"]["category"] == MissionErrors.Readiness.HEALTH_TIMEOUT.category
+assert health_error["details"]["stage"] == MissionErrors.Readiness.HEALTH_TIMEOUT.stage
+
+
+# run() unexpected exception is coded as runtime error and lands urgently
+components = build_components(
+    [make_snapshot(1), make_snapshot(2)],
+    [SafetyDecision("EXECUTE", []), SafetyDecision("EXECUTE", [])],
+)
+components["follower_controller"] = type(
+    "BrokenFollowerController",
+    (),
+    {
+        "compute": lambda self, snapshot, follower_ref, follower_ids, fleet: (_ for _ in ()).throw(
+            RuntimeError("controller exploded")
+        )
+    },
+)()
+app = RealMissionApp(components)
+components["fsm"]._state = MissionState.SETTLE
+app.run()
+runtime_error = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "mission_error"
+)
+assert runtime_error["details"]["category"] == MissionErrors.Runtime.RUN_LOOP_EXCEPTION.category
+assert runtime_error["details"]["code"] == MissionErrors.Runtime.RUN_LOOP_EXCEPTION.code
+assert runtime_error["details"]["stage"] == MissionErrors.Runtime.RUN_LOOP_EXCEPTION.stage
+assert runtime_error["details"]["exception_type"] == "RuntimeError"
+assert any(
+    event["event"] == "emergency_land"
+    and event["details"].get("trigger_code") == MissionErrors.Runtime.RUN_LOOP_EXCEPTION.code
+    for event in components["telemetry"].events
+)
+assert components["fsm"].state() == MissionState.ABORT
 
 
 # shutdown() from active mission performs symmetric landing and flushes telemetry

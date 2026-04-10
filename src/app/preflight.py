@@ -49,8 +49,8 @@ class PreflightRunner:
 
         add_check(
             "LEADER_COUNT",
-            len(fleet.leader_ids()) == 4,
-            "V2 requires exactly 4 leaders",
+            len(fleet.leader_ids()) >= 4,
+            "Affine formation requires at least 4 leaders",
             actual=len(fleet.leader_ids()),
         )
 

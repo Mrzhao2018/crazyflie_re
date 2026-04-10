@@ -203,6 +203,7 @@ def build_thesis_summary(records: list[dict]) -> dict:
     summary = analyze_records(records)
     return {
         "record_count": summary.get("record_count"),
+        "config_fingerprint": summary.get("config_fingerprint"),
         "phase_counts": summary.get("phase_counts"),
         "effective_update_rate_hz": summary.get("effective_update_rate_hz"),
         "fresh_sample_rate": summary.get("fresh_sample_rate"),

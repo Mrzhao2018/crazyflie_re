@@ -11,6 +11,10 @@ from ..config.schema import CommConfig
 
 
 class CommandScheduler:
+    @staticmethod
+    def _interval_from_frequency(freq: float) -> float:
+        return 1.0 / freq
+
     def __init__(self, config: CommConfig, mission_fsm: MissionFSM | None = None):
         self.config = config
         self.mission_fsm = mission_fsm
@@ -19,9 +23,9 @@ class CommandScheduler:
         self.last_leader_update_time = 0.0
         self.last_hold_tx_time = 0.0
         self.last_follower_cmd: dict[int, object] = {}
-        self.follower_tx_interval = 1.0 / config.follower_tx_freq
-        self.leader_update_interval = 1.0 / config.leader_update_freq
-        self.hold_tx_interval = 1.0 / config.parked_hold_freq
+        self.follower_tx_interval = self._interval_from_frequency(config.follower_tx_freq)
+        self.leader_update_interval = self._interval_from_frequency(config.leader_update_freq)
+        self.hold_tx_interval = self._interval_from_frequency(config.parked_hold_freq)
         self.follower_cmd_deadband = config.follower_cmd_deadband
 
     def should_update_leaders(self) -> bool:

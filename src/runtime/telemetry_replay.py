@@ -44,6 +44,7 @@ def analyze_records(records: list[dict]) -> dict:
         for record in records
         if record.get("scheduler_reason")
     )
+    config_fingerprint = records[0].get("config_fingerprint") if records else None
 
     max_command_norm_per_drone = {}
     valid_frame_count = 0
@@ -124,6 +125,7 @@ def analyze_records(records: list[dict]) -> dict:
 
     return {
         "record_count": len(records),
+        "config_fingerprint": config_fingerprint,
         "phase_counts": {
             phase: len(values) for phase, values in phase_tracking_errors.items()
         },

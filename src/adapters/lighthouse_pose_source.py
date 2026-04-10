@@ -46,7 +46,14 @@ class LighthousePoseSource:
             health_conf.add_variable("pm.vbat", "float")
 
             sync_logger = SyncLogger(scf, [pose_conf, health_conf])
-            sync_logger.connect()
+            try:
+                sync_logger.connect()
+            except RuntimeError as exc:
+                logger.error("Lighthouse logger connect failed for drone %s: %s", drone_id, exc)
+                raise
+            except Exception as exc:
+                logger.error("Unexpected logger connect failure for drone %s: %s", drone_id, exc)
+                raise
             worker = threading.Thread(
                 target=self._logger_worker,
                 args=(drone_id, sync_logger),
@@ -65,8 +72,10 @@ class LighthousePoseSource:
         for sync_logger in self._sync_loggers.values():
             try:
                 sync_logger.disconnect()
-            except Exception:
-                pass
+            except RuntimeError as exc:
+                logger.warning("Disconnect logger failed: %s", exc)
+            except Exception as exc:
+                logger.warning("Unexpected disconnect failure: %s", exc)
         for worker in self._threads:
             worker.join(timeout=1.0)
         self._threads.clear()
@@ -106,8 +115,13 @@ class LighthousePoseSource:
             try:
                 _ts, data, _logblock = next(sync_logger)
             except StopIteration:
+                logger.info("Lighthouse logger stopped for drone %s", drone_id)
                 break
-            except Exception:
+            except RuntimeError as exc:
+                logger.warning("Lighthouse logger runtime failure for drone %s: %s", drone_id, exc)
+                break
+            except Exception as exc:
+                logger.exception("Unexpected lighthouse logger failure for drone %s: %s", drone_id, exc)
                 break
 
             if "stateEstimate.x" in data:

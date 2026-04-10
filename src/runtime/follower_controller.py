@@ -16,32 +16,28 @@ class FollowerCommandSet:
 class FollowerController:
     """Follower在线控制器 - 简单P控制"""
 
+    @staticmethod
+    def _resolve_axis_gain(value: float | None, fallback: float) -> float:
+        return fallback if value is None else value
+
     def __init__(self, config: ControlConfig):
         self.gain = config.gain
         self.max_velocity = config.max_velocity
         self.feedforward_gain = config.feedforward_gain
         self.max_feedforward_velocity = config.max_feedforward_velocity
-        self.gain_xy = config.gain_xy if config.gain_xy is not None else config.gain
-        self.gain_z = config.gain_z if config.gain_z is not None else config.gain
-        self.feedforward_gain_xy = (
-            config.feedforward_gain_xy
-            if config.feedforward_gain_xy is not None
-            else config.feedforward_gain
+        self.gain_xy = self._resolve_axis_gain(config.gain_xy, config.gain)
+        self.gain_z = self._resolve_axis_gain(config.gain_z, config.gain)
+        self.feedforward_gain_xy = self._resolve_axis_gain(
+            config.feedforward_gain_xy, config.feedforward_gain
         )
-        self.feedforward_gain_z = (
-            config.feedforward_gain_z
-            if config.feedforward_gain_z is not None
-            else config.feedforward_gain
+        self.feedforward_gain_z = self._resolve_axis_gain(
+            config.feedforward_gain_z, config.feedforward_gain
         )
-        self.max_feedforward_velocity_xy = (
-            config.max_feedforward_velocity_xy
-            if config.max_feedforward_velocity_xy is not None
-            else config.max_feedforward_velocity
+        self.max_feedforward_velocity_xy = self._resolve_axis_gain(
+            config.max_feedforward_velocity_xy, config.max_feedforward_velocity
         )
-        self.max_feedforward_velocity_z = (
-            config.max_feedforward_velocity_z
-            if config.max_feedforward_velocity_z is not None
-            else config.max_feedforward_velocity
+        self.max_feedforward_velocity_z = self._resolve_axis_gain(
+            config.max_feedforward_velocity_z, config.max_feedforward_velocity
         )
         self.radial_gain_scale_xy = config.radial_gain_scale_xy
         self.radial_feedforward_scale_xy = config.radial_feedforward_scale_xy

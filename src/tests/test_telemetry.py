@@ -16,6 +16,7 @@ telemetry.log(
         trajectory_state="running",
         trajectory_terminal_reason=None,
         readiness={"pose_ready": np.bool_(True)},
+        config_fingerprint={"config_sha256": "abc123", "startup_mode": "auto"},
         phase_events=telemetry.phase_events(),
         snapshot_seq=1,
         snapshot_t_meas=0.0,
@@ -53,6 +54,7 @@ assert len(replay["phase_events"]) == 2
 assert len(replay["records"]) == 1
 assert replay["records"][0]["mission_elapsed"] == 1.25
 assert replay["records"][0]["trajectory_state"] == "running"
+assert replay["records"][0]["config_fingerprint"]["config_sha256"] == "abc123"
 assert replay["records"][0]["measured_positions"][1] == [0.0, 0.0, 0.5]
 assert replay["records"][0]["leader_reference_positions"][1] == [0.1, 0.0, 0.5]
 
