@@ -96,6 +96,20 @@
 - follower 发包受频率限制与 deadband 限制
 - safety 动作为 `EXECUTE / HOLD / ABORT`
 - `HOLD` 持续超时后会自动降落（`hold_auto_land_timeout`）
+- follower velocity stream 带 watchdog；当速度指令流长时间未刷新时，会按 `velocity_stream_watchdog_action` 执行 `telemetry / hold / degrade`
+
+`velocity_stream_watchdog_action` 的行为差异：
+
+- `telemetry`
+  - 只记录 `velocity_stream_watchdog` 事件
+  - 不改变当前调度与执行路径
+- `hold`
+  - 记录 watchdog 事件后，立即把超时 follower 切到 HOLD
+  - `hold_entered` 会带上稳定 runtime 事件码，便于复盘
+- `degrade`
+  - 记录 watchdog 事件后，将超时 follower 放入降级集合
+  - 后续调度中这些 follower 不再走 velocity，而是通过 `parked_follower_ids` 下发 hold
+  - telemetry 会继续记录 `watchdog_degrade` / `watchdog_degrade_recovered`
 
 ### 5. Telemetry 与离线分析
 
@@ -107,6 +121,7 @@
 
 - readiness / health / phase events
 - `mission_error` 结构化错误事件，包含稳定的 `category / code / stage`
+- watchdog 结构化事件，包含稳定的 `category / code / stage`
 - snapshot 序号与测量时间
 - measured positions / leader reference / follower reference
 - frame validity / condition number
@@ -121,6 +136,19 @@
 - `connection`：链路建立和设备连接阶段失败
 - `readiness`：启动、readiness、preflight 与起飞验证阶段失败
 - `runtime`：进入主循环之后的运行期异常
+
+其中 watchdog 相关的稳定 runtime 事件码包括：
+
+- `RUNTIME_VELOCITY_STREAM_WATCHDOG`
+- `RUNTIME_WATCHDOG_HOLD`
+- `RUNTIME_WATCHDOG_DEGRADE`
+- `RUNTIME_WATCHDOG_DEGRADE_RECOVERED`
+
+说明：
+
+- 这些事件当前作为 telemetry phase events 记录，用于稳定复盘与后续自动分析
+- 它们与 `mission_error` 共享同一套 `category / code / stage` 语义，但不一定意味着任务立即失败
+- `hold` / `degrade` 属于运行期保护动作；只有后续演化为 `ABORT` 或其它终止路径时，才进入终止语义
 
 仓库内已提供的离线工具包括：
 
@@ -533,6 +561,18 @@ python -m src.tests.test_cli
 - estimator variance threshold
 - battery threshold
 - hold auto-land timeout（当前已在 `config/safety.yaml` 中显式配置）
+- velocity stream watchdog action（`telemetry / hold / degrade`）
+
+其中：
+
+- `hold_auto_land_timeout`
+  - 控制系统处于 HOLD 状态持续多久后触发自动降落
+- `velocity_stream_watchdog_action`
+  - 控制 follower velocity stream watchdog 在发现超时发送链路时的处理策略
+  - 推荐理解为：
+    - `telemetry` = 只记事件
+    - `hold` = 立刻进入 HOLD 保护
+    - `degrade` = 仅把超时 follower 降级为 hold/parked，不影响其余 follower 的 velocity 路径
 
 ### `config/startup.yaml`
 
@@ -551,6 +591,7 @@ python -m src.tests.test_cli
 - boundary 合法
 - trajectory 参数合法
 - `manual_leader` 配置合法
+- `velocity_stream_watchdog_action` 必须是 `telemetry / hold / degrade`
 
 ---
 

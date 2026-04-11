@@ -31,6 +31,8 @@ def _extract_metrics(summary: dict, source_path: Path) -> dict:
     role = formation.get("role_tracking_error", {})
     leader = role.get("leader", {})
     follower = role.get("follower", {})
+    watchdog = formation.get("watchdog_summary", {}) or {}
+    watchdog_by_mode = watchdog.get("by_mode", {}) or {}
     config_fingerprint = formation.get("config_fingerprint") or summary.get(
         "config_fingerprint"
     )
@@ -53,6 +55,13 @@ def _extract_metrics(summary: dict, source_path: Path) -> dict:
         "follower_rmse": follower.get("rmse"),
         "leader_p95": leader.get("p95"),
         "follower_p95": follower.get("p95"),
+        "watchdog_total": watchdog.get("total", 0),
+        "watchdog_telemetry_count": watchdog_by_mode.get("telemetry", 0),
+        "watchdog_hold_count": watchdog_by_mode.get("hold", 0),
+        "watchdog_degrade_count": watchdog_by_mode.get("degrade", 0),
+        "watchdog_degrade_recovered_count": watchdog_by_mode.get(
+            "degrade_recovered", 0
+        ),
     }
 
 

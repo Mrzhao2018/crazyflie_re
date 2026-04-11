@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 from ..runtime.mission_fsm import MissionState
 from ..runtime.telemetry import TelemetryRecord
+from ..runtime.follower_controller import FollowerCommandSet
 from .mission_errors import MissionErrorDefinition, MissionErrors
 from ..adapters.cflib_command_transport import (
     POLY4D_RAW_PIECE_BYTES,
@@ -17,6 +18,9 @@ from ..adapters.cflib_command_transport import (
 from ..runtime.offline_swarm_sampler import _evaluate_trajectory_spec
 
 logger = logging.getLogger(__name__)
+
+
+VELOCITY_STREAM_WATCHDOG_FACTOR = 3.0
 
 
 class RealMissionApp:
@@ -32,6 +36,7 @@ class RealMissionApp:
         self._trajectory_state = "inactive"
         self._trajectory_terminal_reason = None
         self._hold_entered_at: float | None = None
+        self._watchdog_degraded_followers: set[int] = set()
         self._readiness_report = {
             "wait_for_params": {},
             "reset_estimator": {},
@@ -67,6 +72,158 @@ class RealMissionApp:
             payload["exception_message"] = str(exception)
         payload.update(details)
         telemetry.record_event("mission_error", **payload)
+
+    def _record_executor_summary(self, event_name: str, results: list[dict]) -> None:
+        telemetry = self.comp.get("telemetry")
+        fleet = self.comp.get("fleet")
+        if telemetry is None or fleet is None:
+            return
+
+        total_successes = []
+        total_failures = []
+        groups: dict[int, dict[str, list[object]]] = {}
+        for result in results:
+            for drone_id in result.get("successes", []):
+                total_successes.append(drone_id)
+                group_id = fleet.get_radio_group(drone_id)
+                group_entry = groups.setdefault(
+                    group_id,
+                    {"drone_ids": [], "successes": [], "failures": []},
+                )
+                group_entry["drone_ids"].append(drone_id)
+                group_entry["successes"].append(drone_id)
+            for failure in result.get("failures", []):
+                total_failures.append(failure)
+                drone_id = failure.get("drone_id")
+                if drone_id is None:
+                    continue
+                group_id = fleet.get_radio_group(drone_id)
+                group_entry = groups.setdefault(
+                    group_id,
+                    {"drone_ids": [], "successes": [], "failures": []},
+                )
+                group_entry["drone_ids"].append(drone_id)
+                group_entry["failures"].append(failure)
+
+        telemetry.record_event(
+            event_name,
+            ok=not total_failures,
+            successes=total_successes,
+            failures=total_failures,
+            radio_groups=groups,
+            batch_count=len(results),
+        )
+
+    def _check_velocity_stream_watchdog(self, snapshot_t_meas: float) -> list[dict]:
+        transport = self.comp.get("transport")
+        telemetry = self.comp.get("telemetry")
+        fleet = self.comp.get("fleet")
+        config = self.comp.get("config")
+        if transport is None or telemetry is None or fleet is None or config is None:
+            return []
+
+        follower_interval = 1.0 / config.comm.follower_tx_freq
+        watchdog_timeout = follower_interval * VELOCITY_STREAM_WATCHDOG_FACTOR
+        stale_followers = []
+        for drone_id in fleet.follower_ids():
+            last_tx_time = transport.last_velocity_command_time(drone_id)
+            if last_tx_time is None:
+                continue
+            command_age = time.time() - last_tx_time
+            if command_age > watchdog_timeout:
+                stale_followers.append(
+                    {
+                        "drone_id": drone_id,
+                        "command_age": command_age,
+                        "watchdog_timeout": watchdog_timeout,
+                        "snapshot_t_meas": snapshot_t_meas,
+                    }
+                )
+
+        if stale_followers:
+            action = config.safety.velocity_stream_watchdog_action
+            telemetry.record_event(
+                "velocity_stream_watchdog",
+                ok=False,
+                category=MissionErrors.Runtime.VELOCITY_STREAM_WATCHDOG.category,
+                code=MissionErrors.Runtime.VELOCITY_STREAM_WATCHDOG.code,
+                stage=MissionErrors.Runtime.VELOCITY_STREAM_WATCHDOG.stage,
+                stale_followers=stale_followers,
+                follower_tx_freq=config.comm.follower_tx_freq,
+                action=action,
+            )
+
+            stale_ids = sorted(
+                int(item["drone_id"]) for item in stale_followers if "drone_id" in item
+            )
+            if action == "hold":
+                self._enter_hold_mode(reason="watchdog", follower_ids=stale_ids)
+            elif action == "degrade":
+                self._apply_watchdog_degrade(stale_followers)
+
+        return stale_followers
+
+    def _apply_watchdog_degrade(self, stale_followers: list[dict]) -> None:
+        stale_ids = sorted(
+            int(item["drone_id"]) for item in stale_followers if "drone_id" in item
+        )
+        if not stale_ids:
+            return
+
+        newly_degraded = [
+            drone_id
+            for drone_id in stale_ids
+            if drone_id not in self._watchdog_degraded_followers
+        ]
+        self._watchdog_degraded_followers.update(stale_ids)
+
+        self.comp["telemetry"].record_event(
+            "watchdog_degrade",
+            ok=True,
+            category=MissionErrors.Runtime.WATCHDOG_DEGRADE.category,
+            code=MissionErrors.Runtime.WATCHDOG_DEGRADE.code,
+            stage=MissionErrors.Runtime.WATCHDOG_DEGRADE.stage,
+            follower_ids=stale_ids,
+            newly_degraded=newly_degraded,
+        )
+
+    def _clear_watchdog_degrade(
+        self, *, active_commands: dict[int, object] | None = None
+    ) -> None:
+        if not self._watchdog_degraded_followers:
+            return
+
+        active_ids = set(active_commands.keys()) if active_commands else set()
+        recovered = sorted(self._watchdog_degraded_followers.intersection(active_ids))
+        if not recovered:
+            return
+
+        self._watchdog_degraded_followers.difference_update(recovered)
+        self.comp["telemetry"].record_event(
+            "watchdog_degrade_recovered",
+            ok=True,
+            category=MissionErrors.Runtime.WATCHDOG_DEGRADE_RECOVERED.category,
+            code=MissionErrors.Runtime.WATCHDOG_DEGRADE_RECOVERED.code,
+            stage=MissionErrors.Runtime.WATCHDOG_DEGRADE_RECOVERED.stage,
+            follower_ids=recovered,
+            remaining=sorted(self._watchdog_degraded_followers),
+        )
+
+    @staticmethod
+    def _split_degraded_commands(
+        commands, degraded_follower_ids: set[int]
+    ) -> tuple[dict[int, object], dict[int, object]]:
+        if commands is None:
+            return {}, {}
+
+        active_commands = {}
+        degraded_commands = {}
+        for drone_id, command in commands.commands.items():
+            if drone_id in degraded_follower_ids:
+                degraded_commands[drone_id] = command
+            else:
+                active_commands[drone_id] = command
+        return active_commands, degraded_commands
 
     def _safe_transition(self, target: MissionState) -> bool:
         try:
@@ -347,9 +504,10 @@ class RealMissionApp:
         self.comp["leader_executor"].execute(
             [self._leader_takeoff_action(self.comp["fleet"].leader_ids())]
         )
-        self.comp["follower_executor"].takeoff(
+        follower_takeoff_result = self.comp["follower_executor"].takeoff(
             self.comp["fleet"].follower_ids(), height=0.5, duration=2.0
         )
+        self._record_executor_summary("follower_takeoff_execution", [follower_takeoff_result])
 
         time.sleep(3.0)
 
@@ -617,25 +775,51 @@ class RealMissionApp:
                     self.comp["telemetry"].record_event("hold_recovered", ok=True)
                     self._clear_hold_tracking()
 
+                active_commands, _degraded_commands = self._split_degraded_commands(
+                    commands, self._watchdog_degraded_followers
+                )
+                parked_follower_ids = sorted(self._watchdog_degraded_followers)
+                filtered_commands = (
+                    FollowerCommandSet(
+                        commands=active_commands,
+                        diagnostics=commands.diagnostics,
+                    )
+                    if commands is not None
+                    else None
+                )
+
                 # 8. 调度器生成发送计划
                 plan = self.comp["scheduler"].plan(
                     snapshot,
                     self.comp["fsm"].state(),
                     leader_ref,
-                    commands,
+                    filtered_commands,
                     safety_decision,
-                    parked_follower_ids=[],
+                    parked_follower_ids=parked_follower_ids,
                 )
 
                 # 9. 执行
                 if plan.leader_actions:
-                    self.comp["leader_executor"].execute(plan.leader_actions)
+                    leader_results = self.comp["leader_executor"].execute(plan.leader_actions)
+                    self._record_executor_summary("leader_execution", leader_results)
                 if plan.follower_actions:
-                    self.comp["follower_executor"].execute_velocity(
+                    follower_velocity_result = self.comp["follower_executor"].execute_velocity(
                         plan.follower_actions
                     )
+                    self._record_executor_summary(
+                        "follower_velocity_execution",
+                        [follower_velocity_result],
+                    )
+                    success_ids = set(follower_velocity_result.get("successes", []))
+                    self._clear_watchdog_degrade(active_commands={drone_id: None for drone_id in success_ids})
                 if plan.hold_actions:
-                    self.comp["follower_executor"].execute_hold(plan.hold_actions)
+                    follower_hold_result = self.comp["follower_executor"].execute_hold(plan.hold_actions)
+                    self._record_executor_summary(
+                        "follower_hold_execution",
+                        [follower_hold_result],
+                    )
+
+                self._check_velocity_stream_watchdog(snapshot.t_meas)
 
                 if snapshot.seq > self._last_processed_seq:
                     self._last_processed_seq = snapshot.seq
@@ -788,16 +972,19 @@ class RealMissionApp:
 
         try:
             self.comp["telemetry"].record_event(reason_event, ok=True)
-            self.comp["follower_executor"].stop_velocity_mode(
+            stop_result = self.comp["follower_executor"].stop_velocity_mode(
                 self.comp["fleet"].follower_ids()
             )
+            self._record_executor_summary("follower_stop_velocity_execution", [stop_result])
             time.sleep(0.1)
-            self.comp["leader_executor"].execute(
+            leader_land_results = self.comp["leader_executor"].execute(
                 [self._leader_land_action(self.comp["fleet"].leader_ids())]
             )
-            self.comp["follower_executor"].land(
+            self._record_executor_summary("leader_land_execution", leader_land_results)
+            follower_land_result = self.comp["follower_executor"].land(
                 self.comp["fleet"].follower_ids(), duration=2.0
             )
+            self._record_executor_summary("follower_land_execution", [follower_land_result])
             self._terminal_land_executed = True
             self._set_trajectory_state("terminated", trajectory_terminal_reason)
             time.sleep(3.0)
@@ -1086,21 +1273,45 @@ class RealMissionApp:
 
         time.sleep(3.0)
 
-    def _enter_hold_mode(self):
+    def _enter_hold_mode(
+        self,
+        *,
+        reason: str = "safety",
+        follower_ids: list[int] | None = None,
+    ):
         if self.comp["fsm"].state() != MissionState.HOLD:
             self._safe_transition(MissionState.HOLD)
         if self._hold_entered_at is None:
             self._hold_entered_at = time.time()
-            self.comp["telemetry"].record_event("hold_entered", ok=True)
+            self.comp["telemetry"].record_event(
+                "hold_entered",
+                ok=True,
+                reason=reason,
+                category=(
+                    MissionErrors.Runtime.WATCHDOG_HOLD.category
+                    if reason == "watchdog"
+                    else None
+                ),
+                code=(
+                    MissionErrors.Runtime.WATCHDOG_HOLD.code
+                    if reason == "watchdog"
+                    else None
+                ),
+                stage=(
+                    MissionErrors.Runtime.WATCHDOG_HOLD.stage
+                    if reason == "watchdog"
+                    else None
+                ),
+            )
         if self._trajectory_started:
             self._set_trajectory_state("paused")
 
         from ..runtime.command_plan import HoldAction
 
-        hold_actions = [
-            HoldAction(drone_id=fid) for fid in self.comp["fleet"].follower_ids()
-        ]
-        self.comp["follower_executor"].execute_hold(hold_actions)
+        target_ids = follower_ids or self.comp["fleet"].follower_ids()
+        hold_actions = [HoldAction(drone_id=fid) for fid in target_ids]
+        hold_result = self.comp["follower_executor"].execute_hold(hold_actions)
+        self._record_executor_summary("follower_hold_execution", [hold_result])
 
     def _check_hold_timeout(self, mission_elapsed: float) -> bool:
         if self._hold_entered_at is None:

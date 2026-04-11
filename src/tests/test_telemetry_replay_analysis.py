@@ -22,6 +22,22 @@ records = [
         "phase_events": [
             {"event": "wait_for_params", "details": {"drone_id": 1}},
             {"event": "preflight", "details": {"ok": True}},
+            {
+                "event": "velocity_stream_watchdog",
+                "details": {
+                    "code": "RUNTIME_VELOCITY_STREAM_WATCHDOG",
+                    "category": "runtime",
+                    "stage": "velocity_stream_watchdog",
+                },
+            },
+            {
+                "event": "watchdog_degrade",
+                "details": {
+                    "code": "RUNTIME_WATCHDOG_DEGRADE",
+                    "category": "runtime",
+                    "stage": "watchdog_degrade",
+                },
+            },
         ],
         "phase_label": "formation_run",
         "leader_mode": "batch_goto",
@@ -45,6 +61,22 @@ records = [
         "phase_events": [
             {"event": "wait_for_params", "details": {"drone_id": 1}},
             {"event": "emergency_land", "details": {"ok": True}},
+            {
+                "event": "hold_entered",
+                "details": {
+                    "code": "RUNTIME_WATCHDOG_HOLD",
+                    "category": "runtime",
+                    "stage": "watchdog_hold",
+                },
+            },
+            {
+                "event": "watchdog_degrade_recovered",
+                "details": {
+                    "code": "RUNTIME_WATCHDOG_DEGRADE_RECOVERED",
+                    "category": "runtime",
+                    "stage": "watchdog_degrade_recovered",
+                },
+            },
         ],
         "phase_label": "formation_run",
         "leader_mode": "batch_goto",
@@ -69,6 +101,11 @@ summary = analyze_records(loaded)
 assert summary["record_count"] == 2
 assert summary["config_fingerprint"]["config_sha256"] == "abc123"
 assert summary["event_counts"]["wait_for_params"] == 1
+assert summary["watchdog_summary"]["total"] == 4
+assert summary["watchdog_summary"]["by_mode"]["telemetry"] == 1
+assert summary["watchdog_summary"]["by_mode"]["hold"] == 1
+assert summary["watchdog_summary"]["by_mode"]["degrade"] == 1
+assert summary["watchdog_summary"]["by_mode"]["degrade_recovered"] == 1
 assert summary["safety_counts"]["EXECUTE"] == 1
 assert summary["safety_counts"]["ABORT"] == 1
 assert summary["max_command_norm_per_drone"]["5"] == 0.5
@@ -88,5 +125,6 @@ assert summary["formation_error"]["max"] is not None
 
 replay = build_replay(loaded)
 assert replay["summary"]["last_mission_state"] == "ABORT"
+assert replay["summary"]["watchdog_summary"]["by_event"]["hold_entered"] == 1
 
 print("[OK] Telemetry replay analysis verified")

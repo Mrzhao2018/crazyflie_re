@@ -31,4 +31,12 @@ try:
 except ValueError as exc:
     assert "trajectory_sample_dt" in str(exc)
 
+bad_watchdog_action = ConfigLoader.load("config")
+bad_watchdog_action.safety.velocity_stream_watchdog_action = "invalid"
+try:
+    ConfigLoader._validate(bad_watchdog_action)
+    raise AssertionError("Expected watchdog action validation to fail")
+except ValueError as exc:
+    assert "velocity_stream_watchdog_action" in str(exc)
+
 print("[OK] ConfigLoader cross-config checks verified")

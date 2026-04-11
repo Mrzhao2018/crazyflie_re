@@ -20,6 +20,10 @@ with tempfile.TemporaryDirectory() as tmp_dir:
         "alignment_time_base": "mission_elapsed",
         "formation_run_summary": {
             "config_fingerprint": {"config_sha256": "sha-a"},
+            "watchdog_summary": {
+                "total": 3,
+                "by_mode": {"telemetry": 1, "hold": 2},
+            },
             "record_count": 100,
             "frame_valid_rate": 0.8,
             "formation_error": {"mean": 0.12, "rmse": 0.13, "p95": 0.2, "max": 0.25},
@@ -33,6 +37,10 @@ with tempfile.TemporaryDirectory() as tmp_dir:
         "alignment_time_base": "mission_elapsed",
         "formation_run_summary": {
             "config_fingerprint": {"config_sha256": "sha-b"},
+            "watchdog_summary": {
+                "total": 2,
+                "by_mode": {"degrade": 1, "degrade_recovered": 1},
+            },
             "record_count": 120,
             "frame_valid_rate": 0.85,
             "formation_error": {"mean": 0.09, "rmse": 0.1, "p95": 0.15, "max": 0.2},
@@ -61,7 +69,11 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     assert result["failing_runs"] == ["run_a"]
     assert result["runs"][0]["formation_rmse"] is not None
     assert result["runs"][0]["config_sha256"] == "sha-a"
+    assert result["runs"][0]["watchdog_total"] == 3
+    assert result["runs"][0]["watchdog_hold_count"] == 2
     assert result["runs"][0]["regression"]["passed"] is False
+    assert result["runs"][1]["watchdog_degrade_count"] == 1
+    assert result["runs"][1]["watchdog_degrade_recovered_count"] == 1
     assert result["runs"][1]["regression"]["passed"] is True
 
     output_json = root / "compare_runs.json"

@@ -6,6 +6,38 @@ import json
 from collections import Counter
 
 
+WATCHDOG_EVENT_CODES = {
+    "RUNTIME_VELOCITY_STREAM_WATCHDOG": "telemetry",
+    "RUNTIME_WATCHDOG_HOLD": "hold",
+    "RUNTIME_WATCHDOG_DEGRADE": "degrade",
+    "RUNTIME_WATCHDOG_DEGRADE_RECOVERED": "degrade_recovered",
+}
+
+
+def _watchdog_summary(events: list[dict]) -> dict:
+    code_counts = Counter()
+    mode_counts = Counter()
+    event_counts = Counter()
+
+    for event in events:
+        event_name = event.get("event")
+        details = event.get("details", {}) or {}
+        code = details.get("code")
+        if code not in WATCHDOG_EVENT_CODES:
+            continue
+        code_counts[code] += 1
+        mode_counts[WATCHDOG_EVENT_CODES[code]] += 1
+        if event_name:
+            event_counts[event_name] += 1
+
+    return {
+        "total": sum(code_counts.values()),
+        "by_code": dict(code_counts),
+        "by_mode": dict(mode_counts),
+        "by_event": dict(event_counts),
+    }
+
+
 def iter_records(path: str):
     with open(path, encoding="utf-8") as fh:
         for line_no, line in enumerate(fh, start=1):
@@ -45,6 +77,7 @@ def analyze_records(records: list[dict]) -> dict:
         if record.get("scheduler_reason")
     )
     config_fingerprint = records[0].get("config_fingerprint") if records else None
+    watchdog_summary = _watchdog_summary(deduped)
 
     max_command_norm_per_drone = {}
     valid_frame_count = 0
@@ -130,6 +163,7 @@ def analyze_records(records: list[dict]) -> dict:
             phase: len(values) for phase, values in phase_tracking_errors.items()
         },
         "event_counts": dict(event_counts),
+        "watchdog_summary": watchdog_summary,
         "safety_counts": dict(safety_counts),
         "scheduler_reason_counts": dict(scheduler_reason_counts),
         "first_mission_state": records[0].get("mission_state") if records else None,

@@ -110,6 +110,15 @@ class ConfigLoader:
         if config.safety.hold_auto_land_timeout <= 0:
             raise ValueError("hold_auto_land_timeout 必须大于 0")
 
+        if config.safety.velocity_stream_watchdog_action not in {
+            "telemetry",
+            "hold",
+            "degrade",
+        }:
+            raise ValueError(
+                "velocity_stream_watchdog_action 必须是 telemetry、hold 或 degrade"
+            )
+
         for freq_name in (
             "pose_log_freq",
             "follower_tx_freq",

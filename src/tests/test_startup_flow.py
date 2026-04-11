@@ -3,7 +3,7 @@
 from src.app.run_real import RealMissionApp
 from src.app.mission_errors import MissionErrors
 from src.runtime.mission_fsm import MissionFSM, MissionState
-from src.tests.test_run_real import (
+from src.tests.run_real_fixtures import (
     FakeFleet,
     FakeLinkManager,
     FakeTransport,
@@ -34,6 +34,7 @@ def build_startup_components(connect_fail=False, preflight_ok=True, fresh=True, 
                 "FakeComm",
                 (),
                 {
+                    "follower_tx_freq": 8.0,
                     "readiness_wait_for_params": True,
                     "readiness_reset_estimator": True,
                 },
@@ -131,6 +132,10 @@ assert any(event["event"] == "startup_mode" for event in components["telemetry"]
 assert any(event["event"] == "config_fingerprint" for event in components["telemetry"].events)
 assert any(
     event["event"] in {"wait_for_params", "reset_estimator", "fsm_transition"}
+    for event in components["telemetry"].events
+)
+assert any(
+    event["event"] == "follower_takeoff_execution" and event["details"]["ok"] is True
     for event in components["telemetry"].events
 )
 assert len(components["leader_executor"].actions) >= 1

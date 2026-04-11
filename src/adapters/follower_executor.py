@@ -12,25 +12,68 @@ class FollowerExecutor:
     def __init__(self, transport):
         self.transport = transport
 
+    @staticmethod
+    def _group_action_result(kind: str, successes: list[int], failures: list[dict]) -> dict:
+        return {
+            "kind": kind,
+            "successes": successes,
+            "failures": failures,
+        }
+
     def execute_velocity(self, actions: list[FollowerAction]):
         """执行速度命令"""
+        successes = []
+        failures = []
         for action in actions:
             vel = action.velocity
-            self.transport.cmd_velocity_world(action.drone_id, vel[0], vel[1], vel[2])
+            try:
+                self.transport.cmd_velocity_world(action.drone_id, vel[0], vel[1], vel[2])
+                successes.append(action.drone_id)
+            except Exception as exc:
+                failures.append({"drone_id": action.drone_id, "error": str(exc)})
+        return self._group_action_result("velocity", successes, failures)
 
     def execute_hold(self, actions: list[HoldAction]):
         """执行hold命令"""
+        successes = []
+        failures = []
         for action in actions:
-            self.transport.cmd_velocity_world(action.drone_id, 0, 0, 0)
+            try:
+                self.transport.cmd_velocity_world(action.drone_id, 0, 0, 0)
+                successes.append(action.drone_id)
+            except Exception as exc:
+                failures.append({"drone_id": action.drone_id, "error": str(exc)})
+        return self._group_action_result("hold", successes, failures)
 
     def takeoff(self, drone_ids: list[int], height: float = 0.5, duration: float = 2.0):
+        successes = []
+        failures = []
         for drone_id in drone_ids:
-            self.transport.hl_takeoff(drone_id, height, duration)
+            try:
+                self.transport.hl_takeoff(drone_id, height, duration)
+                successes.append(drone_id)
+            except Exception as exc:
+                failures.append({"drone_id": drone_id, "error": str(exc)})
+        return self._group_action_result("takeoff", successes, failures)
 
     def land(self, drone_ids: list[int], duration: float = 2.0):
+        successes = []
+        failures = []
         for drone_id in drone_ids:
-            self.transport.hl_land(drone_id, 0.0, duration)
+            try:
+                self.transport.hl_land(drone_id, 0.0, duration)
+                successes.append(drone_id)
+            except Exception as exc:
+                failures.append({"drone_id": drone_id, "error": str(exc)})
+        return self._group_action_result("land", successes, failures)
 
     def stop_velocity_mode(self, drone_ids: list[int]):
+        successes = []
+        failures = []
         for drone_id in drone_ids:
-            self.transport.notify_setpoint_stop(drone_id)
+            try:
+                self.transport.notify_setpoint_stop(drone_id)
+                successes.append(drone_id)
+            except Exception as exc:
+                failures.append({"drone_id": drone_id, "error": str(exc)})
+        return self._group_action_result("notify_stop", successes, failures)

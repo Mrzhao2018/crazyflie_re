@@ -24,7 +24,16 @@ with tempfile.TemporaryDirectory() as tmp_dir:
             "measured_positions": {"1": [0.0, 0.0, 0.5], "5": [0.2, 0.0, 0.5]},
             "fresh_mask": {"1": True, "5": True},
             "disconnected_ids": [],
-            "phase_events": [],
+            "phase_events": [
+                {
+                    "event": "velocity_stream_watchdog",
+                    "details": {
+                        "code": "RUNTIME_VELOCITY_STREAM_WATCHDOG",
+                        "category": "runtime",
+                        "stage": "velocity_stream_watchdog",
+                    },
+                }
+            ],
             "phase_label": "formation_run",
             "leader_mode": "batch_goto",
             "leader_reference_positions": {"1": [0.1, 0.0, 0.5]},
@@ -43,7 +52,16 @@ with tempfile.TemporaryDirectory() as tmp_dir:
             "measured_positions": {"1": [0.1, 0.0, 0.5], "5": [0.15, 0.0, 0.5]},
             "fresh_mask": {"1": True, "5": True},
             "disconnected_ids": [],
-            "phase_events": [],
+            "phase_events": [
+                {
+                    "event": "watchdog_degrade",
+                    "details": {
+                        "code": "RUNTIME_WATCHDOG_DEGRADE",
+                        "category": "runtime",
+                        "stage": "watchdog_degrade",
+                    },
+                }
+            ],
             "phase_label": "formation_run",
             "leader_mode": "batch_goto",
             "leader_reference_positions": {"1": [0.1, 0.0, 0.5]},
@@ -75,6 +93,8 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     assert outputs.summary["default_phase_scope"] == "formation_run"
     assert outputs.summary["alignment_time_base"] == "mission_elapsed"
     assert outputs.summary["formation_run_summary"]["effective_update_rate_hz"] == 2.0
+    assert outputs.summary["formation_run_summary"]["watchdog_summary"]["by_mode"]["telemetry"] == 1
+    assert outputs.summary["formation_run_summary"]["watchdog_summary"]["by_mode"]["degrade"] == 1
     assert (
         outputs.summary["formation_run_summary"]["phase_counts"]["formation_run"] == 4
     )

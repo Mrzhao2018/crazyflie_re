@@ -104,6 +104,27 @@ class MissionErrors:
     class Runtime:
         """用于标识进入主循环之后的运行期异常。"""
 
+        VELOCITY_STREAM_WATCHDOG = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_VELOCITY_STREAM_WATCHDOG",
+            stage="velocity_stream_watchdog",
+        )
+        WATCHDOG_HOLD = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_WATCHDOG_HOLD",
+            stage="watchdog_hold",
+        )
+        WATCHDOG_DEGRADE = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_WATCHDOG_DEGRADE",
+            stage="watchdog_degrade",
+        )
+        WATCHDOG_DEGRADE_RECOVERED = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_WATCHDOG_DEGRADE_RECOVERED",
+            stage="watchdog_degrade_recovered",
+        )
+
         RUN_LOOP_EXCEPTION = MissionErrorDefinition(
             category="runtime",
             code="RUN_LOOP_EXCEPTION",

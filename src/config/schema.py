@@ -109,6 +109,9 @@ class SafetyConfig:
     estimator_variance_threshold: float = 0.001
     min_vbat: float = 3.6
     hold_auto_land_timeout: float = 3.0
+    velocity_stream_watchdog_action: Literal[
+        "telemetry", "hold", "degrade"
+    ] = "telemetry"
 
 
 @dataclass
