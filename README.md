@@ -94,9 +94,17 @@
 - 没有新 pose，不重算 follower 控制
 - control 计算与无线发包分离
 - follower 发包受频率限制与 deadband 限制
+- follower / parked hold 的限流已按 `radio_group` 拆分，不再共用单个全局 follower 发送时钟
 - safety 动作为 `EXECUTE / HOLD / ABORT`
 - `HOLD` 持续超时后会自动降落（`hold_auto_land_timeout`）
 - follower velocity stream 带 watchdog；当速度指令流长时间未刷新时，会按 `velocity_stream_watchdog_action` 执行 `telemetry / hold / degrade`
+
+当前 Phase 1 通信链路已经具备：
+
+- group-aware follower rate limit：不同 `radio_group` 的 follower velocity 发包独立限流
+- group-aware parked hold：degrade / parked follower 会按组下发 hold，不与活跃 velocity 路径互相阻塞
+- mixed planning：同一轮 scheduler plan 中可以同时出现 active follower velocity 和 parked follower hold
+- scheduler diagnostics 已暴露 group 级信息，例如 `parked_group_counts`、`hold_tx_groups_sent`、`follower_tx_groups_sent`
 
 `velocity_stream_watchdog_action` 的行为差异：
 
@@ -122,6 +130,7 @@
 - readiness / health / phase events
 - `mission_error` 结构化错误事件，包含稳定的 `category / code / stage`
 - watchdog 结构化事件，包含稳定的 `category / code / stage`
+- watchdog / executor 事件里的 `radio_groups` 聚合摘要
 - snapshot 序号与测量时间
 - measured positions / leader reference / follower reference
 - frame validity / condition number
@@ -156,6 +165,12 @@
 - offline reference visualization
 - thesis-style trajectory comparison
 - multi-run comparison
+
+当前 replay / comparison / compare-runs 的离线摘要还可以直接看出：
+
+- watchdog 总触发次数
+- watchdog 是 `telemetry / hold / degrade / degrade_recovered` 哪一种
+- 多次 run 之间各类 watchdog 触发次数的差异
 
 ---
 
@@ -549,6 +564,12 @@ python -m src.tests.test_cli
 - pose / leader / follower 更新频率
 - follower deadband
 - readiness 相关开关
+
+补充说明：
+
+- 当前这些频率配置仍然是全局阈值
+- 但 scheduler 内部已经按 `radio_group` 维护 follower / parked hold 的独立发送状态
+- 因此现阶段的含义是：各组共享同一组频率参数，但不会再共享同一个全局发送时间戳
 
 ### `config/safety.yaml`
 

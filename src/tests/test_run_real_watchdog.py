@@ -33,6 +33,7 @@ assert watchdog_event["details"]["follower_tx_freq"] == 8.0
 assert watchdog_event["details"]["category"] == MissionErrors.Runtime.VELOCITY_STREAM_WATCHDOG.category
 assert watchdog_event["details"]["code"] == MissionErrors.Runtime.VELOCITY_STREAM_WATCHDOG.code
 assert watchdog_event["details"]["stage"] == MissionErrors.Runtime.VELOCITY_STREAM_WATCHDOG.stage
+assert watchdog_event["details"]["radio_groups"][2]["drone_ids"] == [5, 6]
 assert len(watchdog_event["details"]["stale_followers"]) == 2
 assert all(
     item["watchdog_timeout"] == (1.0 / 8.0) * VELOCITY_STREAM_WATCHDOG_FACTOR
@@ -99,6 +100,7 @@ assert degrade_event["details"]["follower_ids"] == [5, 6]
 assert degrade_event["details"]["category"] == MissionErrors.Runtime.WATCHDOG_DEGRADE.category
 assert degrade_event["details"]["code"] == MissionErrors.Runtime.WATCHDOG_DEGRADE.code
 assert degrade_event["details"]["stage"] == MissionErrors.Runtime.WATCHDOG_DEGRADE.stage
+assert degrade_event["details"]["radio_groups"][2]["drone_ids"] == [5, 6]
 assert [ids for ids in components["scheduler"].parked_history if ids] == [[5, 6]]
 hold_summary = next(
     event
@@ -127,5 +129,6 @@ recovered_event = next(
 assert recovered_event["details"]["category"] == MissionErrors.Runtime.WATCHDOG_DEGRADE_RECOVERED.category
 assert recovered_event["details"]["code"] == MissionErrors.Runtime.WATCHDOG_DEGRADE_RECOVERED.code
 assert recovered_event["details"]["stage"] == MissionErrors.Runtime.WATCHDOG_DEGRADE_RECOVERED.stage
+assert recovered_event["details"]["radio_groups"][2]["drone_ids"] == [5]
 
 print("[OK] RealMissionApp velocity watchdog verified")

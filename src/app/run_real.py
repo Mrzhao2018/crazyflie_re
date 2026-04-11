@@ -45,6 +45,38 @@ class RealMissionApp:
         }
         self._config_fingerprint = self._build_config_fingerprint()
 
+    def _radio_group_summary(self, drone_ids: list[int]) -> dict[int, dict[str, list[int]]]:
+        fleet = self.comp.get("fleet")
+        if fleet is None:
+            return {}
+        groups: dict[int, dict[str, list[int]]] = {}
+        for drone_id in drone_ids:
+            group_id = fleet.get_radio_group(drone_id)
+            entry = groups.setdefault(group_id, {"drone_ids": []})
+            entry["drone_ids"].append(drone_id)
+        return groups
+
+    def _radio_group_item_summary(
+        self,
+        items: list[dict],
+        *,
+        drone_key: str = "drone_id",
+        item_key: str = "items",
+    ) -> dict[int, dict[str, list[object]]]:
+        fleet = self.comp.get("fleet")
+        if fleet is None:
+            return {}
+        groups: dict[int, dict[str, list[object]]] = {}
+        for item in items:
+            drone_id = item.get(drone_key)
+            if drone_id is None:
+                continue
+            group_id = fleet.get_radio_group(drone_id)
+            entry = groups.setdefault(group_id, {"drone_ids": [], item_key: []})
+            entry["drone_ids"].append(drone_id)
+            entry[item_key].append(item)
+        return groups
+
     def _record_error_event(
         self,
         *,
@@ -142,6 +174,10 @@ class RealMissionApp:
 
         if stale_followers:
             action = config.safety.velocity_stream_watchdog_action
+            stale_group_summary = self._radio_group_item_summary(
+                stale_followers,
+                item_key="stale_followers",
+            )
             telemetry.record_event(
                 "velocity_stream_watchdog",
                 ok=False,
@@ -149,6 +185,7 @@ class RealMissionApp:
                 code=MissionErrors.Runtime.VELOCITY_STREAM_WATCHDOG.code,
                 stage=MissionErrors.Runtime.VELOCITY_STREAM_WATCHDOG.stage,
                 stale_followers=stale_followers,
+                radio_groups=stale_group_summary,
                 follower_tx_freq=config.comm.follower_tx_freq,
                 action=action,
             )
@@ -184,6 +221,7 @@ class RealMissionApp:
             code=MissionErrors.Runtime.WATCHDOG_DEGRADE.code,
             stage=MissionErrors.Runtime.WATCHDOG_DEGRADE.stage,
             follower_ids=stale_ids,
+            radio_groups=self._radio_group_summary(stale_ids),
             newly_degraded=newly_degraded,
         )
 
@@ -206,6 +244,7 @@ class RealMissionApp:
             code=MissionErrors.Runtime.WATCHDOG_DEGRADE_RECOVERED.code,
             stage=MissionErrors.Runtime.WATCHDOG_DEGRADE_RECOVERED.stage,
             follower_ids=recovered,
+            radio_groups=self._radio_group_summary(recovered),
             remaining=sorted(self._watchdog_degraded_followers),
         )
 

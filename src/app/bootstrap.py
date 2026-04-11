@@ -60,7 +60,7 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
     follower_controller = FollowerController(config.control)
     fsm = MissionFSM()
     safety = SafetyManager(config.safety, fleet)
-    scheduler = CommandScheduler(config.comm, fsm)
+    scheduler = CommandScheduler(config.comm, fsm, fleet)
     telemetry = TelemetryRecorder()
     health_bus = HealthBus()
 
