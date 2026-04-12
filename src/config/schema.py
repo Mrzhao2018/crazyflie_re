@@ -38,6 +38,13 @@ class LeaderMotionConfig:
     trajectory_start_addr: int = 0
     trajectory_pieces: list[dict] | None = None
     trajectory_sample_dt: float = 5.0
+    condition_penalty_enabled: bool = False
+    condition_soft_limit: float = 100.0
+    condition_penalty_scale: float = 0.0
+    condition_stress_enabled: bool = False
+    condition_stress_axis: Literal["x", "y", "z"] = "x"
+    condition_stress_min_scale: float = 1.0
+    condition_stress_period: float = 4.0
 
 
 @dataclass
@@ -133,6 +140,9 @@ class ControlConfig:
     max_feedforward_velocity_z: float | None = None
     radial_gain_scale_xy: float = 0.0
     radial_feedforward_scale_xy: float = 0.0
+    time_delay_compensation_enabled: bool = False
+    estimated_total_delay_ms: float = 0.0
+    delay_prediction_gain: float = 1.0
 
 
 @dataclass

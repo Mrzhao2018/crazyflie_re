@@ -14,6 +14,9 @@ leader_motion:
   trajectory_start_addr: 0
   trajectory_pieces: []
   trajectory_sample_dt: 1.2
+  condition_penalty_enabled: false
+  condition_soft_limit: 100.0
+  condition_penalty_scale: 0.0
 phases:
   - name: "settle"
     t_start: 0.0

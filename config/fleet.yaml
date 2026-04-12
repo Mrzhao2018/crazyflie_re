@@ -54,3 +54,6 @@ control:
   max_feedforward_velocity: 0.28
   max_feedforward_velocity_xy: 0.30
   max_feedforward_velocity_z: 0.12
+  time_delay_compensation_enabled: false
+  estimated_total_delay_ms: 0.0
+  delay_prediction_gain: 1.0

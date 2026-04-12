@@ -82,4 +82,122 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     assert rendered["all_frame_valid"] is True
     assert '"sample_count"' in result.stdout
 
+with tempfile.TemporaryDirectory() as tmp_dir:
+    output_path = Path(tmp_dir) / "baseline_results.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "generate_baseline_sweep.py",
+            "--grid",
+            "quick",
+            "--limit-trials",
+            "2",
+            "--dt",
+            "5.0",
+            "--total-time",
+            "10.0",
+            "--output",
+            str(output_path),
+            "--formation-rmse-threshold",
+            "1.0",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered = json.loads(output_path.read_text(encoding="utf-8"))
+    assert rendered["trial_count"] == 2
+    assert rendered["best_trial"] is not None
+    assert '"trial_count"' in result.stdout
+
+with tempfile.TemporaryDirectory() as tmp_dir:
+    output_path = Path(tmp_dir) / "delay_compensation_ablation.json"
+    baseline_path = Path(tmp_dir) / "baseline_results.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "generate_baseline_sweep.py",
+            "--grid",
+            "quick",
+            "--limit-trials",
+            "1",
+            "--dt",
+            "5.0",
+            "--total-time",
+            "10.0",
+            "--output",
+            str(baseline_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "generate_delay_compensation_ablation.py",
+            "--dt",
+            "5.0",
+            "--total-time",
+            "10.0",
+            "--output",
+            str(output_path),
+            "--estimated-total-delay-ms",
+            "50.0",
+            "--baseline-results",
+            str(baseline_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(rendered["trials"]) == 2
+    assert '"comparison"' in result.stdout
+
+with tempfile.TemporaryDirectory() as tmp_dir:
+    output_path = Path(tmp_dir) / "trajectory_condition_ablation.json"
+    baseline_path = Path(tmp_dir) / "baseline_results.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "generate_baseline_sweep.py",
+            "--grid",
+            "quick",
+            "--limit-trials",
+            "1",
+            "--dt",
+            "5.0",
+            "--total-time",
+            "10.0",
+            "--output",
+            str(baseline_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "generate_trajectory_condition_ablation.py",
+            "--dt",
+            "5.0",
+            "--total-time",
+            "10.0",
+            "--output",
+            str(output_path),
+            "--condition-soft-limit",
+            "3.05",
+            "--baseline-results",
+            str(baseline_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(rendered["trials"]) == 2
+    assert '"comparison"' in result.stdout
+
 print("[OK] Unified CLI verified")

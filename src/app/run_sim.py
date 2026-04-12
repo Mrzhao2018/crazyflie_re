@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from .bootstrap import build_core_app
-from ..runtime.offline_swarm_sampler import sample_offline_swarm
+from ..runtime.offline_swarm_sampler import simulate_offline_closed_loop
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,12 +31,13 @@ def build_offline_smoke_summary(
     total_time: float | None = None,
 ) -> dict:
     components = build_core_app(config_dir)
-    replay = sample_offline_swarm(components, dt=dt, total_time=total_time)
+    replay = simulate_offline_closed_loop(components, dt=dt, total_time=total_time)
+    performance = replay.performance_summary()
     return {
         "config_dir": components.get("config_dir"),
         "startup_mode": components.get("startup_mode"),
         "sample_count": len(replay.times),
-        "drone_ids": replay.drone_ids,
+        "drone_ids": components["fleet"].all_ids(),
         "leader_ids": components["fleet"].leader_ids(),
         "follower_ids": components["fleet"].follower_ids(),
         "phase_labels": sorted(set(replay.phase_labels)),
@@ -47,6 +48,15 @@ def build_offline_smoke_summary(
         "leader_modes": sorted(set(replay.leader_modes)),
         "first_time": replay.times[0] if replay.times else None,
         "last_time": replay.times[-1] if replay.times else None,
+        "formation_rmse": (performance.get("formation_error") or {}).get("rmse"),
+        "formation_mean": (performance.get("formation_error") or {}).get("mean"),
+        "formation_p95": (performance.get("formation_error") or {}).get("p95"),
+        "leader_rmse": ((performance.get("role_tracking_error") or {}).get("leader") or {}).get("rmse"),
+        "follower_rmse": ((performance.get("role_tracking_error") or {}).get("follower") or {}).get("rmse"),
+        "frame_valid_rate": performance.get("frame_valid_rate"),
+        "fresh_sample_rate": performance.get("fresh_sample_rate"),
+        "phase_tracking_error": performance.get("phase_tracking_error"),
+        "trajectory_quality_summary": performance.get("trajectory_quality_summary"),
     }
 
 

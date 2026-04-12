@@ -79,6 +79,37 @@ assert any(
 assert any(
     any(abs(coeff) > 0 for coeff in piece.x[2:4]) for piece in leader_a["pieces"]
 )
+quality_summary = trajectory_profile.trajectory_quality_summary()
+assert quality_summary["condition_number_max"] is not None
+assert quality_summary["condition_number_min"] is not None
+assert quality_summary["penalized_samples"] >= 0
+
+penalty_config = ConfigLoader.load("config")
+penalty_config.mission.phases = config.mission.phases
+penalty_config.mission.leader_motion.trajectory_enabled = True
+penalty_config.mission.leader_motion.condition_penalty_enabled = True
+penalty_config.mission.leader_motion.condition_stress_enabled = True
+penalty_config.mission.leader_motion.condition_stress_min_scale = 0.15
+penalty_config.mission.leader_motion.condition_soft_limit = 3.05
+penalty_config.mission.leader_motion.condition_penalty_scale = 1.0
+penalty_profile = MissionProfile(penalty_config.mission)
+penalty_quality_summary = penalty_profile.trajectory_quality_summary()
+assert penalty_quality_summary["penalty_active"] is True
+assert penalty_quality_summary["penalized_samples"] > 0
+assert (
+    penalty_quality_summary["condition_number_max"]
+    < penalty_quality_summary["raw_condition_number_max"]
+)
+
+stress_config = ConfigLoader.load("config")
+stress_config.mission.phases = config.mission.phases
+stress_config.mission.leader_motion.trajectory_enabled = True
+stress_config.mission.leader_motion.condition_stress_enabled = True
+stress_config.mission.leader_motion.condition_stress_min_scale = 0.15
+stress_profile = MissionProfile(stress_config.mission)
+stress_quality_summary = stress_profile.trajectory_quality_summary()
+assert stress_quality_summary["raw_condition_number_max"] is not None
+assert stress_quality_summary["raw_condition_number_max"] > quality_summary["condition_number_max"]
 
 print("[OK] MissionProfile contracts verified")
 

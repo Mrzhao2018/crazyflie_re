@@ -328,6 +328,98 @@ python -m src.app.cli compare-runs --help
 - `compare-runs`：多次 run 汇总与回归检查
 - `sim`：最小离线 smoke test
 
+仓库根目录还提供了一个第一阶段调参辅助脚本：
+
+- `generate_baseline_sweep.py`
+  - 通过生成临时 `config/` 副本并循环调用 `python -m src.app.run_sim`
+  - 输出 `baseline_results.json`
+  - 用于建立当前一阶模型下的 Baseline RMSE 候选结果
+  - 默认先用 `p-limit` 网格，只扫 `gain_xy / gain_z / max_velocity`
+  - 支持 `--grid quick` 和 `--limit-trials N` 做快速试跑
+
+当前 Phase 1A 推荐先这样固定第一版 Baseline：
+
+```bash
+python generate_baseline_sweep.py --grid p-limit --dt 0.25 --formation-rmse-threshold 0.05 --output artifacts/baseline_results.json
+```
+
+Phase 1B 目前已接入一版默认关闭的纯时滞补偿配置：
+
+- `time_delay_compensation_enabled`
+- `estimated_total_delay_ms`
+- `delay_prediction_gain`
+
+当前实现位置在 `FollowerReferenceGenerator`，逻辑是基于历史 target velocity 做一阶线性预测，不改变现有一阶 follower controller 结构。
+
+仓库根目录还提供了一个时滞补偿离线对比脚本：
+
+- `generate_delay_compensation_ablation.py`
+  - 对比 `delay_off` 与 `delay_on` 两组配置
+  - 输出 `delay_compensation_ablation.json`
+  - 用于量化 `formation_rmse` / `follower_rmse` / `frame_valid_rate` 的差异
+
+Phase 1C 当前已接入一版 Leader trajectory 条件数质量摘要与离线对比工具：
+
+- `condition_penalty_enabled`
+- `condition_soft_limit`
+- `condition_penalty_scale`
+
+当前这条线优先做的是离线 quality summary 和 on/off ablation，而不是直接改运行时安全策略。
+
+- `generate_trajectory_condition_ablation.py`
+  - 对比 `cond_penalty_off` 与 `cond_penalty_on` 两组配置
+  - 输出 `trajectory_condition_ablation.json`
+  - 用于量化 `formation_rmse` / `follower_rmse` / `frame_valid_rate` 与 `penalized_samples` 的差异
+
+### Phase 1 Findings
+
+第一阶段三条线的当前离线结论已经固定到 `artifacts/`：
+
+- `artifacts/baseline_results.json`
+- `artifacts/delay_compensation_ablation.json`
+- `artifacts/trajectory_condition_ablation.json`
+
+1. Phase 1A Baseline
+
+- 当前一阶闭环离线基线的最佳参数为：
+  - `gain_xy = 1.4`
+  - `gain_z = 0.6`
+  - `max_velocity = 0.55`
+- 对应基线指标：
+  - `formation_rmse ≈ 0.00463`
+  - `follower_rmse ≈ 0.00801`
+  - `formation_p95 ≈ 0.01000`
+  - `frame_valid_rate = 1.0`
+
+2. Phase 1B Delay Compensation
+
+- 在上述 Baseline 参数集上，开启 reference 层的一阶纯时滞补偿后：
+  - `formation_rmse` 从 `≈ 0.00463` 降到 `≈ 0.00422`
+  - `follower_rmse` 从 `≈ 0.00801` 降到 `≈ 0.00734`
+  - `frame_valid_rate` 无退化
+- 结论：当前 delay compensation 在第一版 Baseline 上带来稳定正收益，可视为后续实机验证候选能力。
+
+3. Phase 1C Leader Trajectory Condition Penalty
+
+- 在默认 `affine_rotation` 任务上，leader 几何条件数本来就稳定在约 `3.04`，`cond_penalty_on` 不会触发，也不会改变 RMSE。
+- 为了验证第三条线是否真实生效，额外引入了 `condition_stress_*` 压测轨迹参数：
+  - `condition_stress_enabled`
+  - `condition_stress_axis`
+  - `condition_stress_min_scale`
+  - `condition_stress_period`
+- 在 stress trajectory 下：
+  - `raw_condition_number_max` 从默认良态抬高到 `≈ 4.09`
+  - `cond_penalty_on` 可将 `condition_number_max` 压回到 `≈ 2.34`
+  - `penalized_samples = 9`
+  - 当前离线 RMSE 仍未改善
+- 结论：第三条线已经能在坏轨迹上真实降低几何条件数，但当前离线一阶模型下，这种几何修正尚未传导为 RMSE 收益。它更像几何鲁棒性保护，而不是当前基线下的主要性能增益来源。
+
+当前推荐的工程结论是：
+
+- Baseline 参数集可直接作为第一版一阶基线
+- Delay compensation 值得继续做实机验证
+- Condition penalty 应保留为轨迹质量保护机制，但不建议仅凭当前默认任务将其作为主收益项宣传
+
 > `main.py` 仍保留旧入口兼容行为；如果你已经习惯 `python main.py`、`python main.py --startup-mode ...`、`python main.py --trajectory-budget`，这些命令仍可继续使用。
 
 ### 2. 真机主入口

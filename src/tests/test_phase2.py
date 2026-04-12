@@ -60,6 +60,31 @@ follower_ref_next = follower_gen.compute(
 )
 assert follower_ref_next.target_velocities is not None
 
+delay_follower_gen = FollowerReferenceGenerator(
+    formation,
+    afc,
+    config.safety.max_condition_number,
+    time_delay_compensation_enabled=True,
+    estimated_total_delay_ms=100.0,
+    delay_prediction_gain=1.0,
+)
+delay_follower_gen.compute(leader_ref.positions, 0.0)
+delay_follower_ref = delay_follower_gen.compute(
+    {lid: pos + np.array([0.1, 0.0, 0.0]) for lid, pos in leader_ref.positions.items()},
+    0.1,
+)
+assert delay_follower_ref.valid is True
+assert delay_follower_ref.target_velocities is not None
+sample_follower_id = next(iter(delay_follower_ref.target_positions))
+baseline_follower_ref = follower_gen.compute(
+    {lid: pos + np.array([0.1, 0.0, 0.0]) for lid, pos in leader_ref.positions.items()},
+    0.2,
+)
+assert (
+    delay_follower_ref.target_positions[sample_follower_id][0]
+    >= baseline_follower_ref.target_positions[sample_follower_id][0]
+)
+
 print("\n=== 测试AffineFrameEstimator ===")
 snapshot = PoseSnapshot(0, 0.0, nominal, np.ones(len(nominal), dtype=bool), [])
 estimator = AffineFrameEstimator(fleet)

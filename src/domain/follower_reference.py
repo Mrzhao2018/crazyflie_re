@@ -18,10 +18,22 @@ class FollowerReferenceSet:
 class FollowerReferenceGenerator:
     """Follower参考生成器"""
 
-    def __init__(self, formation_model, afc_model, max_condition_number=100.0):
+    def __init__(
+        self,
+        formation_model,
+        afc_model,
+        max_condition_number=100.0,
+        *,
+        time_delay_compensation_enabled: bool = False,
+        estimated_total_delay_ms: float = 0.0,
+        delay_prediction_gain: float = 1.0,
+    ):
         self.formation = formation_model
         self.afc = afc_model
         self.max_cond = max_condition_number
+        self.time_delay_compensation_enabled = time_delay_compensation_enabled
+        self.estimated_total_delay_s = max(0.0, float(estimated_total_delay_ms)) / 1000.0
+        self.delay_prediction_gain = max(0.0, float(delay_prediction_gain))
         self._last_target_positions: dict[int, np.ndarray] | None = None
         self._last_t_meas: float | None = None
 
@@ -60,6 +72,10 @@ class FollowerReferenceGenerator:
         # 计算稳态
         target_positions = self.afc.steady_state(leader_measurements)
         target_velocities = self._estimate_target_velocities(target_positions, t_meas)
+        target_positions = self._apply_delay_compensation(
+            target_positions,
+            target_velocities,
+        )
 
         return FollowerReferenceSet(
             follower_ids=list(target_positions.keys()),
@@ -94,3 +110,25 @@ class FollowerReferenceGenerator:
         }
         self._last_t_meas = float(t_meas) if t_meas is not None else None
         return velocities
+
+    def _apply_delay_compensation(
+        self,
+        target_positions: dict[int, np.ndarray],
+        target_velocities: dict[int, np.ndarray] | None,
+    ) -> dict[int, np.ndarray]:
+        if (
+            not self.time_delay_compensation_enabled
+            or target_velocities is None
+            or self.estimated_total_delay_s <= 0.0
+        ):
+            return target_positions
+
+        compensated = {}
+        horizon = self.estimated_total_delay_s * self.delay_prediction_gain
+        for drone_id, target in target_positions.items():
+            velocity = target_velocities.get(drone_id)
+            if velocity is None:
+                compensated[drone_id] = target
+                continue
+            compensated[drone_id] = target + np.array(velocity, dtype=float) * horizon
+        return compensated

@@ -103,6 +103,14 @@ class ConfigLoader:
 
         if config.mission.leader_motion.trajectory_sample_dt <= 0:
             raise ValueError("trajectory_sample_dt 必须大于 0")
+        if config.mission.leader_motion.condition_soft_limit <= 0:
+            raise ValueError("condition_soft_limit 必须大于 0")
+        if config.mission.leader_motion.condition_penalty_scale < 0:
+            raise ValueError("condition_penalty_scale 不能小于 0")
+        if config.mission.leader_motion.condition_stress_min_scale <= 0:
+            raise ValueError("condition_stress_min_scale 必须大于 0")
+        if config.mission.leader_motion.condition_stress_period <= 0:
+            raise ValueError("condition_stress_period 必须大于 0")
 
         if config.safety.min_vbat < 0:
             raise ValueError("min_vbat 不能小于 0；设为 0 可关闭电量检查")
@@ -131,6 +139,10 @@ class ConfigLoader:
             raise ValueError("feedforward_gain 不能小于 0")
         if config.control.max_feedforward_velocity < 0:
             raise ValueError("max_feedforward_velocity 不能小于 0")
+        if config.control.estimated_total_delay_ms < 0:
+            raise ValueError("estimated_total_delay_ms 不能小于 0")
+        if config.control.delay_prediction_gain < 0:
+            raise ValueError("delay_prediction_gain 不能小于 0")
         for attr in (
             "gain_xy",
             "gain_z",

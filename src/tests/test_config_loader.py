@@ -7,6 +7,16 @@ config = ConfigLoader.load("config")
 ConfigLoader._validate(config)
 assert config.comm.connect_groups_in_parallel is False
 assert config.comm.trajectory_upload_groups_in_parallel is False
+assert config.control.time_delay_compensation_enabled is False
+assert config.control.estimated_total_delay_ms == 0.0
+
+bad_delay = ConfigLoader.load("config")
+bad_delay.control.estimated_total_delay_ms = -1.0
+try:
+    ConfigLoader._validate(bad_delay)
+    raise AssertionError("Expected delay compensation validation to fail")
+except ValueError as exc:
+    assert "estimated_total_delay_ms" in str(exc)
 
 bad_pose_timeout = ConfigLoader.load("config")
 bad_pose_timeout.safety.pose_timeout = 1.0 / bad_pose_timeout.comm.pose_log_freq

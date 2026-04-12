@@ -51,7 +51,12 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
     mission_profile = MissionProfile(config.mission)
     auto_leader_ref_gen = LeaderReferenceGenerator(mission_profile, formation, fleet)
     follower_ref_gen = FollowerReferenceGenerator(
-        formation, afc, config.safety.max_condition_number
+        formation,
+        afc,
+        config.safety.max_condition_number,
+        time_delay_compensation_enabled=config.control.time_delay_compensation_enabled,
+        estimated_total_delay_ms=config.control.estimated_total_delay_ms,
+        delay_prediction_gain=config.control.delay_prediction_gain,
     )
 
     # 3. Runtime层
