@@ -21,6 +21,13 @@ class LeaderExecutor:
             "failures": failures,
         }
 
+    def _failure(self, drone_id: int, action: LeaderAction, exc: Exception) -> dict:
+        return self.transport.classify_command_failure(
+            drone_id=drone_id,
+            command_kind=action.kind,
+            exception=exc,
+        )
+
     def execute(self, actions: list[LeaderAction]):
         """执行leader动作列表"""
         results = []
@@ -46,7 +53,7 @@ class LeaderExecutor:
                 self.transport.hl_takeoff(drone_id, height, duration)
                 successes.append(drone_id)
             except Exception as exc:
-                failures.append({"drone_id": drone_id, "error": str(exc)})
+                failures.append(self._failure(drone_id, action, exc))
         return self._group_action_result(action, successes, failures)
 
     def _execute_batch_goto(self, action: LeaderAction):
@@ -61,7 +68,7 @@ class LeaderExecutor:
                 self.transport.hl_go_to(drone_id, pos[0], pos[1], pos[2], duration)
                 successes.append(drone_id)
             except Exception as exc:
-                failures.append({"drone_id": drone_id, "error": str(exc)})
+                failures.append(self._failure(drone_id, action, exc))
         return self._group_action_result(action, successes, failures)
 
     def _execute_land(self, action: LeaderAction):
@@ -74,7 +81,7 @@ class LeaderExecutor:
                 self.transport.hl_land(drone_id, 0.0, duration)
                 successes.append(drone_id)
             except Exception as exc:
-                failures.append({"drone_id": drone_id, "error": str(exc)})
+                failures.append(self._failure(drone_id, action, exc))
         return self._group_action_result(action, successes, failures)
 
     def _execute_start_trajectory(self, action: LeaderAction):
@@ -97,5 +104,5 @@ class LeaderExecutor:
                 )
                 successes.append(drone_id)
             except Exception as exc:
-                failures.append({"drone_id": drone_id, "error": str(exc)})
+                failures.append(self._failure(drone_id, action, exc))
         return self._group_action_result(action, successes, failures)

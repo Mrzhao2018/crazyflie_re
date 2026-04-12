@@ -20,6 +20,13 @@ class FollowerExecutor:
             "failures": failures,
         }
 
+    def _failure(self, drone_id: int, command_kind: str, exc: Exception) -> dict:
+        return self.transport.classify_command_failure(
+            drone_id=drone_id,
+            command_kind=command_kind,
+            exception=exc,
+        )
+
     def execute_velocity(self, actions: list[FollowerAction]):
         """执行速度命令"""
         successes = []
@@ -30,7 +37,7 @@ class FollowerExecutor:
                 self.transport.cmd_velocity_world(action.drone_id, vel[0], vel[1], vel[2])
                 successes.append(action.drone_id)
             except Exception as exc:
-                failures.append({"drone_id": action.drone_id, "error": str(exc)})
+                failures.append(self._failure(action.drone_id, "velocity", exc))
         return self._group_action_result("velocity", successes, failures)
 
     def execute_hold(self, actions: list[HoldAction]):
@@ -42,7 +49,7 @@ class FollowerExecutor:
                 self.transport.cmd_velocity_world(action.drone_id, 0, 0, 0)
                 successes.append(action.drone_id)
             except Exception as exc:
-                failures.append({"drone_id": action.drone_id, "error": str(exc)})
+                failures.append(self._failure(action.drone_id, "hold", exc))
         return self._group_action_result("hold", successes, failures)
 
     def takeoff(self, drone_ids: list[int], height: float = 0.5, duration: float = 2.0):
@@ -53,7 +60,7 @@ class FollowerExecutor:
                 self.transport.hl_takeoff(drone_id, height, duration)
                 successes.append(drone_id)
             except Exception as exc:
-                failures.append({"drone_id": drone_id, "error": str(exc)})
+                failures.append(self._failure(drone_id, "takeoff", exc))
         return self._group_action_result("takeoff", successes, failures)
 
     def land(self, drone_ids: list[int], duration: float = 2.0):
@@ -64,7 +71,7 @@ class FollowerExecutor:
                 self.transport.hl_land(drone_id, 0.0, duration)
                 successes.append(drone_id)
             except Exception as exc:
-                failures.append({"drone_id": drone_id, "error": str(exc)})
+                failures.append(self._failure(drone_id, "land", exc))
         return self._group_action_result("land", successes, failures)
 
     def stop_velocity_mode(self, drone_ids: list[int]):
@@ -75,5 +82,5 @@ class FollowerExecutor:
                 self.transport.notify_setpoint_stop(drone_id)
                 successes.append(drone_id)
             except Exception as exc:
-                failures.append({"drone_id": drone_id, "error": str(exc)})
+                failures.append(self._failure(drone_id, "notify_stop", exc))
         return self._group_action_result("notify_stop", successes, failures)
