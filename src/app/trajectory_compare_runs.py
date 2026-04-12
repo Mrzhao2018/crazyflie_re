@@ -33,6 +33,10 @@ def _extract_metrics(summary: dict, source_path: Path) -> dict:
     follower = role.get("follower", {})
     watchdog = formation.get("watchdog_summary", {}) or {}
     watchdog_by_mode = watchdog.get("by_mode", {}) or {}
+    executor_failure = formation.get("executor_failure_summary", {}) or {}
+    executor_by_action = executor_failure.get("by_action", {}) or {}
+    executor_by_group = executor_failure.get("by_group", {}) or {}
+    executor_retryable = executor_failure.get("retryable_counts", {}) or {}
     config_fingerprint = formation.get("config_fingerprint") or summary.get(
         "config_fingerprint"
     )
@@ -61,6 +65,14 @@ def _extract_metrics(summary: dict, source_path: Path) -> dict:
         "watchdog_degrade_count": watchdog_by_mode.get("degrade", 0),
         "watchdog_degrade_recovered_count": watchdog_by_mode.get(
             "degrade_recovered", 0
+        ),
+        "executor_failure_total": executor_failure.get("total", 0),
+        "executor_failure_degrade_count": executor_by_action.get("degrade", 0),
+        "executor_failure_hold_count": executor_by_action.get("hold", 0),
+        "executor_failure_group_count": len(executor_by_group),
+        "executor_failure_retryable_count": executor_retryable.get("retryable", 0),
+        "executor_failure_non_retryable_count": executor_retryable.get(
+            "non_retryable", 0
         ),
     }
 
@@ -186,6 +198,30 @@ def _render_role_plot(rows: list[dict], output_path: Path) -> Path:
     return output_path
 
 
+def _render_communication_plot(rows: list[dict], output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    labels = [row["run"] for row in rows]
+    watchdog = [row["watchdog_total"] for row in rows]
+    executor_total = [row["executor_failure_total"] for row in rows]
+    executor_degrade = [row["executor_failure_degrade_count"] for row in rows]
+    executor_hold = [row["executor_failure_hold_count"] for row in rows]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(labels, watchdog, marker="o", label="watchdog total")
+    ax.plot(labels, executor_total, marker="s", label="executor failure total")
+    ax.plot(labels, executor_degrade, marker="^", label="executor degrade")
+    ax.plot(labels, executor_hold, marker="d", label="executor hold")
+    ax.set_ylabel("event count")
+    ax.set_xlabel("run")
+    ax.tick_params(axis="x", rotation=45)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    return output_path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Compare multiple trajectory comparison summaries across runs."
@@ -225,6 +261,9 @@ def main(argv: list[str] | None = None) -> int:
             result["runs"], output_path.with_name("compare_overview.png")
         )
         _render_role_plot(result["runs"], output_path.with_name("compare_roles.png"))
+        _render_communication_plot(
+            result["runs"], output_path.with_name("compare_communication.png")
+        )
     print(rendered)
     return 0
 

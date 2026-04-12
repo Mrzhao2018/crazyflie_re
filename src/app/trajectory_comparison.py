@@ -205,6 +205,7 @@ def build_thesis_summary(records: list[dict]) -> dict:
         "record_count": summary.get("record_count"),
         "config_fingerprint": summary.get("config_fingerprint"),
         "watchdog_summary": summary.get("watchdog_summary"),
+        "executor_failure_summary": summary.get("executor_failure_summary"),
         "phase_counts": summary.get("phase_counts"),
         "effective_update_rate_hz": summary.get("effective_update_rate_hz"),
         "fresh_sample_rate": summary.get("fresh_sample_rate"),

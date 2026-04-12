@@ -131,4 +131,95 @@ assert recovered_event["details"]["code"] == MissionErrors.Runtime.WATCHDOG_DEGR
 assert recovered_event["details"]["stage"] == MissionErrors.Runtime.WATCHDOG_DEGRADE_RECOVERED.stage
 assert recovered_event["details"]["radio_groups"][2]["drone_ids"] == [5]
 
+
+components = build_components(
+    [make_snapshot(1), make_snapshot(2)],
+    [SafetyDecision("EXECUTE", []), SafetyDecision("EXECUTE", [])],
+)
+components["fleet"]._id_to_radio[6] = 3
+app = RealMissionApp(components)
+
+retryable_failure = {
+    "kind": "velocity",
+    "successes": [6],
+    "failures": [
+        {
+            "drone_id": 5,
+            "radio_group": 2,
+            "command_kind": "velocity",
+            "failure_category": "timeout",
+            "retryable": True,
+        }
+    ],
+}
+
+app._apply_follower_failure_policy(retryable_failure)
+assert not any(
+    event["event"] == "executor_group_degrade"
+    for event in components["telemetry"].events
+)
+assert app._follower_group_failure_streaks[2] == 1
+
+app._apply_follower_failure_policy(retryable_failure)
+degrade_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "executor_group_degrade"
+)
+assert degrade_event["details"]["category"] == MissionErrors.Runtime.EXECUTOR_GROUP_DEGRADE.category
+assert degrade_event["details"]["code"] == MissionErrors.Runtime.EXECUTOR_GROUP_DEGRADE.code
+assert degrade_event["details"]["stage"] == MissionErrors.Runtime.EXECUTOR_GROUP_DEGRADE.stage
+assert degrade_event["details"]["action"] == "degrade"
+assert degrade_event["details"]["follower_ids"] == [5]
+assert degrade_event["details"]["triggered_groups"][0]["group_id"] == 2
+assert degrade_event["details"]["triggered_groups"][0]["streak"] == 2
+assert degrade_event["details"]["triggered_groups"][0]["non_retryable"] is False
+assert degrade_event["details"]["group_failure_streaks"][2] == 2
+assert 5 in app._watchdog_degraded_followers
+assert components["fsm"].state() != MissionState.HOLD
+
+
+components = build_components(
+    [make_snapshot(1), make_snapshot(2)],
+    [SafetyDecision("EXECUTE", []), SafetyDecision("EXECUTE", [])],
+)
+app = RealMissionApp(components)
+components["fsm"]._state = MissionState.RUN
+
+non_retryable_failure = {
+    "kind": "velocity",
+    "successes": [],
+    "failures": [
+        {
+            "drone_id": 5,
+            "radio_group": 2,
+            "command_kind": "velocity",
+            "failure_category": "link_lookup",
+            "retryable": False,
+        }
+    ],
+}
+
+app._apply_follower_failure_policy(non_retryable_failure)
+hold_policy_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "executor_group_hold"
+)
+assert hold_policy_event["details"]["category"] == MissionErrors.Runtime.EXECUTOR_GROUP_HOLD.category
+assert hold_policy_event["details"]["code"] == MissionErrors.Runtime.EXECUTOR_GROUP_HOLD.code
+assert hold_policy_event["details"]["stage"] == MissionErrors.Runtime.EXECUTOR_GROUP_HOLD.stage
+assert hold_policy_event["details"]["action"] == "hold"
+assert hold_policy_event["details"]["triggered_groups"][0]["non_retryable"] is True
+hold_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "hold_entered"
+)
+assert hold_event["details"]["reason"] == "executor_failure"
+assert hold_event["details"]["category"] == MissionErrors.Runtime.EXECUTOR_GROUP_HOLD.category
+assert hold_event["details"]["code"] == MissionErrors.Runtime.EXECUTOR_GROUP_HOLD.code
+assert hold_event["details"]["stage"] == MissionErrors.Runtime.EXECUTOR_GROUP_HOLD.stage
+assert components["fsm"].state() == MissionState.HOLD
+
 print("[OK] RealMissionApp velocity watchdog verified")

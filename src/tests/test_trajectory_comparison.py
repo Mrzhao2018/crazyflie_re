@@ -60,6 +60,25 @@ with tempfile.TemporaryDirectory() as tmp_dir:
                         "category": "runtime",
                         "stage": "watchdog_degrade",
                     },
+                },
+                {
+                    "event": "executor_group_degrade",
+                    "details": {
+                        "code": "RUNTIME_EXECUTOR_GROUP_DEGRADE",
+                        "category": "runtime",
+                        "stage": "executor_group_degrade",
+                        "triggered_groups": [
+                            {
+                                "group_id": 2,
+                                "failures": [
+                                    {
+                                        "failure_category": "timeout",
+                                        "retryable": True,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
                 }
             ],
             "phase_label": "formation_run",
@@ -95,6 +114,8 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     assert outputs.summary["formation_run_summary"]["effective_update_rate_hz"] == 2.0
     assert outputs.summary["formation_run_summary"]["watchdog_summary"]["by_mode"]["telemetry"] == 1
     assert outputs.summary["formation_run_summary"]["watchdog_summary"]["by_mode"]["degrade"] == 1
+    assert outputs.summary["formation_run_summary"]["executor_failure_summary"]["by_action"]["degrade"] == 1
+    assert outputs.summary["formation_run_summary"]["executor_failure_summary"]["by_group"]["2"] == 1
     assert (
         outputs.summary["formation_run_summary"]["phase_counts"]["formation_run"] == 4
     )

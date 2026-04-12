@@ -24,7 +24,15 @@ from src.tests.run_real_fixtures import (
 from src.runtime.safety_manager import SafetyDecision
 
 
-def build_startup_components(connect_fail=False, preflight_ok=True, fresh=True, z=0.8):
+def build_startup_components(
+    connect_fail=False,
+    failed_connect_drones=None,
+    preflight_ok=True,
+    fresh=True,
+    z=0.8,
+    connect_groups_in_parallel=False,
+    trajectory_upload_groups_in_parallel=False,
+):
     fake_config = type(
         "FakeConfig",
         (),
@@ -37,6 +45,8 @@ def build_startup_components(connect_fail=False, preflight_ok=True, fresh=True, 
                     "follower_tx_freq": 8.0,
                     "readiness_wait_for_params": True,
                     "readiness_reset_estimator": True,
+                    "connect_groups_in_parallel": connect_groups_in_parallel,
+                    "trajectory_upload_groups_in_parallel": trajectory_upload_groups_in_parallel,
                 },
             )(),
             "mission": type(
@@ -51,6 +61,8 @@ def build_startup_components(connect_fail=False, preflight_ok=True, fresh=True, 
             )(),
         },
     )()
+
+    fleet = FakeFleet()
 
     fake_health_bus = type(
         "FakeHealthBus",
@@ -70,8 +82,12 @@ def build_startup_components(connect_fail=False, preflight_ok=True, fresh=True, 
         "repo_root": "repo",
         "startup_mode": "auto",
         "fsm": MissionFSM(),
-        "fleet": FakeFleet(),
-        "link_manager": FakeLinkManager(should_fail=connect_fail),
+        "fleet": fleet,
+        "link_manager": FakeLinkManager(
+            fleet,
+            should_fail=connect_fail,
+            failed_drones=failed_connect_drones,
+        ),
         "transport": FakeTransport(),
         "pose_source": FakePoseSource(),
         "pose_bus": FakePoseBus([make_snapshot(1, fresh=fresh, z=z)] * 3),
@@ -100,6 +116,63 @@ assert any(
     and event["details"]["code"] == MissionErrors.Connection.CONNECT_ALL_FAILED.code
     for event in components["telemetry"].events
 )
+connect_group_start_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_group_start"
+)
+assert connect_group_start_event["details"]["category"] == MissionErrors.Connection.CONNECT_GROUP_START.category
+assert connect_group_start_event["details"]["code"] == MissionErrors.Connection.CONNECT_GROUP_START.code
+assert connect_group_start_event["details"]["outcome"] == "start"
+connect_group_result_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_group_result"
+)
+assert connect_group_result_event["details"]["code"] == MissionErrors.Connection.CONNECT_GROUP_FAILED.code
+assert connect_group_result_event["details"]["outcome"] == "failed"
+assert connect_group_result_event["details"]["failure_drone_ids"] == [1]
+
+components = build_startup_components(failed_connect_drones=[3])
+app = RealMissionApp(components)
+assert app.start() is False
+connect_group_events = [
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_group_result"
+]
+assert connect_group_events[0]["details"]["group_id"] == 0
+assert connect_group_events[0]["details"]["ok"] is True
+assert connect_group_events[0]["details"]["code"] == MissionErrors.Connection.CONNECT_GROUP_SUCCESS.code
+assert connect_group_events[1]["details"]["group_id"] == 1
+assert connect_group_events[1]["details"]["ok"] is False
+assert connect_group_events[1]["details"]["code"] == MissionErrors.Connection.CONNECT_GROUP_FAILED.code
+assert connect_group_events[1]["details"]["outcome"] == "failed"
+assert connect_group_events[1]["details"]["failures"][0]["drone_id"] == 3
+connect_all_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_all"
+)
+assert connect_all_event["details"]["code"] == MissionErrors.Connection.CONNECT_ALL_FAILED.code
+assert connect_all_event["details"]["outcome"] == "partial_failure"
+assert connect_all_event["details"]["failed_group_ids"] == [1]
+assert connect_all_event["details"]["radio_groups"][0]["connected"] == [1, 2]
+assert connect_all_event["details"]["radio_groups"][1]["failures"][0]["drone_id"] == 3
+
+components = build_startup_components(failed_connect_drones=[4])
+app = RealMissionApp(components)
+assert app.start() is False
+partial_group_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_group_result"
+    and event["details"]["group_id"] == 1
+)
+assert partial_group_event["details"]["code"] == MissionErrors.Connection.CONNECT_GROUP_PARTIAL_FAILURE.code
+assert partial_group_event["details"]["outcome"] == "partial_failure"
+assert partial_group_event["details"]["connected"] == [3]
+assert partial_group_event["details"]["failure_drone_ids"] == [4]
 
 components = build_startup_components(preflight_ok=False)
 app = RealMissionApp(components)
@@ -130,6 +203,22 @@ assert components["transport"].wait_calls == components["fleet"].all_ids()
 assert components["transport"].reset_calls == components["fleet"].all_ids()
 assert any(event["event"] == "startup_mode" for event in components["telemetry"].events)
 assert any(event["event"] == "config_fingerprint" for event in components["telemetry"].events)
+connect_group_events = [
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_group_result"
+]
+assert [event["details"]["group_id"] for event in connect_group_events] == [0, 1, 2]
+assert all(event["details"]["ok"] is True for event in connect_group_events)
+connect_all_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_all"
+)
+assert connect_all_event["details"]["ok"] is True
+assert connect_all_event["details"]["code"] == MissionErrors.Connection.CONNECT_ALL_OK.code
+assert connect_all_event["details"]["outcome"] == "success"
+assert connect_all_event["details"]["radio_groups"][2]["connected"] == [5, 6]
 assert any(
     event["event"] in {"wait_for_params", "reset_estimator", "fsm_transition"}
     for event in components["telemetry"].events
@@ -144,5 +233,14 @@ assert any(
     for batch in components["leader_executor"].actions
 )
 assert len(components["follower_executor"].takeoff_calls) == 1
+
+components = build_startup_components(
+    connect_groups_in_parallel=True,
+    trajectory_upload_groups_in_parallel=True,
+)
+app = RealMissionApp(components)
+assert app.start() is True
+assert len(components["transport"].upload_calls) == 4
+assert len(components["transport"].define_calls) == 4
 
 print("[OK] Startup flow quasi-system contracts verified")

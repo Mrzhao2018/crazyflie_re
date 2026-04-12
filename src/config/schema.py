@@ -74,6 +74,8 @@ class CommConfig:
     follower_cmd_deadband: float = 0.0
     readiness_wait_for_params: bool = True
     readiness_reset_estimator: bool = False
+    connect_groups_in_parallel: bool = False
+    trajectory_upload_groups_in_parallel: bool = False
 
 
 @dataclass

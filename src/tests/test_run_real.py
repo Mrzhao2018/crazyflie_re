@@ -51,6 +51,14 @@ connect_error = next(
 assert connect_error["details"]["category"] == MissionErrors.Connection.CONNECT_ALL_FAILED.category
 assert connect_error["details"]["code"] == MissionErrors.Connection.CONNECT_ALL_FAILED.code
 assert connect_error["details"]["stage"] == MissionErrors.Connection.CONNECT_ALL_FAILED.stage
+assert connect_error["details"]["connect_outcome"] == "failed"
+assert connect_error["details"]["failed_group_ids"] == [0]
+connect_group_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_group_result"
+)
+assert connect_group_event["details"]["code"] == MissionErrors.Connection.CONNECT_GROUP_FAILED.code
 
 
 # start() preflight failure -> ABORT
@@ -86,6 +94,19 @@ assert components["telemetry_path"] == components["telemetry"].opened
 assert components["transport"].wait_calls == components["fleet"].all_ids()
 assert components["transport"].reset_calls == components["fleet"].all_ids()
 assert any(event["event"] == "startup_mode" for event in components["telemetry"].events)
+assert any(event["event"] == "connect_group_start" for event in components["telemetry"].events)
+assert any(event["event"] == "connect_group_result" for event in components["telemetry"].events)
+connect_all_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_all"
+)
+assert connect_all_event["details"]["ok"] is True
+assert connect_all_event["details"]["category"] == MissionErrors.Connection.CONNECT_ALL_OK.category
+assert connect_all_event["details"]["code"] == MissionErrors.Connection.CONNECT_ALL_OK.code
+assert connect_all_event["details"]["stage"] == MissionErrors.Connection.CONNECT_ALL_OK.stage
+assert connect_all_event["details"]["outcome"] == "success"
+assert connect_all_event["details"]["radio_groups"][1]["connected"] == [3, 4]
 assert any(
     event["event"] == "config_fingerprint"
     and event["details"]["fingerprint"]["startup_mode"] == "auto"
@@ -181,8 +202,22 @@ app._record_executor_summary(
             "kind": "batch_goto",
             "successes": [1, 2],
             "failures": [
-                {"drone_id": 3, "reason": "leader_link_loss"},
-                {"drone_id": 4, "reason": "leader_busy"},
+                {
+                    "drone_id": 3,
+                    "radio_group": 1,
+                    "command_kind": "batch_goto",
+                    "failure_category": "timeout",
+                    "retryable": True,
+                    "reason": "leader_link_loss",
+                },
+                {
+                    "drone_id": 4,
+                    "radio_group": 1,
+                    "command_kind": "batch_goto",
+                    "failure_category": "transport_runtime",
+                    "retryable": False,
+                    "reason": "leader_busy",
+                },
             ],
         }
     ],
@@ -193,7 +228,16 @@ app._record_executor_summary(
         {
             "kind": "velocity",
             "successes": [5],
-            "failures": [{"drone_id": 6, "reason": "follower_timeout"}],
+            "failures": [
+                {
+                    "drone_id": 6,
+                    "radio_group": 2,
+                    "command_kind": "velocity",
+                    "failure_category": "timeout",
+                    "retryable": True,
+                    "reason": "follower_timeout",
+                }
+            ],
         }
     ],
 )
@@ -207,6 +251,9 @@ assert leader_event["details"]["radio_groups"][0]["successes"] == [1, 2]
 assert [
     item["drone_id"] for item in leader_event["details"]["radio_groups"][1]["failures"]
 ] == [3, 4]
+assert leader_event["details"]["radio_groups"][1]["failures"][0]["command_kind"] == "batch_goto"
+assert leader_event["details"]["radio_groups"][1]["failures"][0]["failure_category"] == "timeout"
+assert leader_event["details"]["radio_groups"][1]["failures"][1]["retryable"] is False
 follower_event = next(
     event
     for event in components["telemetry"].events
@@ -217,6 +264,36 @@ assert follower_event["details"]["radio_groups"][2]["successes"] == [5]
 assert [
     item["drone_id"] for item in follower_event["details"]["radio_groups"][2]["failures"]
 ] == [6]
+assert follower_event["details"]["radio_groups"][2]["failures"][0]["command_kind"] == "velocity"
+assert follower_event["details"]["radio_groups"][2]["failures"][0]["retryable"] is True
+
+
+# connect_all failure exposes group-level partial results
+components = build_components(
+    [make_snapshot(1)],
+    [SafetyDecision("EXECUTE", [])],
+    failed_connect_drones=[3],
+)
+app = RealMissionApp(components)
+assert app.start() is False
+connect_all_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "connect_all"
+)
+assert connect_all_event["details"]["ok"] is False
+assert connect_all_event["details"]["code"] == MissionErrors.Connection.CONNECT_ALL_FAILED.code
+assert connect_all_event["details"]["outcome"] == "partial_failure"
+assert connect_all_event["details"]["failed_group_ids"] == [1]
+assert connect_all_event["details"]["radio_groups"][0]["connected"] == [1, 2]
+assert connect_all_event["details"]["radio_groups"][1]["failures"][0]["drone_id"] == 3
+connect_error = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "mission_error"
+)
+assert connect_error["details"]["connect_outcome"] == "partial_failure"
+assert connect_error["details"]["radio_groups"][1]["failures"][0]["group_id"] == 1
 
 
 # run() ABORT path triggers emergency land semantics

@@ -61,6 +61,7 @@
 当前启动流程已经包含：
 
 - `connect_all`
+- `connect_group_start` / `connect_group_result`（按 `radio_group` 分阶段记录连接过程）
 - `wait_for_params`
 - 可选 `reset_estimator_and_wait`
 - `pose_ready`
@@ -128,9 +129,13 @@
 当前 telemetry 已记录的内容包括：
 
 - readiness / health / phase events
+- connect 阶段的 `connect_group_start`、`connect_group_result`、带 `radio_groups` 摘要的 `connect_all`
+  - 这些事件现在都带稳定的 `category / code / stage / outcome`
+  - `connect_group_result` 会区分 `success / partial_failure / failed`
 - `mission_error` 结构化错误事件，包含稳定的 `category / code / stage`
 - watchdog 结构化事件，包含稳定的 `category / code / stage`
 - watchdog / executor 事件里的 `radio_groups` 聚合摘要
+  - executor failure 现在会带 `command_kind / error_type / failure_category / retryable / radio_group`
 - snapshot 序号与测量时间
 - measured positions / leader reference / follower reference
 - frame validity / condition number
@@ -146,6 +151,21 @@
 - `readiness`：启动、readiness、preflight 与起飞验证阶段失败
 - `runtime`：进入主循环之后的运行期异常
 
+其中 connection 相关的稳定事件码现在包括：
+
+- `CONNECT_GROUP_START`
+- `CONNECT_GROUP_SUCCESS`
+- `CONNECT_GROUP_PARTIAL_FAILURE`
+- `CONNECT_GROUP_FAILED`
+- `CONNECT_ALL_OK`
+- `CONNECT_ALL_FAILED`
+
+说明：
+
+- `CONNECT_GROUP_PARTIAL_FAILURE` 表示某个 `radio_group` 已有部分成员完成连接，但组内后续成员失败，strict 策略会因此中止启动
+- `CONNECT_GROUP_FAILED` 表示该组在进入连接阶段后没有任何成员成功建立链路
+- `connect_all` 事件会额外带出 `failed_group_ids` 与整体 `outcome`，便于区分“整组失败”还是“已有部分连接后中止”
+
 其中 watchdog 相关的稳定 runtime 事件码包括：
 
 - `RUNTIME_VELOCITY_STREAM_WATCHDOG`
@@ -159,6 +179,32 @@
 - 它们与 `mission_error` 共享同一套 `category / code / stage` 语义，但不一定意味着任务立即失败
 - `hold` / `degrade` 属于运行期保护动作；只有后续演化为 `ABORT` 或其它终止路径时，才进入终止语义
 
+当前 Phase 3 前半段已经把 executor 失败结果从纯文本扩展为结构化字段：
+
+- `command_kind`：失败发生在哪类命令上，例如 `batch_goto / velocity / hold / notify_stop`
+- `error_type`：Python 异常类型名，例如 `TimeoutError / KeyError / RuntimeError`
+- `failure_category`：归一化失败类别，例如 `timeout / link_lookup / invalid_command / transport_runtime`
+- `retryable`：粗粒度可重试标记；当前只做语义暴露，还没有把它接入运行期策略
+- `radio_group`：失败对应的无线组，便于后续做 group-aware 连续失败策略
+
+当前 Phase 3 后半段已经把一部分 follower executor 失败接入运行期策略：
+
+- 只看 `follower_velocity_execution` 的 failure，不改变 leader 路径
+- 同一 `radio_group` 的 retryable failure 连续达到 `2` 次时，触发 `executor_group_degrade`
+- 同一 `radio_group` 一旦出现 non-retryable failure，会立即进入组级策略触发
+- 如果当前活跃 follower group 全部都满足触发条件，则直接记录 `executor_group_hold` 并进入 `HOLD`
+- 如果只有部分 group 触发，则把对应 follower 放入降级集合，后续调度改走 parked hold
+
+对应的稳定 runtime 事件码：
+
+- `RUNTIME_EXECUTOR_GROUP_DEGRADE`
+- `RUNTIME_EXECUTOR_GROUP_HOLD`
+
+说明：
+
+- 这一步仍然是保守实现，只接 follower velocity 执行失败，还没有把 leader failure、trajectory upload failure 或更复杂的 retry budget 纳入统一策略
+- 当前连续失败阈值是代码内常量 `2`，还没有暴露到配置文件
+
 仓库内已提供的离线工具包括：
 
 - replay summary
@@ -171,6 +217,55 @@
 - watchdog 总触发次数
 - watchdog 是 `telemetry / hold / degrade / degrade_recovered` 哪一种
 - 多次 run 之间各类 watchdog 触发次数的差异
+- executor group failure 总触发次数
+- executor group failure 是 `degrade` 还是 `hold`
+- 哪些 `radio_group` 更容易积累失败触发
+- retryable / non-retryable failure 的离线计数差异
+
+当前离线摘要新增字段：
+
+- `executor_failure_summary`
+  - `total`
+  - `by_code`
+  - `by_action`
+  - `by_event`
+  - `by_group`
+  - `failure_categories`
+  - `retryable_counts`
+
+`compare-runs` 当前会额外抽出这些指标：
+
+- `executor_failure_total`
+- `executor_failure_degrade_count`
+- `executor_failure_hold_count`
+- `executor_failure_group_count`
+- `executor_failure_retryable_count`
+- `executor_failure_non_retryable_count`
+
+`compare-runs --output ...` 现在会额外输出：
+
+- `compare_communication.png`
+  - 同时展示 watchdog 总数、executor failure 总数、executor degrade 次数、executor hold 次数
+
+### 6. 可选组间并行能力
+
+当前已经补了一个默认关闭的实验性能力：
+
+- `comm.connect_groups_in_parallel`
+  - 控制 `connect_all()` 是否按 `radio_group` 并行连接
+- `comm.trajectory_upload_groups_in_parallel`
+  - 控制 startup 阶段 leader trajectory upload / define 是否按 `radio_group` 并行执行
+
+默认值：
+
+- `false`
+- `false`
+
+说明：
+
+- 默认仍然保持保守串行行为，不改变当前实验基线
+- 当前只完成了代码路径、配置开关和单元测试/准系统测试
+- 真实硬件 smoke 还没有在当前环境执行，所以这两个开关暂时更适合实验模式，而不是默认生产路径
 
 ---
 

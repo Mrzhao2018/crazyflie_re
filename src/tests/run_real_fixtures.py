@@ -40,13 +40,72 @@ class FakeFleet:
 
 
 class FakeLinkManager:
-    def __init__(self, should_fail=False):
+    def __init__(self, fleet, should_fail=False, failed_drones=None):
+        self.fleet = fleet
         self.should_fail = should_fail
+        self.failed_drones = set(failed_drones or [])
         self.closed = False
+        self._last_connect_report = None
 
-    def connect_all(self):
-        if self.should_fail:
-            raise RuntimeError("connect failed")
+    def last_connect_report(self):
+        return self._last_connect_report
+
+    def connect_all(self, *, on_group_start=None, on_group_result=None, parallel_groups=False):
+        grouped = {}
+        for drone_id in self.fleet.all_ids():
+            group_id = self.fleet.get_radio_group(drone_id)
+            grouped.setdefault(group_id, []).append(drone_id)
+
+        report = {
+            "ok": True,
+            "connected": [],
+            "failures": [],
+            "radio_groups": {},
+            "duration_s": 0.0,
+        }
+        self._last_connect_report = report
+
+        for group_id, drone_ids in sorted(grouped.items()):
+            if on_group_start is not None:
+                on_group_start({"group_id": group_id, "drone_ids": list(drone_ids)})
+
+            group_result = {
+                "group_id": group_id,
+                "drone_ids": list(drone_ids),
+                "connected": [],
+                "failures": [],
+                "ok": True,
+                "duration_s": 0.0,
+            }
+            for drone_id in drone_ids:
+                if self.should_fail and not self.failed_drones:
+                    self.failed_drones.add(drone_id)
+                if drone_id in self.failed_drones:
+                    group_result["ok"] = False
+                    group_result["failures"].append(
+                        {
+                            "drone_id": drone_id,
+                            "group_id": group_id,
+                            "error": "connect failed",
+                            "exception_type": "RuntimeError",
+                        }
+                    )
+                    break
+                group_result["connected"].append(drone_id)
+
+            report["radio_groups"][group_id] = group_result
+            report["connected"].extend(group_result["connected"])
+            report["failures"].extend(group_result["failures"])
+            report["ok"] = report["ok"] and group_result["ok"]
+
+            if on_group_result is not None:
+                on_group_result(group_result)
+
+            if not group_result["ok"]:
+                self.close_all()
+                raise RuntimeError("connect failed")
+
+        return report
 
     def close_all(self):
         self.closed = True
@@ -72,6 +131,26 @@ class FakeTransport:
     def upload_trajectory(self, drone_id, pieces, start_addr=0):
         self.upload_calls.append((drone_id, pieces, start_addr))
         return len(pieces)
+
+    def upload_trajectories_by_group(self, uploads, *, parallel_groups=False):
+        results = {}
+        for drone_id, spec in uploads.items():
+            piece_count = self.upload_trajectory(
+                drone_id, spec.get("pieces", []), start_addr=spec.get("start_addr", 0)
+            )
+            self.hl_define_trajectory(
+                drone_id,
+                spec.get("trajectory_id", 1),
+                spec.get("start_addr", 0),
+                piece_count,
+            )
+            results[drone_id] = {
+                "piece_count": piece_count,
+                "trajectory_id": spec.get("trajectory_id", 1),
+                "start_addr": spec.get("start_addr", 0),
+                "parallel_groups": parallel_groups,
+            }
+        return results
 
     def hl_define_trajectory(self, drone_id, trajectory_id, offset, n_pieces):
         self.define_calls.append((drone_id, trajectory_id, offset, n_pieces))
@@ -472,6 +551,7 @@ def build_components(
     start_snapshots,
     safety_decisions,
     connect_fail=False,
+    failed_connect_drones=None,
     preflight_ok=True,
     startup_mode="auto",
     leader_ref_mode=None,
@@ -544,13 +624,15 @@ def build_components(
         },
     )()
 
+    fleet = FakeFleet()
+
     return {
         "config": fake_config,
         "config_dir": "config",
         "repo_root": "repo",
         "startup_mode": startup_mode,
         "fsm": MissionFSM(),
-        "fleet": FakeFleet(),
+        "fleet": fleet,
         "mission_profile": type(
             "FakeMissionProfile",
             (),
@@ -561,7 +643,11 @@ def build_components(
                 "total_time": lambda self: 20.0,
             },
         )(),
-        "link_manager": FakeLinkManager(should_fail=connect_fail),
+        "link_manager": FakeLinkManager(
+            fleet,
+            should_fail=connect_fail,
+            failed_drones=failed_connect_drones,
+        ),
         "transport": FakeTransport(),
         "pose_source": FakePoseSource(),
         "pose_bus": FakePoseBus(start_snapshots),

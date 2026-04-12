@@ -5,6 +5,8 @@ from src.config.loader import ConfigLoader
 
 config = ConfigLoader.load("config")
 ConfigLoader._validate(config)
+assert config.comm.connect_groups_in_parallel is False
+assert config.comm.trajectory_upload_groups_in_parallel is False
 
 bad_pose_timeout = ConfigLoader.load("config")
 bad_pose_timeout.safety.pose_timeout = 1.0 / bad_pose_timeout.comm.pose_log_freq

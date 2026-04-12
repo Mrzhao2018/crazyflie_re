@@ -16,6 +16,32 @@ class MissionErrors:
     class Connection:
         """用于标识链路建立与设备连接阶段失败。"""
 
+        CONNECT_GROUP_START = MissionErrorDefinition(
+            category="connection",
+            code="CONNECT_GROUP_START",
+            stage="connect_group",
+        )
+        CONNECT_GROUP_SUCCESS = MissionErrorDefinition(
+            category="connection",
+            code="CONNECT_GROUP_SUCCESS",
+            stage="connect_group",
+        )
+        CONNECT_GROUP_PARTIAL_FAILURE = MissionErrorDefinition(
+            category="connection",
+            code="CONNECT_GROUP_PARTIAL_FAILURE",
+            stage="connect_group",
+        )
+        CONNECT_GROUP_FAILED = MissionErrorDefinition(
+            category="connection",
+            code="CONNECT_GROUP_FAILED",
+            stage="connect_group",
+        )
+        CONNECT_ALL_OK = MissionErrorDefinition(
+            category="connection",
+            code="CONNECT_ALL_OK",
+            stage="connect_all",
+        )
+
         CONNECT_ALL_FAILED = MissionErrorDefinition(
             category="connection",
             code="CONNECT_ALL_FAILED",
@@ -103,6 +129,17 @@ class MissionErrors:
 
     class Runtime:
         """用于标识进入主循环之后的运行期异常。"""
+
+        EXECUTOR_GROUP_DEGRADE = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_EXECUTOR_GROUP_DEGRADE",
+            stage="executor_group_degrade",
+        )
+        EXECUTOR_GROUP_HOLD = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_EXECUTOR_GROUP_HOLD",
+            stage="executor_group_hold",
+        )
 
         VELOCITY_STREAM_WATCHDOG = MissionErrorDefinition(
             category="runtime",

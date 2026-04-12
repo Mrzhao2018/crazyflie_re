@@ -2,6 +2,7 @@
 
 import time
 from collections import defaultdict
+from collections.abc import Mapping, Sized
 from .pose_snapshot import PoseSnapshot
 from .mission_fsm import MissionState, MissionFSM, CommandPolicy
 from .command_plan import TxPlan, FollowerAction, LeaderAction, HoldAction
@@ -53,7 +54,7 @@ class CommandScheduler:
         return dict(grouped)
 
     @staticmethod
-    def _group_counts(grouped: dict[int, list | dict]) -> dict[int, int]:
+    def _group_counts(grouped: Mapping[int, Sized]) -> dict[int, int]:
         counts = {}
         for group_id, items in grouped.items():
             counts[group_id] = len(items)

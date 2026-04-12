@@ -13,6 +13,11 @@ WATCHDOG_EVENT_CODES = {
     "RUNTIME_WATCHDOG_DEGRADE_RECOVERED": "degrade_recovered",
 }
 
+EXECUTOR_EVENT_CODES = {
+    "RUNTIME_EXECUTOR_GROUP_DEGRADE": "degrade",
+    "RUNTIME_EXECUTOR_GROUP_HOLD": "hold",
+}
+
 
 def _watchdog_summary(events: list[dict]) -> dict:
     code_counts = Counter()
@@ -35,6 +40,55 @@ def _watchdog_summary(events: list[dict]) -> dict:
         "by_code": dict(code_counts),
         "by_mode": dict(mode_counts),
         "by_event": dict(event_counts),
+    }
+
+
+def _executor_failure_summary(events: list[dict]) -> dict:
+    code_counts = Counter()
+    action_counts = Counter()
+    event_counts = Counter()
+    group_counts = Counter()
+    failure_category_counts = Counter()
+    retryable_counts = Counter()
+
+    for event in events:
+        event_name = event.get("event")
+        details = event.get("details", {}) or {}
+        code = details.get("code")
+        if code not in EXECUTOR_EVENT_CODES:
+            continue
+
+        code_counts[code] += 1
+        action_counts[EXECUTOR_EVENT_CODES[code]] += 1
+        if event_name:
+            event_counts[event_name] += 1
+
+        for group_item in details.get("triggered_groups", []) or []:
+            if not isinstance(group_item, dict):
+                continue
+            group_id = group_item.get("group_id")
+            if group_id is not None:
+                group_counts[str(group_id)] += 1
+            for failure in group_item.get("failures", []) or []:
+                if not isinstance(failure, dict):
+                    continue
+                category = failure.get("failure_category")
+                if category is not None:
+                    failure_category_counts[str(category)] += 1
+                retryable = failure.get("retryable")
+                if retryable is True:
+                    retryable_counts["retryable"] += 1
+                elif retryable is False:
+                    retryable_counts["non_retryable"] += 1
+
+    return {
+        "total": sum(code_counts.values()),
+        "by_code": dict(code_counts),
+        "by_action": dict(action_counts),
+        "by_event": dict(event_counts),
+        "by_group": dict(group_counts),
+        "failure_categories": dict(failure_category_counts),
+        "retryable_counts": dict(retryable_counts),
     }
 
 
@@ -78,6 +132,7 @@ def analyze_records(records: list[dict]) -> dict:
     )
     config_fingerprint = records[0].get("config_fingerprint") if records else None
     watchdog_summary = _watchdog_summary(deduped)
+    executor_failure_summary = _executor_failure_summary(deduped)
 
     max_command_norm_per_drone = {}
     valid_frame_count = 0
@@ -164,6 +219,7 @@ def analyze_records(records: list[dict]) -> dict:
         },
         "event_counts": dict(event_counts),
         "watchdog_summary": watchdog_summary,
+        "executor_failure_summary": executor_failure_summary,
         "safety_counts": dict(safety_counts),
         "scheduler_reason_counts": dict(scheduler_reason_counts),
         "first_mission_state": records[0].get("mission_state") if records else None,

@@ -38,6 +38,25 @@ records = [
                     "stage": "watchdog_degrade",
                 },
             },
+            {
+                "event": "executor_group_degrade",
+                "details": {
+                    "code": "RUNTIME_EXECUTOR_GROUP_DEGRADE",
+                    "category": "runtime",
+                    "stage": "executor_group_degrade",
+                    "triggered_groups": [
+                        {
+                            "group_id": 2,
+                            "failures": [
+                                {
+                                    "failure_category": "timeout",
+                                    "retryable": True,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
         ],
         "phase_label": "formation_run",
         "leader_mode": "batch_goto",
@@ -77,6 +96,25 @@ records = [
                     "stage": "watchdog_degrade_recovered",
                 },
             },
+            {
+                "event": "executor_group_hold",
+                "details": {
+                    "code": "RUNTIME_EXECUTOR_GROUP_HOLD",
+                    "category": "runtime",
+                    "stage": "executor_group_hold",
+                    "triggered_groups": [
+                        {
+                            "group_id": 2,
+                            "failures": [
+                                {
+                                    "failure_category": "link_lookup",
+                                    "retryable": False,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
         ],
         "phase_label": "formation_run",
         "leader_mode": "batch_goto",
@@ -106,6 +144,14 @@ assert summary["watchdog_summary"]["by_mode"]["telemetry"] == 1
 assert summary["watchdog_summary"]["by_mode"]["hold"] == 1
 assert summary["watchdog_summary"]["by_mode"]["degrade"] == 1
 assert summary["watchdog_summary"]["by_mode"]["degrade_recovered"] == 1
+assert summary["executor_failure_summary"]["total"] == 2
+assert summary["executor_failure_summary"]["by_action"]["degrade"] == 1
+assert summary["executor_failure_summary"]["by_action"]["hold"] == 1
+assert summary["executor_failure_summary"]["by_group"]["2"] == 2
+assert summary["executor_failure_summary"]["failure_categories"]["timeout"] == 1
+assert summary["executor_failure_summary"]["failure_categories"]["link_lookup"] == 1
+assert summary["executor_failure_summary"]["retryable_counts"]["retryable"] == 1
+assert summary["executor_failure_summary"]["retryable_counts"]["non_retryable"] == 1
 assert summary["safety_counts"]["EXECUTE"] == 1
 assert summary["safety_counts"]["ABORT"] == 1
 assert summary["max_command_norm_per_drone"]["5"] == 0.5
@@ -126,5 +172,6 @@ assert summary["formation_error"]["max"] is not None
 replay = build_replay(loaded)
 assert replay["summary"]["last_mission_state"] == "ABORT"
 assert replay["summary"]["watchdog_summary"]["by_event"]["hold_entered"] == 1
+assert replay["summary"]["executor_failure_summary"]["by_event"]["executor_group_hold"] == 1
 
 print("[OK] Telemetry replay analysis verified")

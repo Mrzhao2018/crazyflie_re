@@ -5,3 +5,5 @@ parked_hold_freq: 0.5
 follower_cmd_deadband: 0.05
 readiness_wait_for_params: true
 readiness_reset_estimator: false
+connect_groups_in_parallel: false
+trajectory_upload_groups_in_parallel: false

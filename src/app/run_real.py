@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 VELOCITY_STREAM_WATCHDOG_FACTOR = 3.0
+EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD = 2
 
 
 class RealMissionApp:
@@ -37,6 +38,7 @@ class RealMissionApp:
         self._trajectory_terminal_reason = None
         self._hold_entered_at: float | None = None
         self._watchdog_degraded_followers: set[int] = set()
+        self._follower_group_failure_streaks: dict[int, int] = {}
         self._readiness_report = {
             "wait_for_params": {},
             "reset_estimator": {},
@@ -44,6 +46,143 @@ class RealMissionApp:
             "pose_ready": False,
         }
         self._config_fingerprint = self._build_config_fingerprint()
+
+    @staticmethod
+    def _connect_group_outcome(group_result: dict[str, object]) -> str:
+        failures = group_result.get("failures", [])
+        connected = group_result.get("connected", [])
+        if not failures:
+            return "success"
+        if connected:
+            return "partial_failure"
+        return "failed"
+
+    @classmethod
+    def _connect_group_definition(
+        cls, group_result: dict[str, object] | None = None
+    ) -> MissionErrorDefinition:
+        if group_result is None:
+            return MissionErrors.Connection.CONNECT_GROUP_START
+        outcome = cls._connect_group_outcome(group_result)
+        if outcome == "success":
+            return MissionErrors.Connection.CONNECT_GROUP_SUCCESS
+        if outcome == "partial_failure":
+            return MissionErrors.Connection.CONNECT_GROUP_PARTIAL_FAILURE
+        return MissionErrors.Connection.CONNECT_GROUP_FAILED
+
+    @classmethod
+    def _connect_all_outcome(cls, report: dict[str, object], ok: bool) -> str:
+        if ok:
+            return "success"
+        if report.get("connected"):
+            return "partial_failure"
+        return "failed"
+
+    @staticmethod
+    def _failed_connect_group_ids(report: dict[str, object]) -> list[int]:
+        radio_groups = report.get("radio_groups", {})
+        if not isinstance(radio_groups, dict):
+            return []
+        return sorted(
+            int(group_id)
+            for group_id, group_result in radio_groups.items()
+            if isinstance(group_result, dict) and not group_result.get("ok", False)
+        )
+
+    def _last_connect_report(self) -> dict[str, object]:
+        link_manager = self.comp.get("link_manager")
+        if link_manager is None or not hasattr(link_manager, "last_connect_report"):
+            return {}
+        report = link_manager.last_connect_report()
+        if not isinstance(report, dict):
+            return {}
+        return report
+
+    def _record_connect_group_start(self, group_event: dict[str, object]) -> None:
+        telemetry = self.comp.get("telemetry")
+        if telemetry is None:
+            return
+        definition = self._connect_group_definition()
+        telemetry.record_event(
+            "connect_group_start",
+            ok=True,
+            category=definition.category,
+            code=definition.code,
+            stage=definition.stage,
+            outcome="start",
+            group_id=group_event.get("group_id"),
+            drone_ids=group_event.get("drone_ids", []),
+        )
+
+    def _record_connect_group_result(self, group_result: dict[str, object]) -> None:
+        telemetry = self.comp.get("telemetry")
+        if telemetry is None:
+            return
+        definition = self._connect_group_definition(group_result)
+        outcome = self._connect_group_outcome(group_result)
+        connected_value = group_result.get("connected", [])
+        failures_value = group_result.get("failures", [])
+        connected = connected_value if isinstance(connected_value, list) else []
+        failures = failures_value if isinstance(failures_value, list) else []
+        telemetry.record_event(
+            "connect_group_result",
+            ok=group_result.get("ok", False),
+            category=definition.category,
+            code=definition.code,
+            stage=definition.stage,
+            outcome=outcome,
+            group_id=group_result.get("group_id"),
+            drone_ids=group_result.get("drone_ids", []),
+            connected=connected,
+            connected_count=len(connected),
+            failures=failures,
+            failure_count=len(failures),
+            failure_drone_ids=[
+                item.get("drone_id") for item in failures if isinstance(item, dict)
+            ],
+            attempted_count=len(connected) + len(failures),
+            duration_s=group_result.get("duration_s"),
+        )
+
+    def _record_connect_all_event(
+        self,
+        *,
+        ok: bool,
+        report: dict[str, object],
+        error: str | None = None,
+    ) -> None:
+        telemetry = self.comp.get("telemetry")
+        if telemetry is None:
+            return
+        definition = (
+            MissionErrors.Connection.CONNECT_ALL_OK
+            if ok
+            else MissionErrors.Connection.CONNECT_ALL_FAILED
+        )
+        outcome = self._connect_all_outcome(report, ok)
+        failed_group_ids = self._failed_connect_group_ids(report)
+        connected_value = report.get("connected", [])
+        failures_value = report.get("failures", [])
+        connected = connected_value if isinstance(connected_value, list) else []
+        failures = failures_value if isinstance(failures_value, list) else []
+
+        details = {
+            "ok": ok,
+            "category": definition.category,
+            "code": definition.code,
+            "stage": definition.stage,
+            "outcome": outcome,
+            "connected": connected,
+            "connected_count": len(connected),
+            "failures": failures,
+            "failure_count": len(failures),
+            "radio_groups": report.get("radio_groups", {}),
+            "failed_group_ids": failed_group_ids,
+            "duration_s": report.get("duration_s"),
+        }
+        if error is not None:
+            details["error"] = error
+        telemetry.record_event("connect_all", **details)
 
     def _radio_group_summary(self, drone_ids: list[int]) -> dict[int, dict[str, list[int]]]:
         fleet = self.comp.get("fleet")
@@ -248,6 +387,143 @@ class RealMissionApp:
             remaining=sorted(self._watchdog_degraded_followers),
         )
 
+    def _follower_ids_for_groups(self, group_ids: set[int]) -> list[int]:
+        fleet = self.comp.get("fleet")
+        if fleet is None:
+            return []
+        return sorted(
+            drone_id
+            for drone_id in fleet.follower_ids()
+            if fleet.get_radio_group(drone_id) in group_ids
+        )
+
+    def _group_failures(self, failures: list[dict]) -> dict[int, list[dict]]:
+        fleet = self.comp.get("fleet")
+        grouped: dict[int, list[dict]] = {}
+        if fleet is None:
+            return grouped
+        for failure in failures:
+            group_id = failure.get("radio_group")
+            drone_id = failure.get("drone_id")
+            if group_id is None and drone_id is not None:
+                group_id = fleet.get_radio_group(int(drone_id))
+            if group_id is None:
+                continue
+            grouped.setdefault(int(group_id), []).append(failure)
+        return grouped
+
+    def _apply_follower_failure_policy(self, follower_velocity_result: dict) -> None:
+        fleet = self.comp.get("fleet")
+        telemetry = self.comp.get("telemetry")
+        if fleet is None or telemetry is None:
+            return
+
+        failures_value = follower_velocity_result.get("failures", [])
+        successes_value = follower_velocity_result.get("successes", [])
+        failures = [
+            failure for failure in failures_value if isinstance(failure, dict)
+        ] if isinstance(failures_value, list) else []
+        successes = [
+            int(drone_id) for drone_id in successes_value if isinstance(drone_id, int)
+        ] if isinstance(successes_value, list) else []
+
+        failure_groups = self._group_failures(failures)
+        success_group_ids = {fleet.get_radio_group(drone_id) for drone_id in successes}
+
+        for group_id in sorted(success_group_ids.difference(failure_groups.keys())):
+            self._follower_group_failure_streaks[group_id] = 0
+
+        if not failure_groups:
+            return
+
+        triggered_groups: set[int] = set()
+        triggered_details = []
+        for group_id, group_failures in failure_groups.items():
+            next_streak = self._follower_group_failure_streaks.get(group_id, 0) + 1
+            self._follower_group_failure_streaks[group_id] = next_streak
+            non_retryable = any(
+                failure.get("retryable") is False for failure in group_failures
+            )
+            if non_retryable or next_streak >= EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD:
+                triggered_groups.add(group_id)
+                triggered_details.append(
+                    {
+                        "group_id": group_id,
+                        "streak": next_streak,
+                        "non_retryable": non_retryable,
+                        "failure_count": len(group_failures),
+                        "failure_categories": sorted(
+                            {
+                                str(failure.get("failure_category"))
+                                for failure in group_failures
+                                if failure.get("failure_category") is not None
+                            }
+                        ),
+                        "failures": group_failures,
+                    }
+                )
+
+        if not triggered_groups:
+            return
+
+        active_group_ids = set(failure_groups.keys()).union(success_group_ids)
+        hold_triggered = bool(active_group_ids) and active_group_ids.issubset(
+            triggered_groups
+        )
+        follower_ids = self._follower_ids_for_groups(triggered_groups)
+
+        if hold_triggered:
+            definition = MissionErrors.Runtime.EXECUTOR_GROUP_HOLD
+            telemetry.record_event(
+                "executor_group_hold",
+                ok=True,
+                category=definition.category,
+                code=definition.code,
+                stage=definition.stage,
+                action="hold",
+                streak_threshold=EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD,
+                triggered_groups=triggered_details,
+                active_group_ids=sorted(active_group_ids),
+                follower_ids=follower_ids,
+                radio_groups=self._radio_group_summary(follower_ids),
+                group_failure_streaks={
+                    group_id: self._follower_group_failure_streaks.get(group_id, 0)
+                    for group_id in sorted(
+                        set(self._follower_group_failure_streaks).union(active_group_ids)
+                    )
+                },
+            )
+            self._enter_hold_mode(reason="executor_failure")
+            return
+
+        newly_degraded = [
+            drone_id
+            for drone_id in follower_ids
+            if drone_id not in self._watchdog_degraded_followers
+        ]
+        self._watchdog_degraded_followers.update(follower_ids)
+        definition = MissionErrors.Runtime.EXECUTOR_GROUP_DEGRADE
+        telemetry.record_event(
+            "executor_group_degrade",
+            ok=True,
+            category=definition.category,
+            code=definition.code,
+            stage=definition.stage,
+            action="degrade",
+            streak_threshold=EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD,
+            triggered_groups=triggered_details,
+            active_group_ids=sorted(active_group_ids),
+            follower_ids=follower_ids,
+            newly_degraded=newly_degraded,
+            radio_groups=self._radio_group_summary(follower_ids),
+            group_failure_streaks={
+                group_id: self._follower_group_failure_streaks.get(group_id, 0)
+                for group_id in sorted(
+                    set(self._follower_group_failure_streaks).union(active_group_ids)
+                )
+            },
+        )
+
     @staticmethod
     def _split_degraded_commands(
         commands, degraded_follower_ids: set[int]
@@ -322,17 +598,30 @@ class RealMissionApp:
                 "FSM failed before connect",
                 definition=MissionErrors.Readiness.FSM_CONNECT_TRANSITION_FAILED,
             )
+        connect_report: dict[str, object] = {}
         try:
-            self.comp["link_manager"].connect_all()
-            self.comp["telemetry"].record_event("connect_all", ok=True)
+            connect_report = self.comp["link_manager"].connect_all(
+                on_group_start=self._record_connect_group_start,
+                on_group_result=self._record_connect_group_result,
+                parallel_groups=self.comp["config"].comm.connect_groups_in_parallel,
+            )
+            self._record_connect_all_event(ok=True, report=connect_report)
         except Exception as exc:
-            self.comp["telemetry"].record_event(
-                "connect_all", ok=False, error=str(exc)
+            connect_report = self._last_connect_report()
+            self._record_connect_all_event(
+                ok=False,
+                report=connect_report,
+                error=str(exc),
             )
             return self._fail_start(
                 "连接失败",
                 definition=MissionErrors.Connection.CONNECT_ALL_FAILED,
                 exception=exc,
+                connect_outcome=self._connect_all_outcome(connect_report, False),
+                failed_group_ids=self._failed_connect_group_ids(connect_report),
+                connected=connect_report.get("connected", []),
+                failures=connect_report.get("failures", []),
+                radio_groups=connect_report.get("radio_groups", {}),
             )
 
         if self.comp["config"].comm.readiness_wait_for_params:
@@ -423,8 +712,8 @@ class RealMissionApp:
             and leader_ref.trajectory is not None
         ):
             per_leader = leader_ref.trajectory.get("per_leader", {})
-            drone_id = None
             try:
+                trajectory_upload_specs = {}
                 for drone_id in self.comp["fleet"].leader_ids():
                     spec = per_leader.get(drone_id, {})
                     pieces = spec.get("pieces", [])
@@ -443,12 +732,27 @@ class RealMissionApp:
                         capacity=TRAJECTORY_MEMORY_BYTES,
                         fits_memory=fits_memory,
                     )
-                    piece_count = self.comp["transport"].upload_trajectory(
-                        drone_id, pieces, start_addr=start_addr
+                    trajectory_upload_specs[drone_id] = {
+                        "pieces": pieces,
+                        "start_addr": start_addr,
+                        "trajectory_id": trajectory_id,
+                    }
+
+                upload_results = self.comp["transport"].upload_trajectories_by_group(
+                    trajectory_upload_specs,
+                    parallel_groups=self.comp["config"].comm.trajectory_upload_groups_in_parallel,
+                )
+
+                for drone_id in self.comp["fleet"].leader_ids():
+                    spec = per_leader.get(drone_id, {})
+                    pieces = spec.get("pieces", [])
+                    start_addr = spec.get("start_addr", 0)
+                    trajectory_id = spec.get("trajectory_id", 1)
+                    estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
+                    fits_memory = (
+                        start_addr + estimated_bytes <= TRAJECTORY_MEMORY_BYTES
                     )
-                    self.comp["transport"].hl_define_trajectory(
-                        drone_id, trajectory_id, start_addr, piece_count
-                    )
+                    piece_count = int(upload_results[drone_id]["piece_count"])
                     self._readiness_report["trajectory_prepare"][drone_id] = {
                         "uploaded": True,
                         "defined": True,
@@ -474,7 +778,6 @@ class RealMissionApp:
                     "轨迹准备失败",
                     definition=MissionErrors.Readiness.TRAJECTORY_PREPARE_FAILED,
                     exception=exc,
-                    drone_id=drone_id,
                 )
 
             self._set_trajectory_state("prepared")
@@ -849,6 +1152,7 @@ class RealMissionApp:
                         "follower_velocity_execution",
                         [follower_velocity_result],
                     )
+                    self._apply_follower_failure_policy(follower_velocity_result)
                     success_ids = set(follower_velocity_result.get("successes", []))
                     self._clear_watchdog_degrade(active_commands={drone_id: None for drone_id in success_ids})
                 if plan.hold_actions:
@@ -1322,25 +1626,22 @@ class RealMissionApp:
             self._safe_transition(MissionState.HOLD)
         if self._hold_entered_at is None:
             self._hold_entered_at = time.time()
+            hold_definition = (
+                MissionErrors.Runtime.WATCHDOG_HOLD
+                if reason == "watchdog"
+                else (
+                    MissionErrors.Runtime.EXECUTOR_GROUP_HOLD
+                    if reason == "executor_failure"
+                    else None
+                )
+            )
             self.comp["telemetry"].record_event(
                 "hold_entered",
                 ok=True,
                 reason=reason,
-                category=(
-                    MissionErrors.Runtime.WATCHDOG_HOLD.category
-                    if reason == "watchdog"
-                    else None
-                ),
-                code=(
-                    MissionErrors.Runtime.WATCHDOG_HOLD.code
-                    if reason == "watchdog"
-                    else None
-                ),
-                stage=(
-                    MissionErrors.Runtime.WATCHDOG_HOLD.stage
-                    if reason == "watchdog"
-                    else None
-                ),
+                category=(hold_definition.category if hold_definition is not None else None),
+                code=(hold_definition.code if hold_definition is not None else None),
+                stage=(hold_definition.stage if hold_definition is not None else None),
             )
         if self._trajectory_started:
             self._set_trajectory_state("paused")

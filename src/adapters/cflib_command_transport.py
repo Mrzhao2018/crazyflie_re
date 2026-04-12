@@ -1,7 +1,10 @@
 """Cflib命令传输层 - 封装cflib命令调用"""
 
+from __future__ import annotations
+
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from cflib.crazyflie.mem import MemoryElement, Poly4D
 from cflib.utils.reset_estimator import reset_estimator
 
@@ -35,6 +38,55 @@ class CflibCommandTransport:
 
     def last_high_level_command_time(self, drone_id: int) -> float | None:
         return self._last_high_level_command_time.get(drone_id)
+
+    def radio_group(self, drone_id: int) -> int | None:
+        fleet = getattr(self.link_manager, "fleet", None)
+        if fleet is None or not hasattr(fleet, "get_radio_group"):
+            return None
+        return fleet.get_radio_group(drone_id)
+
+    def classify_command_failure(
+        self,
+        *,
+        drone_id: int,
+        command_kind: str,
+        exception: Exception,
+    ) -> dict[str, object]:
+        error_type = type(exception).__name__
+        message = str(exception)
+        lowered = message.lower()
+
+        retryable = True
+        if isinstance(exception, (KeyError, ValueError, AttributeError)):
+            retryable = False
+        if isinstance(exception, RuntimeError) and (
+            "trajectory too large" in lowered
+            or "no trajectory memory" in lowered
+            or "unsupported" in lowered
+        ):
+            retryable = False
+
+        category = "transport_runtime"
+        if isinstance(exception, KeyError):
+            category = "link_lookup"
+        elif isinstance(exception, TimeoutError):
+            category = "timeout"
+        elif isinstance(exception, ValueError):
+            category = "invalid_command"
+        elif isinstance(exception, AttributeError):
+            category = "transport_api"
+        elif isinstance(exception, RuntimeError):
+            category = "transport_runtime"
+
+        return {
+            "drone_id": drone_id,
+            "radio_group": self.radio_group(drone_id),
+            "command_kind": command_kind,
+            "error": message,
+            "error_type": error_type,
+            "failure_category": category,
+            "retryable": retryable,
+        }
 
     def hl_takeoff(self, drone_id: int, height: float, duration: float):
         """高层起飞"""
@@ -138,6 +190,51 @@ class CflibCommandTransport:
             f"Drone {drone_id} uploaded trajectory with {len(trajectory_mem.trajectory)} pieces"
         )
         return len(trajectory_mem.trajectory)
+
+    def upload_trajectories_by_group(
+        self,
+        uploads: dict[int, dict[str, object]],
+        *,
+        parallel_groups: bool = False,
+    ) -> dict[int, dict[str, object]]:
+        grouped: dict[int, list[tuple[int, dict[str, object]]]] = {}
+        for drone_id, spec in uploads.items():
+            group_id = self.radio_group(drone_id)
+            grouped.setdefault(-1 if group_id is None else int(group_id), []).append(
+                (drone_id, spec)
+            )
+
+        def run_group(items: list[tuple[int, dict[str, object]]]) -> dict[int, dict[str, object]]:
+            results: dict[int, dict[str, object]] = {}
+            for grouped_drone_id, grouped_spec in items:
+                pieces = grouped_spec.get("pieces", [])
+                start_addr = int(grouped_spec.get("start_addr", 0))
+                trajectory_id = int(grouped_spec.get("trajectory_id", 1))
+                piece_count = self.upload_trajectory(
+                    grouped_drone_id, pieces, start_addr=start_addr
+                )
+                self.hl_define_trajectory(
+                    grouped_drone_id, trajectory_id, start_addr, piece_count
+                )
+                results[grouped_drone_id] = {
+                    "piece_count": piece_count,
+                    "trajectory_id": trajectory_id,
+                    "start_addr": start_addr,
+                }
+            return results
+
+        if not parallel_groups:
+            sequential_results: dict[int, dict[str, object]] = {}
+            for group_id in sorted(grouped):
+                sequential_results.update(run_group(grouped[group_id]))
+            return sequential_results
+
+        results: dict[int, dict[str, object]] = {}
+        with ThreadPoolExecutor(max_workers=len(grouped) or 1) as executor:
+            futures = [executor.submit(run_group, grouped[group_id]) for group_id in sorted(grouped)]
+            for future in as_completed(futures):
+                results.update(future.result())
+        return results
 
     def reset_estimator_and_wait(self, drone_id: int):
         """重置 Kalman estimator 并等待稳定"""
