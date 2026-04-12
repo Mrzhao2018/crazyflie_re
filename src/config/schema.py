@@ -130,6 +130,12 @@ class ControlConfig:
     gain: float
     damping: float
     max_velocity: float
+    dynamics_model_order: Literal[1, 2] = 1
+    velocity_feedback_gain: float = 0.0
+    acceleration_feedforward_gain: float = 0.0
+    mass_kg: float = 0.033
+    damping_coeff: float = 0.0
+    max_acceleration: float = 2.0
     feedforward_gain: float = 1.0
     max_feedforward_velocity: float = 0.3
     gain_xy: float | None = None

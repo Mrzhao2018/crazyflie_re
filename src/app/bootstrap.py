@@ -15,6 +15,7 @@ from ..domain.follower_reference import FollowerReferenceGenerator
 from ..runtime.pose_bus import PoseBus
 from ..runtime.affine_frame_estimator import AffineFrameEstimator
 from ..runtime.follower_controller import FollowerController
+from ..runtime.follower_controller_v2 import FollowerControllerV2
 from ..runtime.mission_fsm import MissionFSM
 from ..runtime.safety_manager import SafetyManager
 from ..runtime.scheduler import CommandScheduler
@@ -62,7 +63,10 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
     # 3. Runtime层
     pose_bus = PoseBus(fleet, config.safety.pose_timeout)
     frame_estimator = AffineFrameEstimator(fleet)
-    follower_controller = FollowerController(config.control)
+    if config.control.dynamics_model_order == 2:
+        follower_controller = FollowerControllerV2(config.control)
+    else:
+        follower_controller = FollowerController(config.control)
     fsm = MissionFSM()
     safety = SafetyManager(config.safety, fleet)
     scheduler = CommandScheduler(config.comm, fsm, fleet)

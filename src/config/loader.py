@@ -139,6 +139,18 @@ class ConfigLoader:
             raise ValueError("feedforward_gain 不能小于 0")
         if config.control.max_feedforward_velocity < 0:
             raise ValueError("max_feedforward_velocity 不能小于 0")
+        if config.control.dynamics_model_order not in {1, 2}:
+            raise ValueError("dynamics_model_order 只能是 1 或 2")
+        if config.control.velocity_feedback_gain < 0:
+            raise ValueError("velocity_feedback_gain 不能小于 0")
+        if config.control.acceleration_feedforward_gain < 0:
+            raise ValueError("acceleration_feedforward_gain 不能小于 0")
+        if config.control.mass_kg <= 0:
+            raise ValueError("mass_kg 必须大于 0")
+        if config.control.damping_coeff < 0:
+            raise ValueError("damping_coeff 不能小于 0")
+        if config.control.max_acceleration <= 0:
+            raise ValueError("max_acceleration 必须大于 0")
         if config.control.estimated_total_delay_ms < 0:
             raise ValueError("estimated_total_delay_ms 不能小于 0")
         if config.control.delay_prediction_gain < 0:

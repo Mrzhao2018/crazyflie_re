@@ -356,7 +356,13 @@ def simulate_offline_closed_loop(
     leader_ids = fleet.leader_ids()
     follower_ids = fleet.follower_ids()
     positions = np.array(config.mission.nominal_positions, dtype=float)
+    follower_velocities = {
+        drone_id: np.zeros(3, dtype=float) for drone_id in follower_ids
+    }
     applied_commands = {drone_id: np.zeros(3, dtype=float) for drone_id in follower_ids}
+    applied_accelerations = {
+        drone_id: np.zeros(3, dtype=float) for drone_id in follower_ids
+    }
     last_sent_commands: dict[int, np.ndarray] = {}
     phase_labels: list[str] = []
     leader_modes: list[str] = []
@@ -418,6 +424,12 @@ def simulate_offline_closed_loop(
                 and latest_safety is not None
                 and latest_safety.action == "EXECUTE"
             ):
+                acceleration_commands = {
+                    int(drone_id): np.array(command, dtype=float)
+                    for drone_id, command in (
+                        latest_commands.diagnostics.get("commanded_accelerations") or {}
+                    ).items()
+                }
                 for drone_id, velocity in latest_commands.commands.items():
                     previous = last_sent_commands.get(drone_id)
                     if previous is not None:
@@ -426,9 +438,13 @@ def simulate_offline_closed_loop(
                             continue
                     applied_commands[drone_id] = np.array(velocity, dtype=float)
                     last_sent_commands[drone_id] = np.array(velocity, dtype=float)
+                    applied_accelerations[drone_id] = acceleration_commands.get(
+                        drone_id, np.zeros(3, dtype=float)
+                    )
             elif latest_safety is not None and latest_safety.action != "EXECUTE":
                 for drone_id in follower_ids:
                     applied_commands[drone_id] = np.zeros(3, dtype=float)
+                    applied_accelerations[drone_id] = np.zeros(3, dtype=float)
                     last_sent_commands[drone_id] = np.zeros(3, dtype=float)
             next_tx_time += tx_period
 
@@ -490,7 +506,20 @@ def simulate_offline_closed_loop(
 
         for drone_id in follower_ids:
             idx = fleet.id_to_index(drone_id)
-            positions[idx] = positions[idx] + applied_commands[drone_id] * internal_dt
+            if config.control.dynamics_model_order == 2:
+                follower_velocities[drone_id] = (
+                    follower_velocities[drone_id]
+                    + applied_accelerations[drone_id] * internal_dt
+                    - config.control.damping_coeff * follower_velocities[drone_id] * internal_dt
+                )
+                speed = np.linalg.norm(follower_velocities[drone_id])
+                if speed > config.control.max_velocity:
+                    follower_velocities[drone_id] = (
+                        follower_velocities[drone_id] / speed * config.control.max_velocity
+                    )
+                positions[idx] = positions[idx] + follower_velocities[drone_id] * internal_dt
+            else:
+                positions[idx] = positions[idx] + applied_commands[drone_id] * internal_dt
 
     return OfflineClosedLoopReplay(
         times=times,

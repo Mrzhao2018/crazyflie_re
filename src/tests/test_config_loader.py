@@ -9,6 +9,36 @@ assert config.comm.connect_groups_in_parallel is False
 assert config.comm.trajectory_upload_groups_in_parallel is False
 assert config.control.time_delay_compensation_enabled is False
 assert config.control.estimated_total_delay_ms == 0.0
+assert config.control.dynamics_model_order == 1
+assert config.control.velocity_feedback_gain == 0.8
+assert config.control.acceleration_feedforward_gain == 1.0
+assert config.control.mass_kg == 0.033
+assert config.control.damping_coeff == 0.15
+assert config.control.max_acceleration == 2.0
+
+bad_model_order = ConfigLoader.load("config")
+bad_model_order.control.dynamics_model_order = 3
+try:
+    ConfigLoader._validate(bad_model_order)
+    raise AssertionError("Expected dynamics_model_order validation to fail")
+except ValueError as exc:
+    assert "dynamics_model_order" in str(exc)
+
+bad_mass = ConfigLoader.load("config")
+bad_mass.control.mass_kg = 0.0
+try:
+    ConfigLoader._validate(bad_mass)
+    raise AssertionError("Expected mass_kg validation to fail")
+except ValueError as exc:
+    assert "mass_kg" in str(exc)
+
+bad_max_acc = ConfigLoader.load("config")
+bad_max_acc.control.max_acceleration = 0.0
+try:
+    ConfigLoader._validate(bad_max_acc)
+    raise AssertionError("Expected max_acceleration validation to fail")
+except ValueError as exc:
+    assert "max_acceleration" in str(exc)
 
 bad_delay = ConfigLoader.load("config")
 bad_delay.control.estimated_total_delay_ms = -1.0

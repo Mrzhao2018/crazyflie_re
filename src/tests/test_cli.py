@@ -200,4 +200,95 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     assert len(rendered["trials"]) == 2
     assert '"comparison"' in result.stdout
 
+with tempfile.TemporaryDirectory() as tmp_dir:
+    output_path = Path(tmp_dir) / "model_order_ablation.json"
+    baseline_path = Path(tmp_dir) / "baseline_results.json"
+    second_order_path = Path(tmp_dir) / "second_order_baseline_results.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "generate_baseline_sweep.py",
+            "--grid",
+            "quick",
+            "--limit-trials",
+            "1",
+            "--dt",
+            "5.0",
+            "--total-time",
+            "10.0",
+            "--output",
+            str(baseline_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "generate_second_order_baseline_sweep.py",
+            "--grid",
+            "quick",
+            "--limit-trials",
+            "1",
+            "--dt",
+            "5.0",
+            "--total-time",
+            "10.0",
+            "--output",
+            str(second_order_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "generate_model_order_ablation.py",
+            "--dt",
+            "5.0",
+            "--total-time",
+            "10.0",
+            "--output",
+            str(output_path),
+            "--baseline-results",
+            str(baseline_path),
+            "--second-order-baseline-results",
+            str(second_order_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(rendered["trials"]) == 2
+    assert '"comparison"' in result.stdout
+
+with tempfile.TemporaryDirectory() as tmp_dir:
+    output_path = Path(tmp_dir) / "second_order_baseline_results.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "generate_second_order_baseline_sweep.py",
+            "--grid",
+            "quick",
+            "--limit-trials",
+            "1",
+            "--dt",
+            "5.0",
+            "--total-time",
+            "10.0",
+            "--output",
+            str(output_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered = json.loads(output_path.read_text(encoding="utf-8"))
+    assert rendered["trial_count"] == 1
+    assert rendered["best_trial"] is not None
+    assert '"trial_count"' in result.stdout
+
 print("[OK] Unified CLI verified")

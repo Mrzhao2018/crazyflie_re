@@ -11,6 +11,7 @@ class FollowerReferenceSet:
     follower_ids: list[int]
     target_positions: dict  # {drone_id: np.ndarray}
     target_velocities: dict | None
+    target_accelerations: dict | None
     frame_condition_number: float
     valid: bool
 
@@ -35,6 +36,7 @@ class FollowerReferenceGenerator:
         self.estimated_total_delay_s = max(0.0, float(estimated_total_delay_ms)) / 1000.0
         self.delay_prediction_gain = max(0.0, float(delay_prediction_gain))
         self._last_target_positions: dict[int, np.ndarray] | None = None
+        self._last_target_velocities: dict[int, np.ndarray] | None = None
         self._last_t_meas: float | None = None
 
     def compute(
@@ -50,16 +52,16 @@ class FollowerReferenceGenerator:
         """
         leader_ids = self.formation.leader_ids
         if any(lid not in leader_measurements for lid in leader_ids):
-            return FollowerReferenceSet([], {}, None, float("inf"), False)
+            return FollowerReferenceSet([], {}, None, None, float("inf"), False)
 
         leader_pos_array = np.array([leader_measurements[lid] for lid in leader_ids])
 
         if len(leader_pos_array) < 4:
-            return FollowerReferenceSet([], {}, None, float("inf"), False)
+            return FollowerReferenceSet([], {}, None, None, float("inf"), False)
 
         # 轻量防御：如果调用方跳过了 frame estimator，这里仍避免 NaN/退化输入继续传播
         if np.isnan(leader_pos_array).any():
-            return FollowerReferenceSet([], {}, None, float("inf"), False)
+            return FollowerReferenceSet([], {}, None, None, float("inf"), False)
 
         p0 = leader_pos_array[0]
         diff_matrix = leader_pos_array[1:] - p0
@@ -67,11 +69,15 @@ class FollowerReferenceGenerator:
         cond = np.linalg.cond(diff_matrix) if rank == 3 else float("inf")
 
         if rank < 3 or cond > self.max_cond:
-            return FollowerReferenceSet([], {}, None, cond, False)
+            return FollowerReferenceSet([], {}, None, None, cond, False)
 
         # 计算稳态
         target_positions = self.afc.steady_state(leader_measurements)
         target_velocities = self._estimate_target_velocities(target_positions, t_meas)
+        target_accelerations = self._estimate_target_accelerations(
+            target_velocities,
+            t_meas,
+        )
         target_positions = self._apply_delay_compensation(
             target_positions,
             target_velocities,
@@ -81,6 +87,7 @@ class FollowerReferenceGenerator:
             follower_ids=list(target_positions.keys()),
             target_positions=target_positions,
             target_velocities=target_velocities,
+            target_accelerations=target_accelerations,
             frame_condition_number=cond,
             valid=True,
         )
@@ -108,8 +115,40 @@ class FollowerReferenceGenerator:
             drone_id: np.array(target, dtype=float).copy()
             for drone_id, target in target_positions.items()
         }
-        self._last_t_meas = float(t_meas) if t_meas is not None else None
         return velocities
+
+    def _estimate_target_accelerations(
+        self,
+        target_velocities: dict[int, np.ndarray] | None,
+        t_meas: float | None,
+    ) -> dict[int, np.ndarray] | None:
+        accelerations = None
+        dt = 0.0
+        if self._last_t_meas is not None and t_meas is not None:
+            dt = float(t_meas) - self._last_t_meas
+
+        if (
+            target_velocities is not None
+            and self._last_target_velocities is not None
+            and dt > 1e-9
+        ):
+            accelerations = {}
+            for drone_id, velocity in target_velocities.items():
+                previous = self._last_target_velocities.get(drone_id)
+                if previous is None:
+                    continue
+                accelerations[drone_id] = (velocity - previous) / dt
+
+        self._last_target_velocities = (
+            {
+                drone_id: np.array(velocity, dtype=float).copy()
+                for drone_id, velocity in target_velocities.items()
+            }
+            if target_velocities is not None
+            else None
+        )
+        self._last_t_meas = float(t_meas) if t_meas is not None else None
+        return accelerations
 
     def _apply_delay_compensation(
         self,

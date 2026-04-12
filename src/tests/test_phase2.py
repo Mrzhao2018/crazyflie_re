@@ -12,6 +12,7 @@ from src.domain.leader_reference import LeaderReferenceGenerator
 from src.domain.follower_reference import FollowerReferenceGenerator
 from src.runtime.affine_frame_estimator import AffineFrameEstimator
 from src.runtime.follower_controller import FollowerController
+from src.runtime.follower_controller_v2 import FollowerControllerV2
 from src.runtime.pose_snapshot import PoseSnapshot
 
 print("=== 加载配置 ===")
@@ -59,6 +60,11 @@ follower_ref_next = follower_gen.compute(
     0.1,
 )
 assert follower_ref_next.target_velocities is not None
+follower_ref_next2 = follower_gen.compute(
+    {lid: pos + np.array([0.2, 0.0, 0.0]) for lid, pos in leader_ref.positions.items()},
+    0.2,
+)
+assert follower_ref_next2.target_accelerations is not None
 
 delay_follower_gen = FollowerReferenceGenerator(
     formation,
@@ -75,6 +81,11 @@ delay_follower_ref = delay_follower_gen.compute(
 )
 assert delay_follower_ref.valid is True
 assert delay_follower_ref.target_velocities is not None
+delay_follower_ref2 = delay_follower_gen.compute(
+    {lid: pos + np.array([0.2, 0.0, 0.0]) for lid, pos in leader_ref.positions.items()},
+    0.2,
+)
+assert delay_follower_ref2.target_accelerations is not None
 sample_follower_id = next(iter(delay_follower_ref.target_positions))
 baseline_follower_ref = follower_gen.compute(
     {lid: pos + np.array([0.1, 0.0, 0.0]) for lid, pos in leader_ref.positions.items()},
@@ -104,5 +115,23 @@ assert commands_ff.diagnostics["feedforward_followers"]
 assert commands_ff.diagnostics["radial_scaled_followers"]
 sample_cmd = next(iter(commands_ff.commands.values()))
 assert abs(sample_cmd[2]) <= config.control.max_velocity
+
+print("\n=== 测试FollowerControllerV2 ===")
+config.control.dynamics_model_order = 2
+config.control.velocity_feedback_gain = 0.8
+config.control.acceleration_feedforward_gain = 1.0
+config.control.max_acceleration = 2.0
+controller_v2 = FollowerControllerV2(config.control)
+commands_v2_seed = controller_v2.compute(
+    snapshot, follower_ref_next, fleet.follower_ids(), fleet
+)
+assert len(commands_v2_seed.commands) == len(fleet.follower_ids())
+commands_v2 = controller_v2.compute(
+    snapshot, follower_ref_next2, fleet.follower_ids(), fleet
+)
+assert commands_v2.diagnostics["feedforward_followers"]
+assert commands_v2.diagnostics["acceleration_feedforward_followers"]
+sample_cmd_v2 = next(iter(commands_v2.commands.values()))
+assert np.linalg.norm(sample_cmd_v2) <= config.control.max_velocity + 1e-9
 
 print("\n[SUCCESS] 第二阶段算法层测试通过！")

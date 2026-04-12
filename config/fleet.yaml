@@ -47,6 +47,12 @@ control:
   radial_gain_scale_xy: 0.30
   damping: 2.0
   max_velocity: 0.7
+  dynamics_model_order: 1
+  velocity_feedback_gain: 0.8
+  acceleration_feedforward_gain: 1.0
+  mass_kg: 0.033
+  damping_coeff: 0.15
+  max_acceleration: 2.0
   feedforward_gain: 0.6
   feedforward_gain_xy: 0.7
   feedforward_gain_z: 0.35

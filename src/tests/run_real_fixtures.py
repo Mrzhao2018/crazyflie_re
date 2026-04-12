@@ -385,6 +385,7 @@ class FakeFollowerRefGen:
                     6: np.array([0.0, 0.0, 1.0]),
                 },
                 "target_velocities": None,
+                "target_accelerations": None,
             },
         )()
 
