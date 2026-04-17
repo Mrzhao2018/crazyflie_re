@@ -158,6 +158,8 @@ class TelemetryRecorder:
             ),
         }
 
+    _FLOAT_ROUND_DIGITS = 9
+
     def _json_safe(self, value):
         if isinstance(value, dict):
             return {self._json_safe(k): self._json_safe(v) for k, v in value.items()}
@@ -173,7 +175,9 @@ class TelemetryRecorder:
             if isinstance(value, np.integer):
                 return int(value)
             if isinstance(value, np.floating):
-                return float(value)
+                return round(float(value), self._FLOAT_ROUND_DIGITS)
+        if isinstance(value, float):
+            return round(value, self._FLOAT_ROUND_DIGITS)
         return value
 
     def close(self) -> None:

@@ -97,10 +97,16 @@ class SafetyManager:
                 condition_number=follower_ref.frame_condition_number,
             )
 
-        # 5. 检查命令饱和
+        # 5. 检查命令饱和（优先复用 controller diagnostics 里的范数，避免重复计算）
         if commands is not None:
+            precomputed_norms = commands.diagnostics.get("command_norms") or {}
             for drone_id, cmd in commands.commands.items():
-                norm = float(np.linalg.norm(cmd))
+                norm_value = precomputed_norms.get(drone_id)
+                norm = (
+                    float(norm_value)
+                    if norm_value is not None
+                    else float(np.linalg.norm(cmd))
+                )
                 if norm > self.config.max_command_norm:
                     add_reason(
                         "COMMAND_SATURATED",

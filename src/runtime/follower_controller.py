@@ -132,6 +132,11 @@ class FollowerController:
 
             commands[fid] = velocity.copy()
 
+        command_norms = {
+            fid: float(np.linalg.norm(velocity))
+            for fid, velocity in commands.items()
+        }
+
         return FollowerCommandSet(
             commands=commands,
             diagnostics={
@@ -139,5 +144,6 @@ class FollowerController:
                 "missing_reference_followers": missing_reference,
                 "feedforward_followers": feedforward_applied,
                 "radial_scaled_followers": radial_scaled_followers,
+                "command_norms": command_norms,
             },
         )

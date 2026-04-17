@@ -202,6 +202,15 @@ class FollowerControllerV2:
                 t_meas=float(snapshot.t_meas),
             )
 
+        command_norms = {
+            fid: float(np.linalg.norm(velocity))
+            for fid, velocity in commands.items()
+        }
+        commanded_acceleration_norms = {
+            fid: float(np.linalg.norm(acc))
+            for fid, acc in commanded_accelerations.items()
+        }
+
         return FollowerCommandSet(
             commands=commands,
             diagnostics={
@@ -211,5 +220,7 @@ class FollowerControllerV2:
                 "acceleration_feedforward_followers": acceleration_feedforward_applied,
                 "radial_scaled_followers": radial_scaled_followers,
                 "commanded_accelerations": commanded_accelerations,
+                "command_norms": command_norms,
+                "commanded_acceleration_norms": commanded_acceleration_norms,
             },
         )

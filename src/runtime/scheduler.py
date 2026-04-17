@@ -1,8 +1,10 @@
 """命令调度器 - 控制发包频率和门控"""
 
 import time
-from collections import defaultdict
 from collections.abc import Mapping, Sized
+
+import numpy as np
+
 from .pose_snapshot import PoseSnapshot
 from .mission_fsm import MissionState, MissionFSM, CommandPolicy
 from .command_plan import TxPlan, FollowerAction, LeaderAction, HoldAction
@@ -35,6 +37,18 @@ class CommandScheduler:
         self.leader_update_interval = self._interval_from_frequency(config.leader_update_freq)
         self.hold_tx_interval = self._interval_from_frequency(config.parked_hold_freq)
         self.follower_cmd_deadband = config.follower_cmd_deadband
+        # 预先按 radio group 分桶，避免每次 plan() 都重新聚合
+        self._follower_groups: dict[int, list[int]] = {}
+        self._leader_groups: dict[int, list[int]] = {}
+        if fleet_model is not None:
+            for drone_id in fleet_model.follower_ids():
+                self._follower_groups.setdefault(
+                    fleet_model.get_radio_group(drone_id), []
+                ).append(drone_id)
+            for drone_id in fleet_model.leader_ids():
+                self._leader_groups.setdefault(
+                    fleet_model.get_radio_group(drone_id), []
+                ).append(drone_id)
 
     def _radio_group(self, drone_id: int) -> int:
         if self.fleet is None:
@@ -42,16 +56,38 @@ class CommandScheduler:
         return self.fleet.get_radio_group(drone_id)
 
     def _group_drone_ids(self, drone_ids: list[int]) -> dict[int, list[int]]:
-        grouped: dict[int, list[int]] = defaultdict(list)
+        if not drone_ids:
+            return {}
+        drone_set = set(drone_ids)
+        grouped: dict[int, list[int]] = {}
+        # fast path: restrict the prebuilt groups to the active subset
+        if self._follower_groups or self._leader_groups:
+            for group_id, members in self._follower_groups.items():
+                selection = [d for d in members if d in drone_set]
+                if selection:
+                    grouped[group_id] = selection
+            for group_id, members in self._leader_groups.items():
+                selection = [d for d in members if d in drone_set]
+                if selection:
+                    existing = grouped.setdefault(group_id, [])
+                    existing.extend(selection)
+            # any drone not covered (e.g. tests with bare ints) falls back below
+            covered = {drone for members in grouped.values() for drone in members}
+            missing = [d for d in drone_ids if d not in covered]
+            if missing:
+                for drone_id in missing:
+                    grouped.setdefault(self._radio_group(drone_id), []).append(drone_id)
+            return grouped
+
         for drone_id in drone_ids:
-            grouped[self._radio_group(drone_id)].append(drone_id)
-        return dict(grouped)
+            grouped.setdefault(self._radio_group(drone_id), []).append(drone_id)
+        return grouped
 
     def _group_commands(self, command_dict: dict) -> dict[int, dict]:
-        grouped: dict[int, dict] = defaultdict(dict)
+        grouped: dict[int, dict] = {}
         for drone_id, command in command_dict.items():
-            grouped[self._radio_group(drone_id)][drone_id] = command
-        return dict(grouped)
+            grouped.setdefault(self._radio_group(drone_id), {})[drone_id] = command
+        return grouped
 
     @staticmethod
     def _group_counts(grouped: Mapping[int, Sized]) -> dict[int, int]:
@@ -116,7 +152,8 @@ class CommandScheduler:
             policy = self._policy_for_state(mission_state)
 
         if safety.action == "ABORT":
-            return TxPlan([], [], [], diagnostics={**diagnostics, "reason": "abort"})
+            diagnostics["reason"] = "abort"
+            return TxPlan([], [], [], diagnostics=diagnostics)
 
         hold_actions = []
         if safety.action == "HOLD" or policy.follower_mode == "hold":
@@ -134,22 +171,15 @@ class CommandScheduler:
             hold_actions, hold_sent_groups, hold_blocked_groups, hold_grouped = (
                 self._build_hold_actions(hold_targets, now)
             )
-            return TxPlan(
-                [],
-                [],
-                hold_actions,
-                diagnostics={
-                    **diagnostics,
-                    "reason": (
-                        "hold_rate_limited"
-                        if hold_targets and not hold_actions
-                        else "hold"
-                    ),
-                    "hold_tx_groups_sent": hold_sent_groups,
-                    "hold_tx_groups_blocked": hold_blocked_groups,
-                    "hold_group_counts": self._group_counts(hold_grouped),
-                },
+            diagnostics["reason"] = (
+                "hold_rate_limited"
+                if hold_targets and not hold_actions
+                else "hold"
             )
+            diagnostics["hold_tx_groups_sent"] = hold_sent_groups
+            diagnostics["hold_tx_groups_blocked"] = hold_blocked_groups
+            diagnostics["hold_group_counts"] = self._group_counts(hold_grouped)
+            return TxPlan([], [], hold_actions, diagnostics=diagnostics)
 
         if parked_follower_ids:
             hold_actions, hold_sent_groups, hold_blocked_groups, hold_grouped = (
@@ -183,12 +213,8 @@ class CommandScheduler:
                 self.last_leader_update_time = now
 
         if policy.follower_mode != "velocity":
-            return TxPlan(
-                leader_actions,
-                [],
-                hold_actions,
-                diagnostics={**diagnostics, "reason": "policy_blocks_follower"},
-            )
+            diagnostics["reason"] = "policy_blocks_follower"
+            return TxPlan(leader_actions, [], hold_actions, diagnostics=diagnostics)
 
         command_dict = follower_cmds.commands if follower_cmds is not None else {}
         if parked_follower_ids:
@@ -199,24 +225,13 @@ class CommandScheduler:
                 if drone_id not in parked_set
             }
         if not command_dict:
-            return TxPlan(
-                leader_actions,
-                [],
-                hold_actions,
-                diagnostics={
-                    **diagnostics,
-                    "reason": "hold_only" if hold_actions else "no_follower_commands",
-                },
-            )
+            diagnostics["reason"] = "hold_only" if hold_actions else "no_follower_commands"
+            return TxPlan(leader_actions, [], hold_actions, diagnostics=diagnostics)
 
         filtered_commands = self._filter_commands_by_deadband(command_dict)
         if not filtered_commands:
-            return TxPlan(
-                leader_actions,
-                [],
-                hold_actions,
-                diagnostics={**diagnostics, "reason": "deadband_blocked"},
-            )
+            diagnostics["reason"] = "deadband_blocked"
+            return TxPlan(leader_actions, [], hold_actions, diagnostics=diagnostics)
 
         grouped_commands = self._group_commands(filtered_commands)
         actions = []
@@ -261,11 +276,12 @@ class CommandScheduler:
         elif not actions and blocked_groups:
             reason = "rate_limited"
 
+        diagnostics["reason"] = reason
         return TxPlan(
             leader_actions=leader_actions,
             follower_actions=actions,
             hold_actions=hold_actions,
-            diagnostics={**diagnostics, "reason": reason},
+            diagnostics=diagnostics,
         )
 
     def _filter_commands_by_deadband(self, command_dict):
@@ -279,7 +295,7 @@ class CommandScheduler:
                 filtered[drone_id] = vel
                 continue
 
-            delta = float(((vel - last_vel) ** 2).sum() ** 0.5)
+            delta = float(np.linalg.norm(vel - last_vel))
             if delta >= self.follower_cmd_deadband:
                 filtered[drone_id] = vel
 

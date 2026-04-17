@@ -29,6 +29,12 @@ class RealMissionApp:
 
     def __init__(self, components: dict):
         self.comp = components
+        # 常用组件在 __init__ 一次性取出，主循环 + _record_* 直接走属性而非 dict 访问。
+        self.telemetry = components.get("telemetry")
+        self.fleet = components.get("fleet")
+        self.scheduler = components.get("scheduler")
+        self.transport = components.get("transport")
+        self.fsm = components.get("fsm")
         self._running = False
         self._last_processed_seq = -1
         self._trajectory_started = False
@@ -959,8 +965,12 @@ class RealMissionApp:
 
     def run(self):
         """主循环"""
+        telemetry = self.telemetry
+        fleet = self.fleet
+        scheduler = self.scheduler
+        fsm = self.fsm
         # 检查start是否成功
-        if self.comp["fsm"].state() != MissionState.SETTLE:
+        if fsm.state() != MissionState.SETTLE:
             logger.error("系统未就绪，无法进入RUN")
             return
 
@@ -968,15 +978,26 @@ class RealMissionApp:
         if not self._safe_transition(MissionState.RUN):
             return
         logger.info("=== 进入主循环 ===")
-        self.comp["telemetry"].record_event("run_entered", ok=True)
+        telemetry.record_event("run_entered", ok=True)
 
         mission_start_time = time.time()
         manual_input = self.comp.get("manual_input")
+        pose_bus = self.comp["pose_bus"]
+        safety = self.comp["safety"]
+        health_bus = self.comp["health_bus"]
+        leader_ref_gen = self.comp["leader_ref_gen"]
+        leader_executor = self.comp["leader_executor"]
+        follower_executor = self.comp["follower_executor"]
+        frame_estimator = self.comp["frame_estimator"]
+        follower_ref_gen = self.comp["follower_ref_gen"]
+        follower_controller = self.comp["follower_controller"]
+        mission_profile = self.comp["mission_profile"]
+        startup_mode = self.comp.get("startup_mode", "auto")
         try:
             if manual_input is not None:
                 manual_input.start()
                 manual_cfg = self.comp["config"].startup.manual
-                self.comp["telemetry"].record_event(
+                telemetry.record_event(
                     "manual_input_started",
                     ok=True,
                     axis=(manual_cfg.default_axis if manual_cfg is not None else None),
@@ -984,17 +1005,17 @@ class RealMissionApp:
 
             while self._running:
                 # 1. 获取最新pose
-                snapshot = self.comp["pose_bus"].latest()
+                snapshot = pose_bus.latest()
                 if snapshot is None:
                     time.sleep(0.01)
                     continue
 
                 # 2. Pre-safety检查（基于snapshot）
-                pre_safety = self.comp["safety"].evaluate(
+                pre_safety = safety.evaluate(
                     snapshot,
                     frame=None,
                     commands=None,
-                    health=self.comp["health_bus"].latest(),
+                    health=health_bus.latest(),
                 )
 
                 if pre_safety.action == "ABORT":
@@ -1010,35 +1031,35 @@ class RealMissionApp:
                     time.sleep(0.1)
                     continue
 
-                if self.comp["fsm"].state() == MissionState.HOLD:
+                if fsm.state() == MissionState.HOLD:
                     self._safe_transition(MissionState.RUN)
-                    self.comp["telemetry"].record_event("hold_recovered", ok=True)
+                    telemetry.record_event("hold_recovered", ok=True)
                     self._clear_hold_tracking()
 
                 t_elapsed = time.time() - mission_start_time
                 self._poll_manual_input()
-                leader_ref = self.comp["leader_ref_gen"].reference_at(t_elapsed)
+                leader_ref = leader_ref_gen.reference_at(t_elapsed)
 
                 if (
-                    self.comp.get("startup_mode", "auto") == "auto"
+                    startup_mode == "auto"
                     and leader_ref.mode == "trajectory"
                     and not self._trajectory_started
                     and self._phase_label(t_elapsed) == "formation_run"
                 ):
                     from ..runtime.command_plan import LeaderAction
 
-                    self.comp["leader_executor"].execute(
+                    leader_executor.execute(
                         [
                             LeaderAction(
                                 kind="start_trajectory",
-                                drone_ids=self.comp["fleet"].leader_ids(),
+                                drone_ids=fleet.leader_ids(),
                                 payload=leader_ref.trajectory or {},
                             )
                         ]
                     )
                     self._trajectory_started = True
                     self._set_trajectory_state("running")
-                    self.comp["telemetry"].record_event(
+                    telemetry.record_event(
                         "trajectory_start",
                         ok=True,
                         mission_elapsed=t_elapsed,
@@ -1046,18 +1067,18 @@ class RealMissionApp:
                     )
 
                 if (
-                    self.comp.get("startup_mode", "auto") == "auto"
-                    and t_elapsed >= self.comp["mission_profile"].total_time()
+                    startup_mode == "auto"
+                    and t_elapsed >= mission_profile.total_time()
                 ):
                     logger.info(
                         "Mission duration reached (%.2fs), starting orderly landing",
                         t_elapsed,
                     )
-                    self.comp["telemetry"].record_event(
+                    telemetry.record_event(
                         "mission_complete",
                         ok=True,
                         elapsed=t_elapsed,
-                        total_time=self.comp["mission_profile"].total_time(),
+                        total_time=mission_profile.total_time(),
                     )
                     self._orderly_land(
                         reason_event="mission_complete_land",
@@ -1075,32 +1096,31 @@ class RealMissionApp:
                 commands = None
 
                 # 只有新pose才进行frame/ref/control计算
-                if snapshot.seq > self._last_processed_seq:
-                    frame = self.comp["frame_estimator"].estimate(
-                        snapshot, self.comp["fleet"].leader_ids()
-                    )
+                is_new_pose = snapshot.seq > self._last_processed_seq
+                if is_new_pose:
+                    frame = frame_estimator.estimate(snapshot, fleet.leader_ids())
 
                     if frame.valid:
-                        follower_ref = self.comp["follower_ref_gen"].compute(
+                        follower_ref = follower_ref_gen.compute(
                             frame.leader_positions,
                             snapshot.t_meas,
                         )
 
                     if follower_ref is not None and follower_ref.valid:
-                        commands = self.comp["follower_controller"].compute(
+                        commands = follower_controller.compute(
                             snapshot,
                             follower_ref,
-                            self.comp["fleet"].follower_ids(),
-                            self.comp["fleet"],
+                            fleet.follower_ids(),
+                            fleet,
                         )
 
                 # 7. Full-safety检查（包含frame、commands和follower_ref）
-                safety_decision = self.comp["safety"].evaluate(
+                safety_decision = safety.evaluate(
                     snapshot,
                     frame,
                     commands,
                     follower_ref,
-                    health=self.comp["health_bus"].latest(),
+                    health=health_bus.latest(),
                 )
 
                 # 处理安全决策
@@ -1117,9 +1137,9 @@ class RealMissionApp:
                     time.sleep(0.1)
                     continue
 
-                if self.comp["fsm"].state() == MissionState.HOLD:
+                if fsm.state() == MissionState.HOLD:
                     self._safe_transition(MissionState.RUN)
-                    self.comp["telemetry"].record_event("hold_recovered", ok=True)
+                    telemetry.record_event("hold_recovered", ok=True)
                     self._clear_hold_tracking()
 
                 active_commands, _degraded_commands = self._split_degraded_commands(
@@ -1136,9 +1156,9 @@ class RealMissionApp:
                 )
 
                 # 8. 调度器生成发送计划
-                plan = self.comp["scheduler"].plan(
+                plan = scheduler.plan(
                     snapshot,
-                    self.comp["fsm"].state(),
+                    fsm.state(),
                     leader_ref,
                     filtered_commands,
                     safety_decision,
@@ -1147,10 +1167,10 @@ class RealMissionApp:
 
                 # 9. 执行
                 if plan.leader_actions:
-                    leader_results = self.comp["leader_executor"].execute(plan.leader_actions)
+                    leader_results = leader_executor.execute(plan.leader_actions)
                     self._record_executor_summary("leader_execution", leader_results)
                 if plan.follower_actions:
-                    follower_velocity_result = self.comp["follower_executor"].execute_velocity(
+                    follower_velocity_result = follower_executor.execute_velocity(
                         plan.follower_actions
                     )
                     self._record_executor_summary(
@@ -1161,7 +1181,7 @@ class RealMissionApp:
                     success_ids = set(follower_velocity_result.get("successes", []))
                     self._clear_watchdog_degrade(active_commands={drone_id: None for drone_id in success_ids})
                 if plan.hold_actions:
-                    follower_hold_result = self.comp["follower_executor"].execute_hold(plan.hold_actions)
+                    follower_hold_result = follower_executor.execute_hold(plan.hold_actions)
                     self._record_executor_summary(
                         "follower_hold_execution",
                         [follower_hold_result],
@@ -1169,15 +1189,26 @@ class RealMissionApp:
 
                 self._check_velocity_stream_watchdog(snapshot.t_meas)
 
-                if snapshot.seq > self._last_processed_seq:
-                    self._last_processed_seq = snapshot.seq
+                # Telemetry record 只在新 pose 上产生，旧 seq 不再重复记录。
+                if not is_new_pose:
+                    time.sleep(0.01)
+                    continue
 
-                follower_command_norms = {}
+                self._last_processed_seq = snapshot.seq
+
+                follower_command_norms: dict[int, float] = {}
                 if commands is not None:
-                    follower_command_norms = {
-                        drone_id: float((cmd**2).sum() ** 0.5)
-                        for drone_id, cmd in commands.commands.items()
-                    }
+                    precomputed = commands.diagnostics.get("command_norms") or {}
+                    if precomputed:
+                        follower_command_norms = {
+                            drone_id: float(value)
+                            for drone_id, value in precomputed.items()
+                        }
+                    else:
+                        follower_command_norms = {
+                            drone_id: float(np.linalg.norm(cmd))
+                            for drone_id, cmd in commands.commands.items()
+                        }
 
                 measured_positions = self._measured_positions(snapshot)
                 leader_reference_positions = self._leader_reference_positions(leader_ref)
@@ -1187,11 +1218,11 @@ class RealMissionApp:
                 phase_label = self._phase_label(t_elapsed)
                 leader_mode = getattr(leader_ref, "mode", None)
 
-                self.comp["telemetry"].log(
+                telemetry.log(
                     TelemetryRecord(
                         t_wall=time.time(),
-                        mission_state=self.comp["fsm"].state().value,
-                        startup_mode=self.comp.get("startup_mode"),
+                        mission_state=fsm.state().value,
+                        startup_mode=startup_mode,
                         mission_elapsed=t_elapsed,
                         trajectory_state=self._trajectory_state,
                         trajectory_terminal_reason=self._trajectory_terminal_reason,
@@ -1200,16 +1231,14 @@ class RealMissionApp:
                         measured_positions=measured_positions,
                         fresh_mask={
                             drone_id: bool(
-                                snapshot.fresh_mask[
-                                    self.comp["fleet"].id_to_index(drone_id)
-                                ]
+                                snapshot.fresh_mask[fleet.id_to_index(drone_id)]
                             )
-                            for drone_id in self.comp["fleet"].all_ids()
+                            for drone_id in fleet.all_ids()
                         },
                         disconnected_ids=list(snapshot.disconnected_ids),
                         health={
                             drone_id: sample.values
-                            for drone_id, sample in self.comp["health_bus"].latest().items()
+                            for drone_id, sample in health_bus.latest().items()
                         },
                         frame_valid=(frame.valid if frame is not None else None),
                         frame_condition_number=(
@@ -1224,11 +1253,7 @@ class RealMissionApp:
                         safety_reason_codes=safety_decision.reason_codes,
                         scheduler_reason=(plan.diagnostics or {}).get("reason"),
                         scheduler_diagnostics=plan.diagnostics or {},
-                        leader_reference_source=(
-                            type(self.comp["leader_ref_gen"]).__name__
-                            if "leader_ref_gen" in self.comp
-                            else None
-                        ),
+                        leader_reference_source=type(leader_ref_gen).__name__,
                         manual_axis=self._manual_axis(),
                         manual_input_age=self._manual_input_age(),
                         leader_action_count=len(plan.leader_actions),
@@ -1487,32 +1512,34 @@ class RealMissionApp:
         return mission_profile.phase_at(t_elapsed).name
 
     def _measured_positions(self, snapshot) -> dict[int, list[float]]:
+        fleet = self.comp["fleet"]
         return {
-            drone_id: np.array(
-                snapshot.positions[self.comp["fleet"].id_to_index(drone_id)],
-                dtype=float,
-            )
-            .round(9)
-            .tolist()
-            for drone_id in self.comp["fleet"].all_ids()
+            drone_id: snapshot.positions[fleet.id_to_index(drone_id)].tolist()
+            for drone_id in fleet.all_ids()
         }
 
     @staticmethod
     def _leader_reference_positions(leader_ref) -> dict[int, list[float]]:
         positions = getattr(leader_ref, "positions", {}) or {}
-        return {
-            int(drone_id): np.array(position, dtype=float).round(9).tolist()
-            for drone_id, position in positions.items()
-        }
+        result: dict[int, list[float]] = {}
+        for drone_id, position in positions.items():
+            if isinstance(position, np.ndarray):
+                result[int(drone_id)] = position.tolist()
+            else:
+                result[int(drone_id)] = [float(v) for v in position]
+        return result
 
     @staticmethod
     def _follower_reference_positions(follower_ref) -> dict[int, list[float]]:
         if follower_ref is None or not follower_ref.valid:
             return {}
-        return {
-            int(drone_id): np.array(position, dtype=float).round(9).tolist()
-            for drone_id, position in follower_ref.target_positions.items()
-        }
+        result: dict[int, list[float]] = {}
+        for drone_id, position in follower_ref.target_positions.items():
+            if isinstance(position, np.ndarray):
+                result[int(drone_id)] = position.tolist()
+            else:
+                result[int(drone_id)] = [float(v) for v in position]
+        return result
 
     def _manual_initial_structure_reference(self):
         manual_source = self.comp.get("leader_ref_gen")

@@ -33,8 +33,10 @@ class FleetModel:
                 self._radio_groups[drone.radio_group] = []
             self._radio_groups[drone.radio_group].append(drone.id)
 
+        self._all_ids_cached: List[int] = [d.id for d in self._drones]
+
     def all_ids(self) -> List[int]:
-        return [d.id for d in self._drones]
+        return self._all_ids_cached.copy()
 
     def leader_ids(self) -> List[int]:
         return self._leader_ids.copy()
