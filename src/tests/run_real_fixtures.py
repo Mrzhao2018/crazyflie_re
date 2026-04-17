@@ -588,6 +588,8 @@ def build_components(
                     "follower_tx_freq": 8.0,
                     "readiness_wait_for_params": True,
                     "readiness_reset_estimator": True,
+                    "connect_groups_in_parallel": False,
+                    "trajectory_upload_groups_in_parallel": False,
                 },
             )(),
             "mission": type(
