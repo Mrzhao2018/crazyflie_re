@@ -1,6 +1,6 @@
 """配置数据结构定义"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -161,3 +161,6 @@ class AppConfig:
     startup: StartupConfig
     safety: SafetyConfig
     control: ControlConfig
+    # ``raw_files`` 保存 ConfigLoader 读入的 yaml 原始文本，按文件名排序；用于
+    # 审计 / 指纹化时复用，避免再次回读磁盘。
+    raw_files: dict[str, str] = field(default_factory=dict)

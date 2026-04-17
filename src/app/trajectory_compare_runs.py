@@ -243,8 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def run(args: argparse.Namespace) -> int:
     result = compare_run_summaries(
         args.paths,
         formation_rmse_threshold=args.formation_rmse_threshold,
@@ -266,6 +265,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     print(rendered)
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return run(args)
 
 
 if __name__ == "__main__":

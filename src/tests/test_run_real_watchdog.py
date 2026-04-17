@@ -3,7 +3,8 @@
 import time
 
 from src.app.mission_errors import MissionErrors
-from src.app.run_real import RealMissionApp, VELOCITY_STREAM_WATCHDOG_FACTOR
+from src.app.run_real import RealMissionApp
+from src.runtime.failure_policy import VELOCITY_STREAM_WATCHDOG_FACTOR
 from src.tests.run_real_fixtures import build_components, make_snapshot
 from src.runtime.mission_fsm import MissionState
 from src.runtime.safety_manager import SafetyDecision
@@ -158,7 +159,7 @@ assert not any(
     event["event"] == "executor_group_degrade"
     for event in components["telemetry"].events
 )
-assert app._follower_group_failure_streaks[2] == 1
+assert app.failure_policy.follower_group_failure_streaks[2] == 1
 
 app._apply_follower_failure_policy(retryable_failure)
 degrade_event = next(
@@ -175,7 +176,7 @@ assert degrade_event["details"]["triggered_groups"][0]["group_id"] == 2
 assert degrade_event["details"]["triggered_groups"][0]["streak"] == 2
 assert degrade_event["details"]["triggered_groups"][0]["non_retryable"] is False
 assert degrade_event["details"]["group_failure_streaks"][2] == 2
-assert 5 in app._watchdog_degraded_followers
+assert 5 in app.failure_policy.watchdog_degraded_followers
 assert components["fsm"].state() != MissionState.HOLD
 
 

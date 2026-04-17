@@ -8,6 +8,7 @@ from .pose_snapshot import PoseSnapshot
 from ..config.schema import ControlConfig
 from ..domain.follower_reference import FollowerReferenceSet
 from .follower_controller import FollowerCommandSet
+from .follower_controller_base import FollowerControllerBase
 
 
 @dataclass
@@ -17,7 +18,7 @@ class _FollowerStateEstimate:
     t_meas: float
 
 
-class FollowerControllerV2:
+class FollowerControllerV2(FollowerControllerBase):
     """二阶 follower 控制器。
 
     第一版保持最小侵入：
@@ -26,34 +27,12 @@ class FollowerControllerV2:
     - 不改变下游 scheduler/executor/transport 的 velocity output 语义
     """
 
-    @staticmethod
-    def _resolve_axis_gain(value: float | None, fallback: float) -> float:
-        return fallback if value is None else value
-
     def __init__(self, config: ControlConfig):
-        self.gain = config.gain
-        self.max_velocity = config.max_velocity
+        super().__init__(config)
         self.max_acceleration = config.max_acceleration
-        self.feedforward_gain = config.feedforward_gain
         self.velocity_feedback_gain = config.velocity_feedback_gain
         self.acceleration_feedforward_gain = config.acceleration_feedforward_gain
         self.damping_coeff = config.damping_coeff
-        self.gain_xy = self._resolve_axis_gain(config.gain_xy, config.gain)
-        self.gain_z = self._resolve_axis_gain(config.gain_z, config.gain)
-        self.feedforward_gain_xy = self._resolve_axis_gain(
-            config.feedforward_gain_xy, config.feedforward_gain
-        )
-        self.feedforward_gain_z = self._resolve_axis_gain(
-            config.feedforward_gain_z, config.feedforward_gain
-        )
-        self.max_feedforward_velocity_xy = self._resolve_axis_gain(
-            config.max_feedforward_velocity_xy, config.max_feedforward_velocity
-        )
-        self.max_feedforward_velocity_z = self._resolve_axis_gain(
-            config.max_feedforward_velocity_z, config.max_feedforward_velocity
-        )
-        self.radial_gain_scale_xy = config.radial_gain_scale_xy
-        self.radial_feedforward_scale_xy = config.radial_feedforward_scale_xy
         self._state_estimates: dict[int, _FollowerStateEstimate] = {}
 
     def _estimate_current_velocity(
@@ -70,15 +49,6 @@ class FollowerControllerV2:
             return previous.velocity.copy()
         return (position - previous.position) / dt
 
-    def _clip_xy_and_z(self, velocity: np.ndarray) -> np.ndarray:
-        clipped = np.array(velocity, dtype=float)
-        xy_norm = np.linalg.norm(clipped[:2])
-        if xy_norm > self.max_feedforward_velocity_xy > 0:
-            clipped[:2] = clipped[:2] / xy_norm * self.max_feedforward_velocity_xy
-        if abs(clipped[2]) > self.max_feedforward_velocity_z > 0:
-            clipped[2] = np.sign(clipped[2]) * self.max_feedforward_velocity_z
-        return clipped
-
     def compute(
         self,
         snapshot: PoseSnapshot,
@@ -86,23 +56,16 @@ class FollowerControllerV2:
         active_follower_ids: list[int],
         fleet_model,
     ) -> FollowerCommandSet:
-        commands = {}
-        skipped_stale = []
-        missing_reference = []
-        feedforward_applied = []
-        acceleration_feedforward_applied = []
-        radial_scaled_followers = []
-        commanded_accelerations = {}
-        follower_radii = {
-            fid: float(
-                np.linalg.norm(
-                    np.array(references.target_positions[fid], dtype=float)[:2]
-                )
-            )
-            for fid in active_follower_ids
-            if fid in references.target_positions
-        }
-        max_radius = max(follower_radii.values(), default=0.0)
+        commands: dict[int, np.ndarray] = {}
+        skipped_stale: list[int] = []
+        missing_reference: list[int] = []
+        feedforward_applied: list[int] = []
+        acceleration_feedforward_applied: list[int] = []
+        commanded_accelerations: dict[int, np.ndarray] = {}
+
+        radial_scales, radial_scaled_followers = self._compute_radial_scales(
+            references, active_follower_ids
+        )
 
         for fid in active_follower_ids:
             if fid not in references.target_positions:
@@ -117,19 +80,14 @@ class FollowerControllerV2:
             p_current = np.array(snapshot.positions[idx], dtype=float)
             p_target = np.array(references.target_positions[fid], dtype=float)
             v_current = self._estimate_current_velocity(fid, p_current, snapshot.t_meas)
-            radius_xy = follower_radii.get(fid, 0.0)
-            radius_ratio = radius_xy / max_radius if max_radius > 1e-9 else 0.0
-            gain_scale_xy = 1.0 + self.radial_gain_scale_xy * radius_ratio
-            ff_scale_xy = 1.0 + self.radial_feedforward_scale_xy * radius_ratio
-            if gain_scale_xy > 1.0 or ff_scale_xy > 1.0:
-                radial_scaled_followers.append(fid)
+            gain_scale_xy, ff_scale_xy = radial_scales.get(fid, (1.0, 1.0))
 
             position_error = p_current - p_target
             target_velocity = None
             if references.target_velocities is not None:
                 raw_target_velocity = references.target_velocities.get(fid)
                 if raw_target_velocity is not None:
-                    target_velocity = self._clip_xy_and_z(raw_target_velocity)
+                    target_velocity = self._clip_feedforward_velocity(raw_target_velocity)
                     feedforward_applied.append(fid)
             target_acceleration = None
             if references.target_accelerations is not None:
@@ -172,7 +130,9 @@ class FollowerControllerV2:
 
             previous = self._state_estimates.get(fid)
             previous_velocity = (
-                previous.velocity.copy() if previous is not None else np.zeros(3, dtype=float)
+                previous.velocity.copy()
+                if previous is not None
+                else np.zeros(3, dtype=float)
             )
             dt = (
                 max(float(snapshot.t_meas) - previous.t_meas, 0.0)
@@ -191,9 +151,7 @@ class FollowerControllerV2:
                     dtype=float,
                 )
 
-            speed = np.linalg.norm(velocity)
-            if speed > self.max_velocity:
-                velocity = velocity / speed * self.max_velocity
+            velocity = self._clip_output_velocity(velocity)
 
             commands[fid] = velocity.copy()
             self._state_estimates[fid] = _FollowerStateEstimate(

@@ -4,8 +4,8 @@ import json
 import tempfile
 from pathlib import Path
 
-from generate_baseline_sweep import run_sweep
-from generate_trajectory_condition_ablation import run_condition_ablation
+from scripts.generate_baseline_sweep import run_sweep
+from scripts.generate_trajectory_condition_ablation import run_condition_ablation
 
 
 with tempfile.TemporaryDirectory() as tmp_dir:

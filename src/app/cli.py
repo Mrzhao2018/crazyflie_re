@@ -6,31 +6,19 @@ import argparse
 import sys
 from typing import Callable
 
-from .offline_reference_viz import main as offline_reference_viz_main
-from .replay_analysis import main as replay_analysis_main
+from . import (
+    offline_reference_viz,
+    replay_analysis,
+    run_sim,
+    trajectory_compare_runs,
+    trajectory_comparison,
+)
 from .run_real import RealMissionApp
-from .run_sim import main as run_sim_main
 from .trajectory_budget_summary import print_trajectory_budget_summary
-from .trajectory_compare_runs import main as trajectory_compare_runs_main
-from .trajectory_comparison import main as trajectory_comparison_main
 from .bootstrap import build_app
 
 
-ArgvBuilder = Callable[[argparse.Namespace], list[str]]
-ArgvRunner = Callable[[list[str]], int]
 CommandHandler = Callable[[argparse.Namespace], int]
-
-
-def _build_argv(*items: object) -> list[str]:
-    argv: list[str] = []
-    for item in items:
-        if item is None:
-            continue
-        if isinstance(item, (list, tuple)):
-            argv.extend(str(value) for value in item)
-            continue
-        argv.append(str(item))
-    return argv
 
 
 def _build_config_parent() -> argparse.ArgumentParser:
@@ -79,63 +67,6 @@ def _command_config_dir(args: argparse.Namespace) -> str:
     return getattr(args, "config_dir", "config")
 
 
-def _build_replay_args(args: argparse.Namespace) -> list[str]:
-    return _build_argv(args.telemetry_path)
-
-
-def _build_viz_args(args: argparse.Namespace) -> list[str]:
-    return _build_argv(
-        "--config-dir",
-        args.config_dir,
-        "--output-dir",
-        args.output_dir,
-        "--dt",
-        args.dt,
-        "--fps",
-        args.fps,
-        "--trail",
-        args.trail,
-        ["--total-time", args.total_time] if args.total_time is not None else None,
-    )
-
-
-def _build_compare_args(args: argparse.Namespace) -> list[str]:
-    return _build_argv(
-        args.telemetry_path,
-        "--config-dir",
-        args.config_dir,
-        ["--output-dir", args.output_dir] if args.output_dir is not None else None,
-        ["--include-all-phases"] if args.include_all_phases else None,
-    )
-
-
-def _build_compare_runs_args(args: argparse.Namespace) -> list[str]:
-    argv = _build_argv(
-        args.paths,
-        ["--output", args.output] if args.output is not None else None,
-    )
-    for option, value in (
-        ("--formation-rmse-threshold", args.formation_rmse_threshold),
-        ("--frame-valid-threshold", args.frame_valid_threshold),
-        ("--leader-rmse-threshold", args.leader_rmse_threshold),
-        ("--follower-rmse-threshold", args.follower_rmse_threshold),
-    ):
-        if value is not None:
-            argv.extend(_build_argv(option, value))
-    return argv
-
-
-def _build_sim_args(args: argparse.Namespace) -> list[str]:
-    return _build_argv(
-        "--config-dir",
-        args.config_dir,
-        "--dt",
-        args.dt,
-        ["--total-time", args.total_time] if args.total_time is not None else None,
-        ["--output", args.output] if args.output is not None else None,
-    )
-
-
 def _run_command(args: argparse.Namespace) -> int:
     return _run_real(args.config_dir, args.startup_mode, args.skip_confirm)
 
@@ -144,43 +75,15 @@ def _budget_command(args: argparse.Namespace) -> int:
     return print_trajectory_budget_summary(args.config_dir)
 
 
-def _argv_command(
-    args: argparse.Namespace,
-    builder: ArgvBuilder,
-    runner: ArgvRunner,
-) -> int:
-    return runner(builder(args))
-
-
-def _replay_command(args: argparse.Namespace) -> int:
-    return _argv_command(args, _build_replay_args, replay_analysis_main)
-
-
-def _viz_command(args: argparse.Namespace) -> int:
-    return _argv_command(args, _build_viz_args, offline_reference_viz_main)
-
-
-def _compare_command(args: argparse.Namespace) -> int:
-    return _argv_command(args, _build_compare_args, trajectory_comparison_main)
-
-
-def _compare_runs_command(args: argparse.Namespace) -> int:
-    return _argv_command(args, _build_compare_runs_args, trajectory_compare_runs_main)
-
-
-def _sim_command(args: argparse.Namespace) -> int:
-    return _argv_command(args, _build_sim_args, run_sim_main)
-
-
 def _command_handlers() -> dict[str, CommandHandler]:
     return {
         "run": _run_command,
         "budget": _budget_command,
-        "replay": _replay_command,
-        "viz": _viz_command,
-        "compare": _compare_command,
-        "compare-runs": _compare_runs_command,
-        "sim": _sim_command,
+        "replay": replay_analysis.run,
+        "viz": offline_reference_viz.run,
+        "compare": trajectory_comparison.run,
+        "compare-runs": trajectory_compare_runs.run,
+        "sim": run_sim.run,
     }
 
 

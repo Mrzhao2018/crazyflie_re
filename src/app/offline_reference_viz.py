@@ -259,8 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def run(args: argparse.Namespace) -> int:
     outputs = generate_reference_visualizations(
         config_dir=args.config_dir,
         output_dir=args.output_dir,
@@ -272,6 +271,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"PNG saved to {outputs.png_path}")
     print(f"GIF saved to {outputs.gif_path}")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return run(args)
 
 
 if __name__ == "__main__":

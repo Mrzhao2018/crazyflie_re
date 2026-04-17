@@ -301,8 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def run(args: argparse.Namespace) -> int:
     outputs = generate_thesis_analysis(
         telemetry_path=args.telemetry_path,
         output_dir=args.output_dir,
@@ -315,6 +314,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Overlay plot saved to {outputs.overlay_png_path}")
     print(f"Error plot saved to {outputs.error_png_path}")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return run(args)
 
 
 if __name__ == "__main__":

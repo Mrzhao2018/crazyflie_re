@@ -87,7 +87,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     result = subprocess.run(
         [
             sys.executable,
-            "generate_baseline_sweep.py",
+            "scripts/generate_baseline_sweep.py",
             "--grid",
             "quick",
             "--limit-trials",
@@ -116,7 +116,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     subprocess.run(
         [
             sys.executable,
-            "generate_baseline_sweep.py",
+            "scripts/generate_baseline_sweep.py",
             "--grid",
             "quick",
             "--limit-trials",
@@ -135,7 +135,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     result = subprocess.run(
         [
             sys.executable,
-            "generate_delay_compensation_ablation.py",
+            "scripts/generate_delay_compensation_ablation.py",
             "--dt",
             "5.0",
             "--total-time",
@@ -161,7 +161,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     subprocess.run(
         [
             sys.executable,
-            "generate_baseline_sweep.py",
+            "scripts/generate_baseline_sweep.py",
             "--grid",
             "quick",
             "--limit-trials",
@@ -180,7 +180,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     result = subprocess.run(
         [
             sys.executable,
-            "generate_trajectory_condition_ablation.py",
+            "scripts/generate_trajectory_condition_ablation.py",
             "--dt",
             "5.0",
             "--total-time",
@@ -207,7 +207,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     subprocess.run(
         [
             sys.executable,
-            "generate_baseline_sweep.py",
+            "scripts/generate_baseline_sweep.py",
             "--grid",
             "quick",
             "--limit-trials",
@@ -226,7 +226,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     subprocess.run(
         [
             sys.executable,
-            "generate_second_order_baseline_sweep.py",
+            "scripts/generate_second_order_baseline_sweep.py",
             "--grid",
             "quick",
             "--limit-trials",
@@ -245,7 +245,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     result = subprocess.run(
         [
             sys.executable,
-            "generate_model_order_ablation.py",
+            "scripts/generate_model_order_ablation.py",
             "--dt",
             "5.0",
             "--total-time",
@@ -270,7 +270,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     result = subprocess.run(
         [
             sys.executable,
-            "generate_second_order_baseline_sweep.py",
+            "scripts/generate_second_order_baseline_sweep.py",
             "--grid",
             "quick",
             "--limit-trials",

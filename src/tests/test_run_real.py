@@ -201,7 +201,7 @@ components = build_components(
     [SafetyDecision("EXECUTE", []), SafetyDecision("ABORT", ["stop"])],
 )
 app = RealMissionApp(components)
-app._record_executor_summary(
+app.telemetry_reporter.record_executor_summary(
     "leader_execution",
     [
         {
@@ -228,7 +228,7 @@ app._record_executor_summary(
         }
     ],
 )
-app._record_executor_summary(
+app.telemetry_reporter.record_executor_summary(
     "follower_velocity_execution",
     [
         {

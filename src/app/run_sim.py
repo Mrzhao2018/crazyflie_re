@@ -60,8 +60,7 @@ def build_offline_smoke_summary(
     }
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def run(args: argparse.Namespace) -> int:
     summary = build_offline_smoke_summary(
         config_dir=args.config_dir,
         dt=args.dt,
@@ -74,6 +73,11 @@ def main(argv: list[str] | None = None) -> int:
         output_path.write_text(rendered, encoding="utf-8")
     print(rendered)
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return run(args)
 
 
 if __name__ == "__main__":

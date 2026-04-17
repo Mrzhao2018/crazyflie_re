@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from generate_second_order_baseline_sweep import run_second_order_sweep
+from scripts.generate_second_order_baseline_sweep import run_second_order_sweep
 
 
 with tempfile.TemporaryDirectory() as tmp_dir:

@@ -198,11 +198,22 @@ class ConfigLoader:
         ConfigLoader._validate_cross_config(config)
 
     @staticmethod
+    def _read_raw_text(path: Path) -> str | None:
+        if not path.exists():
+            return None
+        return path.read_text(encoding="utf-8")
+
+    @staticmethod
     def load(config_dir: str, startup_mode_override: str | None = None) -> AppConfig:
         """加载所有配置文件"""
         config_path = Path(config_dir)
 
-        # 加载各个配置文件
+        raw_files: dict[str, str] = {}
+        for path in sorted(config_path.glob("*.yaml")):
+            text = ConfigLoader._read_raw_text(path)
+            if text is not None:
+                raw_files[path.name] = text
+
         fleet_data = ConfigLoader._load_yaml_file(config_path / "fleet.yaml")
         mission_data = ConfigLoader._load_yaml_file(config_path / "mission.yaml")
         comm_data = ConfigLoader._load_yaml_file(config_path / "comm.yaml")
@@ -257,6 +268,7 @@ class ConfigLoader:
             startup=startup,
             safety=safety,
             control=control,
+            raw_files=raw_files,
         )
 
         ConfigLoader._validate(app_config)

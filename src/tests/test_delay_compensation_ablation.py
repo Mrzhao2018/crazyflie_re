@@ -4,8 +4,8 @@ import json
 import tempfile
 from pathlib import Path
 
-from generate_baseline_sweep import run_sweep
-from generate_delay_compensation_ablation import run_delay_ablation
+from scripts.generate_baseline_sweep import run_sweep
+from scripts.generate_delay_compensation_ablation import run_delay_ablation
 
 
 with tempfile.TemporaryDirectory() as tmp_dir:
