@@ -91,6 +91,12 @@ assert components["telemetry"].opened is not None
 assert Path(components["telemetry"].opened).name.startswith("run_real_")
 assert Path(components["telemetry"].opened).suffix == ".jsonl"
 assert components["telemetry_path"] == components["telemetry"].opened
+assert components["telemetry"].header is not None
+assert components["telemetry"].header["config_fingerprint"]["startup_mode"] == "auto"
+assert components["telemetry"].header["config_fingerprint"]["leader_count"] == 4
+assert components["telemetry"].header["fleet"]["drone_count"] == 6
+assert components["telemetry"].header["fleet"]["leader_ids"] == [1, 2, 3, 4]
+assert components["telemetry"].header["fleet"]["follower_ids"] == [5, 6]
 assert components["transport"].wait_calls == components["fleet"].all_ids()
 assert components["transport"].reset_calls == components["fleet"].all_ids()
 assert any(event["event"] == "startup_mode" for event in components["telemetry"].events)
@@ -343,17 +349,17 @@ assert record.measured_positions[1] == [1.0, 0.0, 0.8]
 assert record.fresh_mask[1] is True
 assert record.disconnected_ids == []
 assert record.leader_mode == "trajectory"
-assert record.config_fingerprint["startup_mode"] == "auto"
-assert record.config_fingerprint["leader_count"] == 4
+# run() was called directly without start(); header writing is start()'s job so it stays None here.
+assert components["telemetry"].header is None
 assert record.health
-assert len(record.phase_events) >= 1
+assert len(components["telemetry"].events) >= 1
 assert record.startup_mode == "auto"
 assert any(
     event["event"] in {"fsm_transition", "preflight", "trajectory_prepare"}
     for event in components["telemetry"].events
 )
 assert components["telemetry"].summary()["event_counts"]
-assert components["telemetry"].export_replay()["phase_events"]
+assert components["telemetry"].phase_events()
 if any(
     event["event"] == "trajectory_prepare" for event in components["telemetry"].events
 ):

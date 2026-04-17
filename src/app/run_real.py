@@ -583,6 +583,11 @@ class RealMissionApp:
         telemetry_path.parent.mkdir(parents=True, exist_ok=True)
         self.comp["telemetry_path"] = str(telemetry_path)
         self.comp["telemetry"].open(str(telemetry_path))
+        self.comp["telemetry"].write_header(
+            config_fingerprint=self._config_fingerprint,
+            readiness=self._readiness_report,
+            fleet_meta=self._fleet_meta(),
+        )
         self.comp["telemetry"].record_event(
             "startup_mode", mode=self.comp.get("startup_mode", "auto")
         )
@@ -1190,9 +1195,6 @@ class RealMissionApp:
                         mission_elapsed=t_elapsed,
                         trajectory_state=self._trajectory_state,
                         trajectory_terminal_reason=self._trajectory_terminal_reason,
-                        readiness=self._readiness_report,
-                        config_fingerprint=self._config_fingerprint,
-                        phase_events=self.comp["telemetry"].phase_events(),
                         snapshot_seq=snapshot.seq,
                         snapshot_t_meas=snapshot.t_meas,
                         measured_positions=measured_positions,
@@ -1373,9 +1375,6 @@ class RealMissionApp:
                 mission_elapsed=t_elapsed,
                 trajectory_state=self._trajectory_state,
                 trajectory_terminal_reason=self._trajectory_terminal_reason,
-                readiness=self._readiness_report,
-                config_fingerprint=self._config_fingerprint,
-                phase_events=telemetry.phase_events(),
                 snapshot_seq=snapshot.seq,
                 snapshot_t_meas=snapshot.t_meas,
                 measured_positions=measured_positions,
@@ -1566,6 +1565,20 @@ class RealMissionApp:
             "trajectory_enabled": (
                 mission.leader_motion.trajectory_enabled if mission is not None else None
             ),
+        }
+
+    def _fleet_meta(self) -> dict:
+        fleet = self.comp.get("fleet")
+        if fleet is None:
+            return {}
+        return {
+            "drone_count": len(fleet.all_ids()),
+            "leader_ids": list(fleet.leader_ids()),
+            "follower_ids": list(fleet.follower_ids()),
+            "radio_groups": {
+                drone_id: fleet.get_radio_group(drone_id)
+                for drone_id in fleet.all_ids()
+            },
         }
 
     def _on_pose_update(self, drone_id, pos, timestamp):

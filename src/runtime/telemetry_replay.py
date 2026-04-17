@@ -1,9 +1,14 @@
-"""Offline telemetry replay analysis helpers."""
+"""Offline telemetry replay analysis helpers.
+
+支持 schema_version=2 的 JSONL：``kind=header`` / ``kind=event`` / ``kind=record``。
+对旧格式（记录内嵌 ``phase_events`` 列表、不带 ``kind`` 字段）保留兼容路径。
+"""
 
 from __future__ import annotations
 
 import json
 from collections import Counter
+from dataclasses import dataclass
 
 
 WATCHDOG_EVENT_CODES = {
@@ -17,6 +22,13 @@ EXECUTOR_EVENT_CODES = {
     "RUNTIME_EXECUTOR_GROUP_DEGRADE": "degrade",
     "RUNTIME_EXECUTOR_GROUP_HOLD": "hold",
 }
+
+
+@dataclass
+class TelemetryStream:
+    header: dict | None
+    events: list[dict]
+    records: list[dict]
 
 
 def _watchdog_summary(events: list[dict]) -> dict:
@@ -92,47 +104,135 @@ def _executor_failure_summary(events: list[dict]) -> dict:
     }
 
 
-def iter_records(path: str):
+def _iter_lines(path: str):
     with open(path, encoding="utf-8") as fh:
         for line_no, line in enumerate(fh, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                yield line_no, json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(
                     f"Invalid telemetry JSON on line {line_no}: {exc}"
                 ) from exc
 
 
+def iter_telemetry(path: str) -> TelemetryStream:
+    """Parse a JSONL telemetry file into (header, events, records).
+
+    Recognises schema_version=2 lines tagged with ``kind`` as well as legacy
+    records that inline ``phase_events`` lists.
+    """
+
+    header: dict | None = None
+    events: list[dict] = []
+    records: list[dict] = []
+    legacy_mode = False
+
+    for _, entry in _iter_lines(path):
+        if not isinstance(entry, dict):
+            continue
+
+        kind = entry.get("kind")
+        if kind == "header":
+            header = entry
+            continue
+        if kind == "event":
+            events.append(_event_from_line(entry))
+            continue
+        if kind == "record":
+            record = {k: v for k, v in entry.items() if k != "kind"}
+            records.append(record)
+            continue
+
+        # Legacy shape: bare record dict with phase_events inline.
+        legacy_mode = True
+        records.append(entry)
+
+    if legacy_mode and not events:
+        seen = set()
+        for record in records:
+            for event in record.get("phase_events", []) or []:
+                key = (
+                    event.get("event"),
+                    json.dumps(event.get("details", {}), sort_keys=True),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                events.append(event)
+
+    return TelemetryStream(header=header, events=events, records=records)
+
+
+def _event_from_line(entry: dict) -> dict:
+    event = {
+        "event": entry.get("event"),
+        "details": entry.get("details", {}) or {},
+    }
+    if "t_wall" in entry:
+        event["t_wall"] = entry["t_wall"]
+    return event
+
+
+def iter_records(path: str):
+    """Legacy helper that yields only record dicts."""
+
+    stream = iter_telemetry(path)
+    for record in stream.records:
+        yield record
+
+
 def load_records(path: str) -> list[dict]:
-    return list(iter_records(path))
+    return list(iter_telemetry(path).records)
 
 
-def analyze_records(records: list[dict]) -> dict:
+def load_telemetry(path: str) -> TelemetryStream:
+    return iter_telemetry(path)
+
+
+def _events_from_records(records: list[dict]) -> list[dict]:
     deduped = []
     seen = set()
     for record in records:
-        for event in record.get("phase_events", []):
+        for event in record.get("phase_events", []) or []:
             key = (
                 event.get("event"),
                 json.dumps(event.get("details", {}), sort_keys=True),
             )
-            if key not in seen:
-                seen.add(key)
-                deduped.append(event)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(event)
+    return deduped
 
-    event_counts = Counter(event.get("event") for event in deduped)
+
+def analyze_records(
+    records: list[dict],
+    events: list[dict] | None = None,
+    *,
+    header: dict | None = None,
+) -> dict:
+    if events is None:
+        events = _events_from_records(records)
+
+    event_counts = Counter(event.get("event") for event in events)
     safety_counts = Counter(record.get("safety_action") for record in records)
     scheduler_reason_counts = Counter(
         record.get("scheduler_reason")
         for record in records
         if record.get("scheduler_reason")
     )
-    config_fingerprint = records[0].get("config_fingerprint") if records else None
-    watchdog_summary = _watchdog_summary(deduped)
-    executor_failure_summary = _executor_failure_summary(deduped)
+
+    if header and isinstance(header, dict) and header.get("config_fingerprint"):
+        config_fingerprint = header.get("config_fingerprint")
+    else:
+        config_fingerprint = (
+            records[0].get("config_fingerprint") if records else None
+        )
+    watchdog_summary = _watchdog_summary(events)
+    executor_failure_summary = _executor_failure_summary(events)
 
     max_command_norm_per_drone = {}
     valid_frame_count = 0
@@ -241,8 +341,16 @@ def analyze_records(records: list[dict]) -> dict:
     }
 
 
-def build_replay(records: list[dict]) -> dict:
-    return {"records": records, "summary": analyze_records(records)}
+def build_replay(records: list[dict], events: list[dict] | None = None) -> dict:
+    return {
+        "records": records,
+        "events": events if events is not None else _events_from_records(records),
+        "summary": analyze_records(records, events=events),
+    }
+
+
+def analyze_telemetry(stream: TelemetryStream) -> dict:
+    return analyze_records(stream.records, stream.events, header=stream.header)
 
 
 def _euclidean_error(actual: list[float], target: list[float]) -> float:

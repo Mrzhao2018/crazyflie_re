@@ -263,9 +263,17 @@ class FakeTelemetry:
         self.records = []
         self.closed = False
         self.events = []
+        self.header = None
 
     def open(self, path):
         self.opened = path
+
+    def write_header(self, *, config_fingerprint=None, readiness=None, fleet_meta=None):
+        self.header = {
+            "config_fingerprint": config_fingerprint or {},
+            "readiness": readiness or {},
+            "fleet": fleet_meta or {},
+        }
 
     def log(self, record):
         self.records.append(record)
@@ -278,13 +286,6 @@ class FakeTelemetry:
 
     def summary(self):
         return {"event_counts": {event["event"]: 1 for event in self.events}}
-
-    def export_replay(self):
-        return {
-            "phase_events": self.phase_events(),
-            "records": self.records,
-            "summary": self.summary(),
-        }
 
     def close(self):
         self.closed = True

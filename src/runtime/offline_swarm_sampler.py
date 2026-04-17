@@ -73,7 +73,6 @@ class OfflineSwarmReplay:
                     "measured_positions": measured_positions,
                     "fresh_mask": fresh_mask,
                     "disconnected_ids": [],
-                    "phase_events": [],
                     "phase_label": self.phase_labels[index],
                     "leader_mode": self.leader_modes[index],
                     "leader_reference_positions": leader_reference_positions,
