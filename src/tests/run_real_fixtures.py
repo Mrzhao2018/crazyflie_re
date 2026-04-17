@@ -120,7 +120,6 @@ class FakeTransport:
         self.velocity_calls = []
         self.high_level_calls = []
         self._last_velocity_command_time = {}
-        self._last_high_level_command_time = {}
 
     def wait_for_params(self, drone_id):
         self.wait_calls.append(drone_id)
@@ -157,15 +156,12 @@ class FakeTransport:
 
     def hl_takeoff(self, drone_id, height, duration):
         self.high_level_calls.append(("takeoff", drone_id, height, duration))
-        self._last_high_level_command_time[drone_id] = 0.0
 
     def hl_land(self, drone_id, height, duration):
         self.high_level_calls.append(("land", drone_id, height, duration))
-        self._last_high_level_command_time[drone_id] = 0.0
 
     def hl_go_to(self, drone_id, x, y, z, duration):
         self.high_level_calls.append(("go_to", drone_id, x, y, z, duration))
-        self._last_high_level_command_time[drone_id] = 0.0
 
     def hl_start_trajectory(
         self,
@@ -187,7 +183,6 @@ class FakeTransport:
                 reversed,
             )
         )
-        self._last_high_level_command_time[drone_id] = 0.0
 
     def cmd_velocity_world(self, drone_id, vx, vy, vz):
         self.velocity_calls.append((drone_id, vx, vy, vz))
@@ -195,13 +190,9 @@ class FakeTransport:
 
     def notify_setpoint_stop(self, drone_id):
         self.high_level_calls.append(("notify_stop", drone_id))
-        self._last_high_level_command_time[drone_id] = 0.0
 
     def last_velocity_command_time(self, drone_id):
         return self._last_velocity_command_time.get(drone_id)
-
-    def last_high_level_command_time(self, drone_id):
-        return self._last_high_level_command_time.get(drone_id)
 
 
 class FakePoseSource:

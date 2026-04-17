@@ -111,7 +111,6 @@ transport.hl_start_trajectory(
 calls = link_manager.scfs[1].cf.high_level_commander.calls
 assert calls[-1][0] == "start_trajectory"
 assert calls[-1][1] == 7
-assert transport.last_high_level_command_time(1) is not None
 
 transport.cmd_velocity_world(1, 0.1, 0.2, 0.3)
 assert link_manager.scfs[1].cf.commander.calls[-1] == ("velocity", 0.1, 0.2, 0.3, 0)

@@ -191,9 +191,13 @@ class CflibLinkManager:
 
     def close_all(self):
         """关闭所有连接"""
-        for drone_id, scf in self._scfs.items():
-            logger.info(f"Closing connection to drone {drone_id}")
-            scf.close_link()
+        # 逐机关闭时如果某一个 close_link 抛异常，不能让剩下的链路泄漏。
+        for drone_id, scf in list(self._scfs.items()):
+            logger.info("Closing connection to drone %s", drone_id)
+            try:
+                scf.close_link()
+            except Exception:
+                logger.exception("Failed to close link for drone %s", drone_id)
         self._scfs.clear()
 
     def get(self, drone_id: int) -> Any:

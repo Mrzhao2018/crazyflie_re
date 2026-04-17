@@ -21,7 +21,6 @@ class CflibCommandTransport:
     def __init__(self, link_manager):
         self.link_manager = link_manager
         self._last_velocity_command_time: dict[int, float] = {}
-        self._last_high_level_command_time: dict[int, float] = {}
 
     @staticmethod
     def _now() -> float:
@@ -30,14 +29,8 @@ class CflibCommandTransport:
     def _mark_velocity_command(self, drone_id: int) -> None:
         self._last_velocity_command_time[drone_id] = self._now()
 
-    def _mark_high_level_command(self, drone_id: int) -> None:
-        self._last_high_level_command_time[drone_id] = self._now()
-
     def last_velocity_command_time(self, drone_id: int) -> float | None:
         return self._last_velocity_command_time.get(drone_id)
-
-    def last_high_level_command_time(self, drone_id: int) -> float | None:
-        return self._last_high_level_command_time.get(drone_id)
 
     def radio_group(self, drone_id: int) -> int | None:
         fleet = getattr(self.link_manager, "fleet", None)
@@ -92,21 +85,18 @@ class CflibCommandTransport:
         """高层起飞"""
         scf = self.link_manager.get(drone_id)
         scf.cf.high_level_commander.takeoff(height, duration)
-        self._mark_high_level_command(drone_id)
         logger.info(f"Drone {drone_id} takeoff to {height}m")
 
     def hl_land(self, drone_id: int, height: float, duration: float):
         """高层降落"""
         scf = self.link_manager.get(drone_id)
         scf.cf.high_level_commander.land(height, duration)
-        self._mark_high_level_command(drone_id)
         logger.info(f"Drone {drone_id} landing")
 
     def hl_go_to(self, drone_id: int, x: float, y: float, z: float, duration: float):
         """高层go_to"""
         scf = self.link_manager.get(drone_id)
         scf.cf.high_level_commander.go_to(x, y, z, 0, duration)
-        self._mark_high_level_command(drone_id)
         logger.debug(f"Drone {drone_id} go_to ({x:.2f}, {y:.2f}, {z:.2f})")
 
     def cmd_velocity_world(self, drone_id: int, vx: float, vy: float, vz: float):
@@ -119,7 +109,6 @@ class CflibCommandTransport:
         """通知停止低层setpoint流，恢复高层控制权限"""
         scf = self.link_manager.get(drone_id)
         scf.cf.commander.send_notify_setpoint_stop()
-        self._mark_high_level_command(drone_id)
 
     def hl_define_trajectory(
         self, drone_id: int, trajectory_id: int, offset: int, n_pieces: int
@@ -127,7 +116,6 @@ class CflibCommandTransport:
         """定义已上传轨迹"""
         scf = self.link_manager.get(drone_id)
         scf.cf.high_level_commander.define_trajectory(trajectory_id, offset, n_pieces)
-        self._mark_high_level_command(drone_id)
         logger.info(f"Drone {drone_id} define trajectory {trajectory_id}")
 
     def hl_start_trajectory(
@@ -148,7 +136,6 @@ class CflibCommandTransport:
             relative_yaw=relative_yaw,
             reversed=reversed,
         )
-        self._mark_high_level_command(drone_id)
         logger.info(f"Drone {drone_id} start trajectory {trajectory_id}")
 
     def wait_for_params(self, drone_id: int):
