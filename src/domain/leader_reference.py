@@ -40,7 +40,7 @@ class LeaderReferenceGenerator:
             }
             return LeaderReferenceFrame(
                 t_ref=t,
-                leader_ids=self.leader_ids.copy(),
+                leader_ids=list(self.leader_ids),
                 positions={},
                 mode="trajectory",
                 trajectory={"per_leader": per_leader},
