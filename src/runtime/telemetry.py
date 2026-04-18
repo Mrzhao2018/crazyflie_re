@@ -172,7 +172,12 @@ class TelemetryRecorder:
             kind, payload = item
             if self._fh is None:
                 continue
-            safe_payload = self._json_safe(payload)
+            if kind == "record":
+                safe_payload = {"kind": "record", **self._json_safe_record(
+                    {k: v for k, v in payload.items() if k != "kind"}
+                )}
+            else:
+                safe_payload = self._json_safe(payload)
             self._fh.write(json.dumps(safe_payload, ensure_ascii=False) + "\n")
             pending_since_flush += 1
             # event / header 立即 flush，record 批量 flush
@@ -209,6 +214,46 @@ class TelemetryRecorder:
     # ---- json normalization ---------------------------------------------
 
     _FLOAT_ROUND_DIGITS = 9
+
+    @staticmethod
+    def _dump_value(value):
+        """非递归地把 record 字段里可能出现的 numpy / 容器类型压成 json-safe。"""
+        if value is None:
+            return None
+        if isinstance(value, (str, int, bool)):
+            return value
+        if isinstance(value, float):
+            return round(value, TelemetryRecorder._FLOAT_ROUND_DIGITS)
+        if np is not None:
+            if isinstance(value, np.bool_):
+                return bool(value)
+            if isinstance(value, np.integer):
+                return int(value)
+            if isinstance(value, np.floating):
+                return round(float(value), TelemetryRecorder._FLOAT_ROUND_DIGITS)
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+        return value
+
+    def _json_safe_record(self, record_dict: dict) -> dict:
+        """针对 TelemetryRecord.asdict() 结果的快速路径。"""
+        out: dict = {}
+        for key, value in record_dict.items():
+            if isinstance(value, dict):
+                out[key] = {
+                    self._dump_value(k): (
+                        self._json_safe(v) if isinstance(v, (dict, list, tuple)) else self._dump_value(v)
+                    )
+                    for k, v in value.items()
+                }
+            elif isinstance(value, list):
+                out[key] = [
+                    self._json_safe(v) if isinstance(v, (dict, list, tuple)) else self._dump_value(v)
+                    for v in value
+                ]
+            else:
+                out[key] = self._dump_value(value)
+        return out
 
     def _json_safe(self, value):
         if isinstance(value, dict):
