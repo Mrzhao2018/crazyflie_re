@@ -1,16 +1,18 @@
-"""最小遥测记录器
+"""最小遥测记录器 —— 后台 writer 线程 + queue。
 
-schema_version=2 将 JSONL 拆分成三种 kind：
-
-- 第 1 行：``{"kind":"header", "schema_version":2, "config_fingerprint":..., "readiness":..., "fleet":{...}}``
-- 事件：``{"kind":"event", "t_wall":..., "event":..., "details":{...}}``
-- 记录：``{"kind":"record", "t_wall":..., "mission_state":..., ...}``（不再携带全量 ``phase_events`` / ``config_fingerprint`` / ``readiness``）
+schema_version=2 三种 kind：header / event / record。
+主循环线程只做入队；真正的 json.dumps + fh.write 发生在 daemon writer 线程里。
+`close()` 会 drain 队列并 join 线程。
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 import json
-from collections import Counter
+import queue
+import threading
 import time
+from collections import Counter
 
 try:
     import numpy as np
@@ -20,6 +22,7 @@ except ImportError:  # pragma: no cover
 
 SCHEMA_VERSION = 2
 _DEFAULT_FLUSH_EVERY_N = 50
+_QUEUE_MAX_SIZE = 4096  # record-heavy 长任务上限；超过后主循环会丢 record（但保留 event）
 
 
 @dataclass
@@ -69,12 +72,39 @@ class TelemetryRecorder:
         self._record_projections: list[_RecordProjection] = []
         self._record_count = 0
         self._header_written = False
-        self._pending_since_flush = 0
         self._flush_every_n = max(1, int(flush_every_n))
+        self._queue: queue.Queue[tuple[str, dict] | None] = queue.Queue(
+            maxsize=_QUEUE_MAX_SIZE
+        )
+        self._writer_thread: threading.Thread | None = None
+        self._records_dropped = 0
+
+    # ---- lifecycle -------------------------------------------------------
 
     def open(self, path: str) -> None:
         self._fh = open(path, "w", encoding="utf-8")
         self._header_written = False
+        self._start_writer()
+
+    def _start_writer(self) -> None:
+        if self._writer_thread is not None and self._writer_thread.is_alive():
+            return
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop, name="telemetry-writer", daemon=True
+        )
+        self._writer_thread.start()
+
+    def close(self) -> None:
+        if self._writer_thread is not None:
+            self._queue.put(None)  # sentinel
+            self._writer_thread.join(timeout=5.0)
+            self._writer_thread = None
+        if self._fh is not None:
+            self._fh.flush()
+            self._fh.close()
+            self._fh = None
+
+    # ---- producer-side API ----------------------------------------------
 
     def write_header(
         self,
@@ -83,7 +113,6 @@ class TelemetryRecorder:
         readiness: dict | None = None,
         fleet_meta: dict | None = None,
     ) -> None:
-        """Emit the schema_version=2 header line. Safe to call exactly once per open()."""
         if self._fh is None:
             self._header_written = True
             return
@@ -97,8 +126,7 @@ class TelemetryRecorder:
             "readiness": self._json_safe(readiness or {}),
             "fleet": self._json_safe(fleet_meta or {}),
         }
-        self._fh.write(json.dumps(header, ensure_ascii=False) + "\n")
-        self._fh.flush()
+        self._queue.put(("header", header))
         self._header_written = True
 
     def log(self, record: TelemetryRecord) -> None:
@@ -113,12 +141,10 @@ class TelemetryRecorder:
         if self._fh is None:
             return
         payload = {"kind": "record", **asdict(record)}
-        safe_payload = self._json_safe(payload)
-        self._fh.write(json.dumps(safe_payload, ensure_ascii=False) + "\n")
-        self._pending_since_flush += 1
-        if self._pending_since_flush >= self._flush_every_n:
-            self._fh.flush()
-            self._pending_since_flush = 0
+        try:
+            self._queue.put_nowait(("record", payload))
+        except queue.Full:
+            self._records_dropped += 1
 
     def record_event(self, event: str, **details) -> None:
         event_payload = {
@@ -130,10 +156,31 @@ class TelemetryRecorder:
         if self._fh is None:
             return
         line_payload = {"kind": "event", **event_payload}
-        self._fh.write(
-            json.dumps(self._json_safe(line_payload), ensure_ascii=False) + "\n"
-        )
-        self._fh.flush()
+        # event 不能丢 —— 使用阻塞 put（主循环可容忍毫秒级阻塞）
+        self._queue.put(("event", line_payload))
+
+    # ---- writer-side -----------------------------------------------------
+
+    def _writer_loop(self) -> None:
+        pending_since_flush = 0
+        while True:
+            item = self._queue.get()
+            if item is None:  # shutdown sentinel
+                if self._fh is not None:
+                    self._fh.flush()
+                return
+            kind, payload = item
+            if self._fh is None:
+                continue
+            safe_payload = self._json_safe(payload)
+            self._fh.write(json.dumps(safe_payload, ensure_ascii=False) + "\n")
+            pending_since_flush += 1
+            # event / header 立即 flush，record 批量 flush
+            if kind in ("event", "header") or pending_since_flush >= self._flush_every_n:
+                self._fh.flush()
+                pending_since_flush = 0
+
+    # ---- observation -----------------------------------------------------
 
     def phase_events(self) -> list[dict]:
         return list(self._phase_events)
@@ -156,7 +203,10 @@ class TelemetryRecorder:
                 if self._record_projections
                 else None
             ),
+            "records_dropped": self._records_dropped,
         }
+
+    # ---- json normalization ---------------------------------------------
 
     _FLOAT_ROUND_DIGITS = 9
 
@@ -179,10 +229,3 @@ class TelemetryRecorder:
         if isinstance(value, float):
             return round(value, self._FLOAT_ROUND_DIGITS)
         return value
-
-    def close(self) -> None:
-        if self._fh is not None:
-            self._fh.flush()
-            self._fh.close()
-            self._fh = None
-            self._pending_since_flush = 0
