@@ -1,7 +1,9 @@
 boundary_min: [-1.6, -1.6, -0.1]
-boundary_max: [1.6, 1.6, 1.70]
+boundary_max: [1.7, 1.7, 1.80]
 pose_timeout: 1.0
 max_condition_number: 100.0
-max_command_norm: 2.0
+max_command_norm: 2.5
 estimator_variance_threshold: 0.001
+hold_auto_land_timeout: 3.0
+velocity_stream_watchdog_action: degrade
 min_vbat: 0.0

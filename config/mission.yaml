@@ -1,36 +1,43 @@
-duration: 20.0
+duration: 40.0
 formation_type: "pyramid"
 leader_motion:
   mode: "affine_rotation"
-  angular_rate: 0.04
+  angular_rate: 0.15
   translation: [0.0, 0.0, 0.0]
-  trajectory_enabled: false
+  trajectory_enabled: true
   trajectory_id: 1
-  trajectory_time_scale: 1.0
+  trajectory_time_scale: 0.95
   trajectory_relative_position: false
   trajectory_relative_yaw: false
   trajectory_reversed: false
   trajectory_type: "poly4d"
   trajectory_start_addr: 0
   trajectory_pieces: []
-  trajectory_sample_dt: 5.0
+  trajectory_sample_dt: 1.2
+  condition_penalty_enabled: false
+  condition_soft_limit: 100.0
+  condition_penalty_scale: 0.0
 phases:
   - name: "settle"
     t_start: 0.0
-    t_end: 3.0
+    t_end: 4.0
     mode: "settle"
+  - name: "trajectory_entry"
+    t_start: 4.0
+    t_end: 6.0
+    mode: "trajectory_entry"
   - name: "formation_run"
-    t_start: 3.0
-    t_end: 20.0
+    t_start: 6.0
+    t_end: 40.0
     mode: "formation_run"
 nominal_positions:
   - [ 1.05,  0.00, 0.35]   # leader 1
-  - [ 0.00,  0.00, 1.10]   # follower 2
+  - [ 0.22, -0.20, 1.10]   # follower 2
   - [ 0.48,  0.32, 0.95]   # follower 3
   - [ 0.00,  1.05, 0.35]   # leader 4
   - [ 0.00,  0.72, 0.82]   # follower 5
   - [ 0.38, -0.24, 0.72]   # follower 6
   - [-1.05,  0.00, 0.35]   # leader 7
-  - [ 0.00,  0.00, 1.50]   # leader 8
+  - [ 0.00,  0.00, 1.60]   # leader 8
   - [-0.48,  0.32, 0.95]   # follower 9
   - [-0.38, -0.24, 0.72]   # follower 10

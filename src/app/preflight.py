@@ -45,11 +45,12 @@ class PreflightRunner:
         pose_bus = self.comp["pose_bus"]
         health_bus = self.comp["health_bus"]
         config = self.comp["config"]
+        readiness = self.comp.get("readiness_report", {})
 
         add_check(
             "LEADER_COUNT",
-            len(fleet.leader_ids()) == 4,
-            "V2 requires exactly 4 leaders",
+            len(fleet.leader_ids()) >= 4,
+            "Affine formation requires at least 4 leaders",
             actual=len(fleet.leader_ids()),
         )
 
@@ -68,6 +69,21 @@ class PreflightRunner:
             rank=span.rank,
             condition_number=span.condition_number,
         )
+
+        trajectory_prepare = readiness.get("trajectory_prepare", {})
+        if config.mission.leader_motion.trajectory_enabled:
+            leaders_ready = bool(trajectory_prepare) and all(
+                item.get("uploaded")
+                and item.get("defined")
+                and item.get("fits_memory", True)
+                for item in trajectory_prepare.values()
+            )
+            add_check(
+                "TRAJECTORY_READY",
+                leaders_ready,
+                "Trajectory leaders prepared and fit memory",
+                leaders=trajectory_prepare,
+            )
 
         snapshot = pose_bus.latest()
         health_samples = health_bus.latest()
@@ -143,5 +159,5 @@ class PreflightRunner:
             ok=not reasons,
             reasons=reasons,
             checks=checks,
-            readiness=self.comp.get("readiness_report", {}),
+            readiness=readiness,
         )

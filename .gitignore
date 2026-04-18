@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+.vscode/
+.cache/
+cache/
 telemetry/
 artifacts/
 

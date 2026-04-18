@@ -51,6 +51,62 @@ class MissionProfile:
     def trajectory_enabled(self) -> bool:
         return bool(self._leader_motion.trajectory_enabled)
 
+    def _nominal_leader_positions(self) -> list[np.ndarray]:
+        return [
+            np.array(self.config.nominal_positions[index], dtype=float)
+            for index in (0, 3, 6, 7)
+        ]
+
+    def _condition_number_for_transform(self, transform: AffineTransform) -> float:
+        leader_positions = [
+            transform.A @ leader + transform.b
+            for leader in self._nominal_leader_positions()
+        ]
+        p0 = leader_positions[0]
+        diff_matrix = np.array(leader_positions[1:], dtype=float) - p0
+        rank = np.linalg.matrix_rank(diff_matrix)
+        return float(np.linalg.cond(diff_matrix)) if rank == 3 else float("inf")
+
+    def _stress_transform(self, t: float, transform: AffineTransform) -> AffineTransform:
+        if not self._leader_motion.condition_stress_enabled:
+            return transform
+
+        axis = self._leader_motion.condition_stress_axis
+        axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+        period = float(self._leader_motion.condition_stress_period)
+        min_scale = float(self._leader_motion.condition_stress_min_scale)
+        oscillation = 0.5 * (1.0 + np.sin((2.0 * np.pi * t) / period))
+        axis_scale = min_scale + (1.0 - min_scale) * oscillation
+        scale_matrix = np.eye(3)
+        scale_matrix[axis_index, axis_index] = axis_scale
+        stressed_A = transform.A @ scale_matrix
+        return AffineTransform(A=stressed_A, b=transform.b)
+
+    def _apply_condition_penalty(self, transform: AffineTransform) -> AffineTransform:
+        if not self._leader_motion.condition_penalty_enabled:
+            return transform
+
+        scale = float(self._leader_motion.condition_penalty_scale)
+        if scale <= 0.0:
+            return transform
+
+        cond = self._condition_number_for_transform(transform)
+        soft_limit = float(self._leader_motion.condition_soft_limit)
+        if not np.isfinite(cond) or cond <= soft_limit:
+            return transform
+
+        u, singular_values, vt = np.linalg.svd(transform.A)
+        if singular_values[-1] <= 1e-9:
+            return transform
+
+        blend = 1.0 - np.exp(-scale)
+        target_cond = soft_limit + (cond - soft_limit) * (1.0 - blend)
+        target_cond = max(1.0, float(target_cond))
+        min_allowed = singular_values[0] / target_cond
+        clipped = np.maximum(singular_values, min_allowed)
+        penalized_A = u @ np.diag(clipped) @ vt
+        return AffineTransform(A=penalized_A, b=transform.b)
+
     def trajectory_spec(self) -> dict:
         raw_pieces = self._leader_motion.trajectory_pieces or []
         if self.trajectory_enabled() and not raw_pieces:
@@ -103,7 +159,7 @@ class MissionProfile:
         self, nominal_position: np.ndarray
     ) -> list[TrajectoryPiece]:
         pieces: list[TrajectoryPiece] = []
-        phases = self._phases
+        phases = [phase for phase in self._phases if phase.mode == "formation_run"]
         sample_dt = self._leader_motion.trajectory_sample_dt
 
         for idx, phase in enumerate(phases):
@@ -121,10 +177,14 @@ class MissionProfile:
                 )
                 duration = max(seg_end_raw - seg_start, 0.1)
 
-                start_transform = self.affine_transform_at(seg_start)
-                end_transform = self.affine_transform_at(seg_end)
-                start_velocity = self.affine_velocity_at(seg_start, nominal_position)
-                end_velocity = self.affine_velocity_at(seg_end, nominal_position)
+                local_start = seg_start - phase.t_start
+                local_end = seg_end - phase.t_start
+                start_transform = self._trajectory_transform_at(local_start)
+                end_transform = self._trajectory_transform_at(local_end)
+                start_velocity = self._trajectory_velocity_at(
+                    local_start, nominal_position
+                )
+                end_velocity = self._trajectory_velocity_at(local_end, nominal_position)
 
                 start_pos = start_transform.A @ nominal_position + start_transform.b
                 end_pos = end_transform.A @ nominal_position + end_transform.b
@@ -159,13 +219,84 @@ class MissionProfile:
 
         return pieces or [
             TrajectoryPiece(
-                duration=max(self.total_time(), 0.1),
+                duration=0.1,
                 x=[0.0] * 8,
                 y=[0.0] * 8,
                 z=[0.0] * 8,
                 yaw=[0.0] * 8,
             )
         ]
+
+    def trajectory_quality_summary(self) -> dict:
+        if not self.trajectory_enabled():
+            return {
+                "condition_penalty_enabled": False,
+                "condition_soft_limit": self._leader_motion.condition_soft_limit,
+                "condition_penalty_scale": self._leader_motion.condition_penalty_scale,
+                "condition_stress_enabled": self._leader_motion.condition_stress_enabled,
+                "condition_number_max": None,
+                "condition_number_min": None,
+                "raw_condition_number_max": None,
+                "raw_condition_number_min": None,
+                "penalized_samples": 0,
+                "penalty_active": False,
+            }
+
+        samples = self._trajectory_condition_samples()
+        condition_numbers = [item["condition_number"] for item in samples]
+        raw_condition_numbers = [item["raw_condition_number"] for item in samples]
+        penalized_samples = [
+            item for item in samples if item["penalized"]
+        ]
+        return {
+            "condition_penalty_enabled": self._leader_motion.condition_penalty_enabled,
+            "condition_soft_limit": self._leader_motion.condition_soft_limit,
+            "condition_penalty_scale": self._leader_motion.condition_penalty_scale,
+            "condition_stress_enabled": self._leader_motion.condition_stress_enabled,
+            "condition_number_max": max(condition_numbers) if condition_numbers else None,
+            "condition_number_min": min(condition_numbers) if condition_numbers else None,
+            "raw_condition_number_max": max(raw_condition_numbers) if raw_condition_numbers else None,
+            "raw_condition_number_min": min(raw_condition_numbers) if raw_condition_numbers else None,
+            "penalized_samples": len(penalized_samples),
+            "penalty_active": bool(penalized_samples),
+        }
+
+    def _trajectory_condition_samples(self) -> list[dict]:
+        formation_run_phases = [phase for phase in self._phases if phase.mode == "formation_run"]
+        if not formation_run_phases:
+            return []
+
+        sample_dt = min(self._leader_motion.trajectory_sample_dt, 1.0)
+        samples = []
+        for phase in formation_run_phases:
+            t = phase.t_start
+            while t <= phase.t_end + 1e-9:
+                local_t = t - phase.t_start
+                base_transform = self._trajectory_transform_at(local_t)
+                stressed_transform = self._stress_transform(t, base_transform)
+                raw_cond = self._condition_number_for_transform(stressed_transform)
+                transform = self._apply_condition_penalty(stressed_transform)
+                cond = self._condition_number_for_transform(transform)
+                penalized = (
+                    self._leader_motion.condition_penalty_enabled
+                    and cond < raw_cond - 1e-9
+                )
+                samples.append(
+                    {
+                        "time": float(t),
+                        "raw_condition_number": float(raw_cond),
+                        "condition_number": float(cond),
+                        "penalized": penalized,
+                    }
+                )
+                t += sample_dt
+        return samples
+
+    def trajectory_start_time(self) -> float:
+        for phase in self._phases:
+            if phase.mode == "formation_run":
+                return phase.t_start
+        return 0.0
 
     @staticmethod
     def _linear_coeffs(displacement: float, duration: float) -> list[float]:
@@ -184,18 +315,27 @@ class MissionProfile:
         return [a0, a1, a2, a3, 0.0, 0.0, 0.0, 0.0]
 
     def affine_velocity_at(self, t: float, nominal_position: np.ndarray) -> np.ndarray:
+        return self._trajectory_velocity_at(t, nominal_position)
+
+    def _trajectory_transform_at(self, t: float) -> AffineTransform:
         if self._leader_motion.mode == "affine_rotation":
-            omega = self._leader_motion.angular_rate
-            angle = omega * t
-            dA = np.array(
-                [
-                    [-omega * np.sin(angle), -omega * np.cos(angle), 0.0],
-                    [omega * np.cos(angle), -omega * np.sin(angle), 0.0],
-                    [0.0, 0.0, 0.0],
-                ]
-            )
-            return dA @ nominal_position
-        return np.zeros(3)
+            base_transform = self._rotation_transform(t, self._leader_motion)
+            stressed_transform = self._stress_transform(t, base_transform)
+            return self._apply_condition_penalty(stressed_transform)
+        if self._leader_motion.mode == "hold":
+            return AffineTransform(A=np.eye(3), b=np.zeros(3))
+        raise ValueError(f"Unsupported leader motion mode: {self._leader_motion.mode}")
+
+    def _trajectory_velocity_at(
+        self, t: float, nominal_position: np.ndarray
+    ) -> np.ndarray:
+        epsilon = min(max(self._leader_motion.trajectory_sample_dt * 0.05, 1e-3), 0.05)
+        t0 = max(0.0, t - epsilon)
+        t1 = t + epsilon
+        p0 = self._trajectory_transform_at(t0).A @ nominal_position + self._trajectory_transform_at(t0).b
+        p1 = self._trajectory_transform_at(t1).A @ nominal_position + self._trajectory_transform_at(t1).b
+        dt = max(t1 - t0, 1e-9)
+        return (p1 - p0) / dt
 
     def phase_at(self, t: float) -> MissionPhase:
         for phase in self._phases:
@@ -206,11 +346,15 @@ class MissionProfile:
     def affine_transform_at(self, t: float) -> AffineTransform:
         phase = self.phase_at(t)
 
-        if phase.mode == "settle" or self._leader_motion.mode == "hold":
+        if (
+            phase.mode in {"settle", "trajectory_entry", "run_entry"}
+            or self._leader_motion.mode == "hold"
+        ):
             return AffineTransform(A=np.eye(3), b=np.zeros(3))
 
         if self._leader_motion.mode == "affine_rotation":
-            return self._rotation_transform(t, self._leader_motion)
+            local_t = t - phase.t_start if self.trajectory_enabled() else t
+            return self._trajectory_transform_at(local_t)
 
         raise ValueError(f"Unsupported leader motion mode: {self._leader_motion.mode}")
 

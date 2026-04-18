@@ -28,6 +28,12 @@ class SafetyManager:
     def __init__(self, config: SafetyConfig, fleet_model):
         self.config = config
         self.fleet = fleet_model
+        self._all_ids_cache = tuple(fleet_model.all_ids())
+        self._all_idx = np.asarray(
+            [fleet_model.id_to_index(d) for d in self._all_ids_cache], dtype=int
+        )
+        self._boundary_min = np.asarray(config.boundary_min, dtype=float)
+        self._boundary_max = np.asarray(config.boundary_max, dtype=float)
 
     def evaluate(
         self,
@@ -58,23 +64,30 @@ class SafetyManager:
                 drone_ids=snapshot.disconnected_ids,
             )
 
-        # 2. 检查边界
-        for drone_id in self.fleet.all_ids():
-            idx = self.fleet.id_to_index(drone_id)
-            if not snapshot.fresh_mask[idx]:
-                continue
-
-            pos = snapshot.positions[idx]
-            if np.any(pos < self.config.boundary_min) or np.any(
-                pos > self.config.boundary_max
-            ):
-                add_reason(
-                    "OUT_OF_BOUNDS",
-                    "ABORT",
-                    f"Drone {drone_id} out of bounds",
-                    drone_id=drone_id,
-                    position=pos.tolist(),
-                )
+        # 2. 检查边界（向量化）
+        fresh_all = snapshot.fresh_mask[self._all_idx]
+        if fresh_all.any():
+            idx_active = self._all_idx[fresh_all]
+            positions_active = snapshot.positions[idx_active]
+            below = np.any(positions_active < self._boundary_min, axis=1)
+            above = np.any(positions_active > self._boundary_max, axis=1)
+            violated = below | above
+            if violated.any():
+                ids_active = [
+                    self._all_ids_cache[i]
+                    for i, ok in enumerate(fresh_all) if ok
+                ]
+                for i, bad in enumerate(violated):
+                    if bad:
+                        drone_id = ids_active[i]
+                        pos = positions_active[i]
+                        add_reason(
+                            "OUT_OF_BOUNDS",
+                            "ABORT",
+                            f"Drone {drone_id} out of bounds",
+                            drone_id=drone_id,
+                            position=pos.tolist(),
+                        )
 
         # 3. 检查frame条件数
         if frame is not None:
@@ -88,19 +101,24 @@ class SafetyManager:
                     condition_number=frame.condition_number,
                 )
 
-        # 4. 检查follower_ref有效性
+        # 4. 检查follower_ref有效性（cond 的权威由 frame 持有，这里只看 valid）
         if follower_ref is not None and not follower_ref.valid:
             add_reason(
                 "FOLLOWER_REF_INVALID",
                 "HOLD",
-                f"Follower ref invalid: cond={follower_ref.frame_condition_number:.2f}",
-                condition_number=follower_ref.frame_condition_number,
+                "Follower ref invalid",
             )
 
-        # 5. 检查命令饱和
+        # 5. 检查命令饱和（优先复用 controller diagnostics 里的范数，避免重复计算）
         if commands is not None:
+            precomputed_norms = commands.diagnostics.get("command_norms") or {}
             for drone_id, cmd in commands.commands.items():
-                norm = float(np.linalg.norm(cmd))
+                norm_value = precomputed_norms.get(drone_id)
+                norm = (
+                    float(norm_value)
+                    if norm_value is not None
+                    else float(np.linalg.norm(cmd))
+                )
                 if norm > self.config.max_command_norm:
                     add_reason(
                         "COMMAND_SATURATED",
@@ -146,3 +164,24 @@ class SafetyManager:
             return SafetyDecision(
                 action="EXECUTE", reasons=[], reason_codes=[], structured_reasons=[]
             )
+
+    def fast_gate(self, snapshot: PoseSnapshot) -> tuple[bool, list[str]]:
+        """轻量前置检查 —— 断连 / 越界。返回 (blocked, reason_codes)。
+
+        不生成 SafetyReason 对象，也不接受 frame / commands / health。
+        若 blocked=True，主循环应当按 ABORT 处理，跳过后续 frame / control 计算。
+        完整原因（含 severity / message / details）由后续 evaluate() 补齐。
+        """
+        reasons: list[str] = []
+        if snapshot.disconnected_ids:
+            reasons.append(f"DISCONNECTED:{snapshot.disconnected_ids}")
+
+        fresh = snapshot.fresh_mask
+        if fresh.any():
+            positions = snapshot.positions[fresh]
+            below = np.any(positions < self._boundary_min, axis=1)
+            above = np.any(positions > self._boundary_max, axis=1)
+            if below.any() or above.any():
+                reasons.append("OUT_OF_BOUNDS")
+
+        return (bool(reasons), reasons)

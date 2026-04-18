@@ -28,25 +28,25 @@ class AFCModel:
         except np.linalg.LinAlgError:
             raise ValueError("Omega_ff不可逆")
 
+    def steady_state_array(
+        self, leader_positions: dict
+    ) -> tuple[np.ndarray, tuple[int, ...]]:
+        """返回 (p_f_star[n_f, 3], follower_ids)。
+
+        数值与 `steady_state` 一致，区别是不做字典化，便于调用方继续走向量运算。
+        """
+        leader_ids = self.fleet.leader_ids()
+        p_l = np.array([leader_positions[lid] for lid in leader_ids])
+        p_f_star = -self.Omega_ff_inv @ self.Omega_fl @ p_l
+        return p_f_star, tuple(self.fleet.follower_ids())
+
     def steady_state(self, leader_positions: dict) -> dict:
         """计算follower稳态位置
 
         p_f* = -Omega_ff^{-1} Omega_fl p_l
         """
-        # 提取leader位置矩阵
-        leader_ids = self.fleet.leader_ids()
-        p_l = np.array([leader_positions[lid] for lid in leader_ids])  # (n_l, 3)
-
-        # 计算稳态
-        p_f_star = -self.Omega_ff_inv @ self.Omega_fl @ p_l  # (n_f, 3)
-
-        # 转换为字典
-        follower_ids = self.fleet.follower_ids()
-        result = {}
-        for i, fid in enumerate(follower_ids):
-            result[fid] = p_f_star[i]
-
-        return result
+        p_f_star, follower_ids = self.steady_state_array(leader_positions)
+        return {fid: p_f_star[i] for i, fid in enumerate(follower_ids)}
 
     def formation_error(self, current_positions: dict, leader_positions: dict) -> float:
         """计算编队误差"""

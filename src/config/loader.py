@@ -2,11 +2,46 @@
 
 import yaml
 from pathlib import Path
+from typing import cast
 from .schema import *
 
 
 class ConfigLoader:
     """从YAML文件加载配置"""
+
+    @staticmethod
+    def _validate_frequency(name: str, value: float) -> None:
+        if value <= 0:
+            raise ValueError(f"{name} 必须大于 0")
+
+    @staticmethod
+    def _validate_cross_config(config: AppConfig) -> None:
+        pose_period = 1.0 / config.comm.pose_log_freq
+        follower_period = 1.0 / config.comm.follower_tx_freq
+        leader_period = 1.0 / config.comm.leader_update_freq
+
+        if config.safety.pose_timeout <= pose_period:
+            raise ValueError(
+                "pose_timeout 必须大于 pose_log_freq 对应的采样周期，否则新鲜度判断会误触发"
+            )
+
+        if config.comm.leader_update_freq > config.comm.follower_tx_freq:
+            raise ValueError("leader_update_freq 不能高于 follower_tx_freq")
+
+        if config.mission.leader_motion.trajectory_enabled:
+            sample_dt = config.mission.leader_motion.trajectory_sample_dt
+            if sample_dt < pose_period:
+                raise ValueError(
+                    "trajectory_sample_dt 不能小于 pose 采样周期，否则参考轨迹采样没有实际收益"
+                )
+            if sample_dt < follower_period:
+                raise ValueError(
+                    "trajectory_sample_dt 不能小于 follower 指令周期，否则会导致参考更新与控制周期不匹配"
+                )
+            if sample_dt < leader_period:
+                raise ValueError(
+                    "trajectory_sample_dt 不能小于 leader 更新周期，否则会导致轨迹段采样过密"
+                )
 
     @staticmethod
     def _load_yaml_file(path: Path) -> dict:
@@ -47,7 +82,15 @@ class ConfigLoader:
                 raise ValueError(f"阶段 {phase.name} 必须满足 t_start < t_end")
             if previous_end is not None and phase.t_start < previous_end:
                 raise ValueError("mission.phases 不能重叠且必须按时间排序")
+            if previous_end is not None and abs(phase.t_start - previous_end) > 1e-6:
+                raise ValueError("mission.phases 必须连续，不能留时间空档")
             previous_end = phase.t_end
+
+        if config.mission.phases[0].t_start != 0.0:
+            raise ValueError("mission.phases 必须从 t_start=0.0 开始")
+
+        if abs(config.mission.duration - config.mission.phases[-1].t_end) > 1e-6:
+            raise ValueError("mission.duration 必须等于最后一个 phase 的 t_end")
 
         if (
             config.mission.leader_motion.translation is not None
@@ -60,9 +103,29 @@ class ConfigLoader:
 
         if config.mission.leader_motion.trajectory_sample_dt <= 0:
             raise ValueError("trajectory_sample_dt 必须大于 0")
+        if config.mission.leader_motion.condition_soft_limit <= 0:
+            raise ValueError("condition_soft_limit 必须大于 0")
+        if config.mission.leader_motion.condition_penalty_scale < 0:
+            raise ValueError("condition_penalty_scale 不能小于 0")
+        if config.mission.leader_motion.condition_stress_min_scale <= 0:
+            raise ValueError("condition_stress_min_scale 必须大于 0")
+        if config.mission.leader_motion.condition_stress_period <= 0:
+            raise ValueError("condition_stress_period 必须大于 0")
 
         if config.safety.min_vbat < 0:
             raise ValueError("min_vbat 不能小于 0；设为 0 可关闭电量检查")
+
+        if config.safety.hold_auto_land_timeout <= 0:
+            raise ValueError("hold_auto_land_timeout 必须大于 0")
+
+        if config.safety.velocity_stream_watchdog_action not in {
+            "telemetry",
+            "hold",
+            "degrade",
+        }:
+            raise ValueError(
+                "velocity_stream_watchdog_action 必须是 telemetry、hold 或 degrade"
+            )
 
         for freq_name in (
             "pose_log_freq",
@@ -70,8 +133,41 @@ class ConfigLoader:
             "leader_update_freq",
             "parked_hold_freq",
         ):
-            if getattr(config.comm, freq_name) <= 0:
-                raise ValueError(f"{freq_name} 必须大于 0")
+            ConfigLoader._validate_frequency(freq_name, getattr(config.comm, freq_name))
+
+        if config.control.feedforward_gain < 0:
+            raise ValueError("feedforward_gain 不能小于 0")
+        if config.control.max_feedforward_velocity < 0:
+            raise ValueError("max_feedforward_velocity 不能小于 0")
+        if config.control.dynamics_model_order not in {1, 2}:
+            raise ValueError("dynamics_model_order 只能是 1 或 2")
+        if config.control.velocity_feedback_gain < 0:
+            raise ValueError("velocity_feedback_gain 不能小于 0")
+        if config.control.acceleration_feedforward_gain < 0:
+            raise ValueError("acceleration_feedforward_gain 不能小于 0")
+        if config.control.mass_kg <= 0:
+            raise ValueError("mass_kg 必须大于 0")
+        if config.control.damping_coeff < 0:
+            raise ValueError("damping_coeff 不能小于 0")
+        if config.control.max_acceleration <= 0:
+            raise ValueError("max_acceleration 必须大于 0")
+        if config.control.estimated_total_delay_ms < 0:
+            raise ValueError("estimated_total_delay_ms 不能小于 0")
+        if config.control.delay_prediction_gain < 0:
+            raise ValueError("delay_prediction_gain 不能小于 0")
+        for attr in (
+            "gain_xy",
+            "gain_z",
+            "feedforward_gain_xy",
+            "feedforward_gain_z",
+            "max_feedforward_velocity_xy",
+            "max_feedforward_velocity_z",
+            "radial_gain_scale_xy",
+            "radial_feedforward_scale_xy",
+        ):
+            value = getattr(config.control, attr)
+            if value is not None and value < 0:
+                raise ValueError(f"{attr} 不能小于 0")
 
         if len(config.safety.boundary_min) != 3 or len(config.safety.boundary_max) != 3:
             raise ValueError("boundary_min 和 boundary_max 必须都是 3 维向量")
@@ -82,16 +178,55 @@ class ConfigLoader:
         ):
             raise ValueError("safety 边界必须满足 boundary_min < boundary_max")
 
+        if config.startup.mode == "manual_leader" and config.startup.manual is None:
+            raise ValueError("manual_leader 模式需要提供 startup.manual 配置")
+
+        if config.startup.manual is not None:
+            if config.startup.manual.translation_step <= 0:
+                raise ValueError("manual.translation_step 必须大于 0")
+            if config.startup.manual.vertical_step <= 0:
+                raise ValueError("manual.vertical_step 必须大于 0")
+            if config.startup.manual.scale_step <= 0:
+                raise ValueError("manual.scale_step 必须大于 0")
+            if config.startup.manual.rotation_step_deg <= 0:
+                raise ValueError("manual.rotation_step_deg 必须大于 0")
+            if config.startup.manual.min_scale <= 0:
+                raise ValueError("manual.min_scale 必须大于 0")
+            if config.startup.manual.min_scale >= config.startup.manual.max_scale:
+                raise ValueError("manual 必须满足 min_scale < max_scale")
+
+        ConfigLoader._validate_cross_config(config)
+
     @staticmethod
-    def load(config_dir: str) -> AppConfig:
+    def _read_raw_text(path: Path) -> str | None:
+        if not path.exists():
+            return None
+        return path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def load(config_dir: str, startup_mode_override: str | None = None) -> AppConfig:
         """加载所有配置文件"""
         config_path = Path(config_dir)
 
-        # 加载各个配置文件
+        raw_files: dict[str, str] = {}
+        for path in sorted(config_path.glob("*.yaml")):
+            text = ConfigLoader._read_raw_text(path)
+            if text is not None:
+                raw_files[path.name] = text
+
         fleet_data = ConfigLoader._load_yaml_file(config_path / "fleet.yaml")
         mission_data = ConfigLoader._load_yaml_file(config_path / "mission.yaml")
         comm_data = ConfigLoader._load_yaml_file(config_path / "comm.yaml")
         safety_data = ConfigLoader._load_yaml_file(config_path / "safety.yaml")
+        startup_file = config_path / "startup.yaml"
+        startup_data = (
+            ConfigLoader._load_yaml_file(startup_file)
+            if startup_file.exists()
+            else {"mode": "auto"}
+        )
+
+        if startup_mode_override is not None:
+            startup_data = {**startup_data, "mode": startup_mode_override}
 
         # 构建配置对象
         drones = [DroneConfig(**d) for d in fleet_data["drones"]]
@@ -107,6 +242,18 @@ class ConfigLoader:
             phases=phases,
         )
         comm = CommConfig(**comm_data)
+        manual_cfg = startup_data.get("manual")
+        if manual_cfg is not None and not isinstance(manual_cfg, dict):
+            raise ValueError("startup.manual 必须是对象映射")
+
+        startup_mode = startup_data.get("mode", "auto")
+        if startup_mode not in {"auto", "manual_leader"}:
+            raise ValueError("startup.mode 只能是 auto 或 manual_leader")
+
+        startup = StartupConfig(
+            mode=cast(Literal["auto", "manual_leader"], startup_mode),
+            manual=(ManualLeaderControlConfig(**manual_cfg) if manual_cfg else None),
+        )
         safety = SafetyConfig(**safety_data)
         control = ControlConfig(
             **fleet_data.get(
@@ -115,7 +262,13 @@ class ConfigLoader:
         )
 
         app_config = AppConfig(
-            fleet=fleet, mission=mission, comm=comm, safety=safety, control=control
+            fleet=fleet,
+            mission=mission,
+            comm=comm,
+            startup=startup,
+            safety=safety,
+            control=control,
+            raw_files=raw_files,
         )
 
         ConfigLoader._validate(app_config)

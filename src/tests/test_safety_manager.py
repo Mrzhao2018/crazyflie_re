@@ -48,4 +48,6 @@ decision = safety.evaluate(snapshot, health=health)
 assert decision.action == "EXECUTE"
 assert "LOW_BATTERY" not in decision.reason_codes
 
+assert config.safety.hold_auto_land_timeout > 0
+
 print("[OK] SafetyManager decision contracts verified")

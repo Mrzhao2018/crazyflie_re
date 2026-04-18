@@ -37,12 +37,11 @@ snapshot = PoseSnapshot(
     fresh_mask=np.ones(len(config.mission.nominal_positions), dtype=bool),
     disconnected_ids=[],
 )
-leader_ref = leader_gen.reference_at(0.0)
+leader_ref = leader_gen.reference_at(6.0)
 plan = scheduler.plan(
     snapshot, MissionState.RUN, leader_ref, None, SafetyDecision("EXECUTE", [])
 )
 
-assert len(plan.leader_actions) == 1
-assert plan.leader_actions[0].kind == "start_trajectory"
+assert len(plan.leader_actions) == 0
 
-print("[OK] Leader trajectory dispatch verified")
+print("[OK] Leader trajectory scheduler no longer auto-starts trajectory")

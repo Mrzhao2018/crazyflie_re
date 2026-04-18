@@ -38,6 +38,12 @@ runner = PreflightRunner(
         "pose_bus": FakePoseBus(snapshot),
         "health_bus": HealthBus(),
         "config": config,
+        "readiness_report": {
+            "trajectory_prepare": {
+                drone_id: {"uploaded": True, "defined": True, "fits_memory": True}
+                for drone_id in fleet.leader_ids()
+            }
+        },
     }
 )
 for drone_id in fleet.all_ids():
@@ -45,7 +51,10 @@ for drone_id in fleet.all_ids():
 report = runner.run()
 assert report.ok is True
 assert report.failed_codes == []
+leader_count_check = next(check for check in report.checks if check.code == "LEADER_COUNT")
+assert leader_count_check.passed is True
 assert any(check.code == "AFFINE_SPAN" for check in report.checks)
+assert any(check.code == "TRAJECTORY_READY" for check in report.checks)
 
 bad_snapshot = PoseSnapshot(
     seq=2,
@@ -61,6 +70,7 @@ bad_runner = PreflightRunner(
         "pose_bus": FakePoseBus(bad_snapshot),
         "health_bus": HealthBus(),
         "config": config,
+        "readiness_report": {},
     }
 )
 bad_report = bad_runner.run()
@@ -77,6 +87,12 @@ low_bat_runner = PreflightRunner(
         "pose_bus": FakePoseBus(snapshot),
         "health_bus": HealthBus(),
         "config": config,
+        "readiness_report": {
+            "trajectory_prepare": {
+                drone_id: {"uploaded": True, "defined": True, "fits_memory": True}
+                for drone_id in fleet.leader_ids()
+            }
+        },
     }
 )
 for drone_id in fleet.all_ids():
@@ -93,6 +109,12 @@ stale_health_runner = PreflightRunner(
         "pose_bus": FakePoseBus(snapshot),
         "health_bus": HealthBus(),
         "config": config,
+        "readiness_report": {
+            "trajectory_prepare": {
+                drone_id: {"uploaded": True, "defined": True, "fits_memory": True}
+                for drone_id in fleet.leader_ids()
+            }
+        },
     }
 )
 for drone_id in fleet.all_ids():
@@ -103,5 +125,25 @@ assert any(
     code.startswith("HEALTH_FRESH_DRONE_") for code in stale_health_report.failed_codes
 )
 assert any("stale" in reason for reason in stale_health_report.reasons)
+
+bad_traj_runner = PreflightRunner(
+    {
+        "fleet": fleet,
+        "formation": formation,
+        "pose_bus": FakePoseBus(snapshot),
+        "health_bus": HealthBus(),
+        "config": config,
+        "readiness_report": {
+            "trajectory_prepare": {
+                1: {"uploaded": False, "defined": False, "fits_memory": False}
+            }
+        },
+    }
+)
+for drone_id in fleet.all_ids():
+    bad_traj_runner.comp["health_bus"].update(drone_id, {"pm.vbat": 4.0}, 0.0)
+bad_traj_report = bad_traj_runner.run()
+assert bad_traj_report.ok is False
+assert "TRAJECTORY_READY" in bad_traj_report.failed_codes
 
 print("[OK] Preflight structured report contracts verified")
