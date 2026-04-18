@@ -34,7 +34,7 @@ class ManualLeaderReferenceSource:
 
         return LeaderReferenceFrame(
             t_ref=t,
-            leader_ids=self.fleet.leader_ids().copy(),
+            leader_ids=list(self.fleet.leader_ids()),
             positions=positions,
             mode="batch_goto",
         )
@@ -52,7 +52,7 @@ class ManualLeaderReferenceSource:
 
         return LeaderReferenceFrame(
             t_ref=t,
-            leader_ids=self.fleet.leader_ids().copy(),
+            leader_ids=list(self.fleet.leader_ids()),
             positions=positions,
             mode="batch_goto",
         )

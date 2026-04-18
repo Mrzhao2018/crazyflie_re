@@ -13,11 +13,10 @@ class FleetModel:
         self._index_to_id: Dict[int, int] = {}
         self._id_to_uri: Dict[int, str] = {}
         self._id_to_radio: Dict[int, int] = {}
-        self._leader_ids: List[int] = []
-        self._follower_ids: List[int] = []
-        self._radio_groups: Dict[int, List[int]] = {}
+        leader_ids: list[int] = []
+        follower_ids: list[int] = []
+        radio_groups: Dict[int, List[int]] = {}
 
-        # 构建映射
         for idx, drone in enumerate(self._drones):
             self._id_to_index[drone.id] = idx
             self._index_to_id[idx] = drone.id
@@ -25,24 +24,27 @@ class FleetModel:
             self._id_to_radio[drone.id] = drone.radio_group
 
             if drone.role == "leader":
-                self._leader_ids.append(drone.id)
+                leader_ids.append(drone.id)
             else:
-                self._follower_ids.append(drone.id)
+                follower_ids.append(drone.id)
 
-            if drone.radio_group not in self._radio_groups:
-                self._radio_groups[drone.radio_group] = []
-            self._radio_groups[drone.radio_group].append(drone.id)
+            radio_groups.setdefault(drone.radio_group, []).append(drone.id)
 
-        self._all_ids_cached: List[int] = [d.id for d in self._drones]
+        self._leader_ids: tuple[int, ...] = tuple(leader_ids)
+        self._follower_ids: tuple[int, ...] = tuple(follower_ids)
+        self._all_ids_cached: tuple[int, ...] = tuple(d.id for d in self._drones)
+        self._radio_groups: Dict[int, tuple[int, ...]] = {
+            g: tuple(ids) for g, ids in radio_groups.items()
+        }
 
-    def all_ids(self) -> List[int]:
-        return self._all_ids_cached.copy()
+    def all_ids(self) -> tuple[int, ...]:
+        return self._all_ids_cached
 
-    def leader_ids(self) -> List[int]:
-        return self._leader_ids.copy()
+    def leader_ids(self) -> tuple[int, ...]:
+        return self._leader_ids
 
-    def follower_ids(self) -> List[int]:
-        return self._follower_ids.copy()
+    def follower_ids(self) -> tuple[int, ...]:
+        return self._follower_ids
 
     def id_to_index(self, drone_id: int) -> int:
         return self._id_to_index[drone_id]
@@ -56,8 +58,8 @@ class FleetModel:
     def get_radio_group(self, drone_id: int) -> int:
         return self._id_to_radio[drone_id]
 
-    def get_group_members(self, group: int) -> List[int]:
-        return self._radio_groups.get(group, []).copy()
+    def get_group_members(self, group: int) -> tuple[int, ...]:
+        return self._radio_groups.get(group, ())
 
     def is_leader(self, drone_id: int) -> bool:
         return drone_id in self._leader_ids
