@@ -22,19 +22,34 @@ class AffineFrameEstimator:
 
     def __init__(self, fleet_model):
         self.fleet = fleet_model
+        self._leader_ids_cache = tuple(fleet_model.leader_ids())
+        self._leader_idx = np.asarray(
+            [fleet_model.id_to_index(lid) for lid in self._leader_ids_cache],
+            dtype=int,
+        )
 
     def estimate(
         self, snapshot: PoseSnapshot, leader_ids: list[int]
     ) -> AffineFrameState:
         """估计当前affine frame"""
-        leader_positions = {}
-        stale_leaders = []
-
-        for lid in leader_ids:
-            idx = self.fleet.id_to_index(lid)
-            if not snapshot.fresh_mask[idx]:
-                stale_leaders.append(lid)
-            leader_positions[lid] = snapshot.positions[idx]
+        if tuple(leader_ids) == self._leader_ids_cache:
+            idx_arr = self._leader_idx
+            fresh = snapshot.fresh_mask[idx_arr]
+            stale_leaders = [
+                lid for lid, ok in zip(self._leader_ids_cache, fresh) if not ok
+            ]
+            leader_positions = {
+                lid: snapshot.positions[idx_arr[i]]
+                for i, lid in enumerate(self._leader_ids_cache)
+            }
+        else:
+            leader_positions = {}
+            stale_leaders = []
+            for lid in leader_ids:
+                idx = self.fleet.id_to_index(lid)
+                if not snapshot.fresh_mask[idx]:
+                    stale_leaders.append(lid)
+                leader_positions[lid] = snapshot.positions[idx]
 
         diagnostics = {
             "stale_leaders": stale_leaders,

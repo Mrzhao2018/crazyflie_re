@@ -28,6 +28,12 @@ class SafetyManager:
     def __init__(self, config: SafetyConfig, fleet_model):
         self.config = config
         self.fleet = fleet_model
+        self._all_ids_cache = tuple(fleet_model.all_ids())
+        self._all_idx = np.asarray(
+            [fleet_model.id_to_index(d) for d in self._all_ids_cache], dtype=int
+        )
+        self._boundary_min = np.asarray(config.boundary_min, dtype=float)
+        self._boundary_max = np.asarray(config.boundary_max, dtype=float)
 
     def evaluate(
         self,
@@ -58,23 +64,30 @@ class SafetyManager:
                 drone_ids=snapshot.disconnected_ids,
             )
 
-        # 2. 检查边界
-        for drone_id in self.fleet.all_ids():
-            idx = self.fleet.id_to_index(drone_id)
-            if not snapshot.fresh_mask[idx]:
-                continue
-
-            pos = snapshot.positions[idx]
-            if np.any(pos < self.config.boundary_min) or np.any(
-                pos > self.config.boundary_max
-            ):
-                add_reason(
-                    "OUT_OF_BOUNDS",
-                    "ABORT",
-                    f"Drone {drone_id} out of bounds",
-                    drone_id=drone_id,
-                    position=pos.tolist(),
-                )
+        # 2. 检查边界（向量化）
+        fresh_all = snapshot.fresh_mask[self._all_idx]
+        if fresh_all.any():
+            idx_active = self._all_idx[fresh_all]
+            positions_active = snapshot.positions[idx_active]
+            below = np.any(positions_active < self._boundary_min, axis=1)
+            above = np.any(positions_active > self._boundary_max, axis=1)
+            violated = below | above
+            if violated.any():
+                ids_active = [
+                    self._all_ids_cache[i]
+                    for i, ok in enumerate(fresh_all) if ok
+                ]
+                for i, bad in enumerate(violated):
+                    if bad:
+                        drone_id = ids_active[i]
+                        pos = positions_active[i]
+                        add_reason(
+                            "OUT_OF_BOUNDS",
+                            "ABORT",
+                            f"Drone {drone_id} out of bounds",
+                            drone_id=drone_id,
+                            position=pos.tolist(),
+                        )
 
         # 3. 检查frame条件数
         if frame is not None:
@@ -166,10 +179,8 @@ class SafetyManager:
         fresh = snapshot.fresh_mask
         if fresh.any():
             positions = snapshot.positions[fresh]
-            bmin = np.asarray(self.config.boundary_min, dtype=float)
-            bmax = np.asarray(self.config.boundary_max, dtype=float)
-            below = np.any(positions < bmin, axis=1)
-            above = np.any(positions > bmax, axis=1)
+            below = np.any(positions < self._boundary_min, axis=1)
+            above = np.any(positions > self._boundary_max, axis=1)
             if below.any() or above.any():
                 reasons.append("OUT_OF_BOUNDS")
 
