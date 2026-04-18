@@ -83,6 +83,19 @@ class CommConfig:
     readiness_reset_estimator: bool = False
     connect_groups_in_parallel: bool = False
     trajectory_upload_groups_in_parallel: bool = False
+    # PR10: 连接阶段节拍可配置 + 链路质量采集
+    connect_pace_s: float = 0.2
+    connect_timeout_s: float = 5.0
+    link_quality_enabled: bool = True
+    # PR11: 链路驱动开关 + link_quality 自适应 + 重连策略
+    radio_driver: Literal["auto", "python", "cpp"] = "auto"
+    link_quality_soft_floor: float = 0.0
+    link_quality_backoff_scale: float = 1.5
+    link_quality_deadband_scale: float = 2.0
+    reconnect_enabled: bool = False
+    reconnect_attempts: int = 2
+    reconnect_backoff_s: float = 0.5
+    reconnect_timeout_s: float = 5.0
 
 
 @dataclass
@@ -121,6 +134,8 @@ class SafetyConfig:
     velocity_stream_watchdog_action: Literal[
         "telemetry", "hold", "degrade"
     ] = "telemetry"
+    # PR11: 部分组掉线时降级为 parked hold 而不是整队 ABORT（默认关闭，向后兼容）
+    fast_gate_group_degrade_enabled: bool = False
 
 
 @dataclass

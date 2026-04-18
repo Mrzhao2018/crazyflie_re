@@ -135,6 +135,11 @@ class ConfigLoader:
         ):
             ConfigLoader._validate_frequency(freq_name, getattr(config.comm, freq_name))
 
+        if config.comm.connect_pace_s < 0:
+            raise ValueError("connect_pace_s 不能小于 0；0 表示不在多机连接之间 sleep")
+        if config.comm.connect_timeout_s <= 0:
+            raise ValueError("connect_timeout_s 必须大于 0")
+
         if config.control.feedforward_gain < 0:
             raise ValueError("feedforward_gain 不能小于 0")
         if config.control.max_feedforward_velocity < 0:

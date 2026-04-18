@@ -167,3 +167,19 @@ class MissionErrors:
             code="RUN_LOOP_EXCEPTION",
             stage="run_loop",
         )
+
+        LINK_RECONNECT_ATTEMPT = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_LINK_RECONNECT_ATTEMPT",
+            stage="link_reconnect",
+        )
+        LINK_RECONNECT_OK = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_LINK_RECONNECT_OK",
+            stage="link_reconnect",
+        )
+        LINK_RECONNECT_FAILED = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_LINK_RECONNECT_FAILED",
+            stage="link_reconnect",
+        )

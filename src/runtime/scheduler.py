@@ -24,10 +24,22 @@ class CommandScheduler:
         config: CommConfig,
         mission_fsm: MissionFSM | None = None,
         fleet_model=None,
+        *,
+        link_quality_provider=None,
     ):
         self.config = config
         self.mission_fsm = mission_fsm
         self.fleet = fleet_model
+        self._link_quality_provider = link_quality_provider
+        self._link_quality_soft_floor = float(
+            getattr(config, "link_quality_soft_floor", 0.0)
+        )
+        self._link_quality_backoff_scale = float(
+            getattr(config, "link_quality_backoff_scale", 1.0)
+        )
+        self._link_quality_deadband_scale = float(
+            getattr(config, "link_quality_deadband_scale", 1.0)
+        )
         self.last_pose_seq_by_group: dict[int, int] = {}
         self.last_follower_tx_time: dict[int, float] = {}
         self.last_leader_update_time = 0.0
@@ -54,6 +66,34 @@ class CommandScheduler:
         if self.fleet is None:
             return 0
         return self.fleet.get_radio_group(drone_id)
+
+    def _link_quality_for_group(self, group_id: int) -> float | None:
+        if (
+            self._link_quality_provider is None
+            or self._link_quality_soft_floor <= 0.0
+        ):
+            return None
+        try:
+            return self._link_quality_provider(group_id)
+        except Exception:
+            return None
+
+    def _group_is_degraded(self, group_id: int) -> bool:
+        quality = self._link_quality_for_group(group_id)
+        if quality is None:
+            return False
+        return quality < self._link_quality_soft_floor
+
+    def _follower_tx_interval_for_group(self, group_id: int) -> float:
+        if self._group_is_degraded(group_id):
+            return self.follower_tx_interval * self._link_quality_backoff_scale
+        return self.follower_tx_interval
+
+    def _deadband_for_drone(self, drone_id: int) -> float:
+        group_id = self._radio_group(drone_id)
+        if self._group_is_degraded(group_id):
+            return self.follower_cmd_deadband * self._link_quality_deadband_scale
+        return self.follower_cmd_deadband
 
     def _group_drone_ids(self, drone_ids: list[int]) -> dict[int, list[int]]:
         if not drone_ids:
@@ -249,12 +289,16 @@ class CommandScheduler:
         stale_groups = []
         sent_group_counts = {}
         blocked_group_counts = {}
+        backoff_groups = []
         for group_id, group_commands in grouped_commands.items():
             if snapshot.seq <= self.last_pose_seq_by_group.get(group_id, -1):
                 stale_groups.append(group_id)
                 continue
             last_tx = self.last_follower_tx_time.get(group_id, 0.0)
-            if now - last_tx < self.follower_tx_interval:
+            interval = self._follower_tx_interval_for_group(group_id)
+            if interval > self.follower_tx_interval:
+                backoff_groups.append(group_id)
+            if now - last_tx < interval:
                 blocked_groups.append(group_id)
                 blocked_group_counts[group_id] = len(group_commands)
                 continue
@@ -276,6 +320,7 @@ class CommandScheduler:
         diagnostics["follower_tx_groups_stale"] = stale_groups
         diagnostics["follower_tx_group_counts"] = sent_group_counts
         diagnostics["follower_tx_blocked_group_counts"] = blocked_group_counts
+        diagnostics["link_quality_backoff_groups"] = sorted(set(backoff_groups))
 
         reason = "execute"
         if not actions and hold_actions:
@@ -299,13 +344,14 @@ class CommandScheduler:
 
         filtered = {}
         for drone_id, vel in command_dict.items():
+            deadband = self._deadband_for_drone(drone_id)
             last_vel = self.last_follower_cmd.get(drone_id)
             if last_vel is None:
                 filtered[drone_id] = vel
                 continue
 
             delta = float(np.linalg.norm(vel - last_vel))
-            if delta >= self.follower_cmd_deadband:
+            if delta >= deadband:
                 filtered[drone_id] = vel
 
         return filtered

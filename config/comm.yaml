@@ -7,3 +7,16 @@ readiness_wait_for_params: true
 readiness_reset_estimator: false
 connect_groups_in_parallel: false
 trajectory_upload_groups_in_parallel: false
+# PR10: 连接阶段节拍 + 链路质量观测
+connect_pace_s: 0.2              # 多机连接间隔；实飞稳定后可下调到 0.05 做冷启动提速
+connect_timeout_s: 5.0           # 单机 open_link 超时；radio 拥塞时可抬到 10.0
+link_quality_enabled: true       # 接入 cflib radio_link_statistics，写入 telemetry.radio_link_quality
+# PR11: 链路驱动开关 + 自适应 + 重连
+radio_driver: auto               # auto（保持 cflib 默认）/ python / cpp（需要 cflinkcpp 包）
+link_quality_soft_floor: 0.0     # 0 表示不启用自适应；推荐 60.0（link_quality < 60 时按 scale 降频）
+link_quality_backoff_scale: 1.5  # 低质量链路上 follower_tx_interval 倍数
+link_quality_deadband_scale: 2.0 # 低质量链路上 follower_cmd_deadband 倍数
+reconnect_enabled: false         # 实验性：disconnect 时尝试 reconnect_attempts 次自动重连
+reconnect_attempts: 2
+reconnect_backoff_s: 0.5
+reconnect_timeout_s: 5.0

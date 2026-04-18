@@ -1,6 +1,6 @@
 # Crazyflie AFC Swarm
 
-> 2026-04-18 状态更新。
+> 2026-04-19 状态更新。
 > 
 > 这是一个面向 **Crazyflie + Lighthouse + cflib** 的仿射编队控制实验仓库，当前重点是 **真实平台集成、leader 轨迹执行、follower 在线速度闭环、结构化 telemetry 与离线复盘**。
 
@@ -197,6 +197,19 @@
 - 它们与 `mission_error` 共享同一套 `category / code / stage` 语义，但不一定意味着任务立即失败
 - `hold` / `degrade` 属于运行期保护动作；只有后续演化为 `ABORT` 或其它终止路径时，才进入终止语义
 
+PR10/PR11 通信链路侧新增的稳定 runtime 事件码：
+
+- `RUNTIME_LINK_RECONNECT_ATTEMPT`
+- `RUNTIME_LINK_RECONNECT_OK`
+- `RUNTIME_LINK_RECONNECT_FAILED`
+
+以及新增的 telemetry 事件（非 mission_error，不是终止语义）：
+
+- `fast_gate_group_degrade`：单组掉线被降级为 parked hold 而非整队 ABORT 时记录
+- `link_reconnect_attempt / link_reconnect_ok / link_reconnect_failed`：`comm.reconnect_enabled=true` 时才会出现
+
+record 流中新增了 `radio_link_quality` 字段：按 `drone_id` 保存 `link_quality / uplink_rssi / uplink_rate / downlink_rate / uplink_congestion / downlink_congestion / last_update_t`，数据来自 cflib `radio_link_statistics` 回调。`link_quality_enabled=false` 或未装配 `LinkQualityBus` 时该字段为空 dict。
+
 当前 Phase 3 前半段已经把 executor 失败结果从纯文本扩展为结构化字段：
 
 - `command_kind`：失败发生在哪类命令上，例如 `batch_goto / velocity / hold / notify_stop`
@@ -259,31 +272,52 @@
 - `executor_failure_group_count`
 - `executor_failure_retryable_count`
 - `executor_failure_non_retryable_count`
+- `radio_link_sample_count`（PR10）
+- `radio_link_overall_min / mean / p5 / max`（PR10）
+- `radio_link_worst_drone_min`（PR10）
+
+PR10 之后，`replay` / `compare-runs` 的离线摘要新增 `radio_link_summary`：
+
+- `overall`: `count / min / mean / p5 / max`
+- `per_drone`: `{drone_id: {count, min, mean, p5, max}}`
+
+缺失 `radio_link_quality` 字段（旧 run 或 `link_quality_enabled=false`）时 `overall.count == 0`，旧文件兼容解析。
 
 `compare-runs --output ...` 现在会额外输出：
 
 - `compare_communication.png`
   - 同时展示 watchdog 总数、executor failure 总数、executor degrade 次数、executor hold 次数
 
-### 6. 可选组间并行能力
+### 6. 可选组间并行 / 自适应 / 重连开关
 
-当前已经补了一个默认关闭的实验性能力：
+仓库现在汇集了一批**默认关闭**的实验性能力，方便在真机上逐项 ablation，**默认行为保持不变**：
 
-- `comm.connect_groups_in_parallel`
-  - 控制 `connect_all()` 是否按 `radio_group` 并行连接
-- `comm.trajectory_upload_groups_in_parallel`
-  - 控制 startup 阶段 leader trajectory upload / define 是否按 `radio_group` 并行执行
+PR1 既有：
 
-默认值：
+- `comm.connect_groups_in_parallel`：`connect_all()` 是否按 `radio_group` 并行连接（默认 `false`）
+- `comm.trajectory_upload_groups_in_parallel`：startup 阶段 leader trajectory upload / define 是否按 `radio_group` 并行（默认 `false`）
 
-- `false`
-- `false`
+PR10 新增（主要是可观测 + 已默认开启的代码路径加速）：
 
-说明：
+- `comm.connect_pace_s`（默认 `0.2`）：多机连接之间的 sleep；实飞稳定后可下调到 `0.05`
+- `comm.connect_timeout_s`（默认 `5.0`）：单机 `open_link` 超时；radio 拥塞可抬到 `10.0`
+- `comm.link_quality_enabled`（默认 `true`）：开启 cflib `radio_link_statistics` 回调接入 `LinkQualityBus`，写入 `record.radio_link_quality` 与离线 `radio_link_summary`
+- `CflibLinkManager` 默认启用 `ro_cache=./cache/ro / rw_cache=./cache/rw`：TOC 可跨机复用，`wait_for_params` 在 `GroupExecutorPool` 上按 `radio_group` 并行
+- `FollowerExecutor / LeaderExecutor` 默认通过 `GroupExecutorPool` 跨 `radio_group` 并行发包（组内保序）；`connect_all` 报告中新增 `parallel` 与 `per_group_duration_s`
 
-- 默认仍然保持保守串行行为，不改变当前实验基线
-- 当前只完成了代码路径、配置开关和准系统测试
-- 真实硬件 smoke 还没有在当前环境执行，所以这两个开关暂时更适合实验模式，而不是默认生产路径
+PR11 新增（**默认全关**，真机 ablation 前不会改变 baseline 行为）：
+
+- `comm.radio_driver`（默认 `auto`）：`auto / python / cpp`。选 `cpp` 需要 `pip install cflinkcpp`；选 `python` 会强制清除 `USE_CFLINK` 环境变量。
+- `comm.link_quality_soft_floor`（默认 `0.0`）：`> 0` 时对 link_quality 低于该阈值的 group 启用 tx 降频 + deadband 放大
+- `comm.link_quality_backoff_scale`（默认 `1.5`）：降频倍数。`follower_tx_interval × scale`
+- `comm.link_quality_deadband_scale`（默认 `2.0`）：deadband 放大倍数。`follower_cmd_deadband × scale`
+- `safety.fast_gate_group_degrade_enabled`（默认 `false`）：`true` 时只影响部分 `radio_group` 的 disconnect 不再 ABORT，而是把这些 group 的 follower 推入 `watchdog_degraded_followers`（走 parked hold 路径）
+- `comm.reconnect_enabled`（默认 `false`）：`true` 时纯 disconnect 触发 fast_gate ABORT 前先做一次有限次数自动重连
+- `comm.reconnect_attempts`（默认 `2`）
+- `comm.reconnect_backoff_s`（默认 `0.5`）
+- `comm.reconnect_timeout_s`（默认 `5.0`）
+
+所有这些开关的配置校验由 `ConfigLoader` 负责；具体语义与失败事件已暴露到 telemetry，便于离线复盘对比。
 
 ### 7. 运行时性能与工程化优化
 
@@ -351,6 +385,34 @@
 - 两处语义差异请留意：
   - `follower_ref.frame_condition_number` 现为 `nan`（cond 权威移到 `frame`）
   - `LOW_BATTERY`（`min_vbat > 0` 时）触发从 pre-safety 移到 full-safety，晚一帧才进入 emergency_land；默认 `min_vbat = 0.0` 无影响
+
+---
+
+### 8. 通信稳定性优化（PR10 / PR11）
+
+PR1–PR9 收口了主循环、算法、遥测的热路径；PR10–PR11 这一轮把重点放在**底层链路与上层发包调度的耦合**——这是 PR1–PR9 触不到、但真机上真正导致"说不清的通信不稳"的地方。
+
+**PR10 — 可观测性 + 组间并行（默认启用、行为兼容）**
+
+- `LinkQualityBus`（`src/runtime/link_quality_bus.py`）：汇聚每架 drone 的 `link_quality / uplink_rssi / uplink_rate / downlink_rate / uplink_congestion / downlink_congestion`，来源是 cflib `cf.link_statistics` 的 6 个 `Caller`。
+- `CflibLinkManager` 在 `open_link` 前挂回调，并调 `cf.link_statistics.start()`。`bus=None` 时不启动采集，避免无消费方白白消耗。
+- `TelemetryRecord.radio_link_quality: dict[drone_id, metrics]` 字段；`replay` / `compare-runs` 汇总 `radio_link_summary.overall / per_drone` + `radio_link_worst_drone_min`。
+- `GroupExecutorPool`（`src/adapters/group_executor_pool.py`）：每 `radio_group` 一条工作线程；`FollowerExecutor.execute_velocity / execute_hold`、`LeaderExecutor._execute_batch_goto`、`wait_for_params_per_group(...)` 都走这个池子。组内保序（同 dongle 本来就要串行）、组间真并行。
+- `CflibLinkManager` 启用 `ro_cache=./cache/ro`，跨机复用 TOC；`connect_pace_s` / `connect_timeout_s` 可配置。
+- `connect_all` 报告扩展：`parallel` 标记、`per_group_duration_s`，便于离线判断 connect 阶段瓶颈。
+
+**PR11 — 链路层干预（默认关闭、逐项 opt-in）**
+
+- `radio_driver: auto / python / cpp`（`src/adapters/radio_driver_select.py`）：cflib 通过 `USE_CFLINK` 环境变量与 `cflib.crtp.CLASSES` 决定驱动选择；`cpp` 需要 `cflinkcpp` 包，缺失时抛 `RuntimeError`。
+- `CommandScheduler` 接收 `link_quality_provider(group_id) -> float|None`；`link_quality_soft_floor > 0` 时对低质量组把 `follower_tx_interval × link_quality_backoff_scale`，同时对该组 follower 的 `deadband × link_quality_deadband_scale`。`diagnostics.link_quality_backoff_groups` 暴露受抑制的组。
+- `SafetyManager.fast_gate_decision(snapshot)` 返回 `FastGateDecision(action, reason_codes, degrade_groups)`：全组掉线或越界 -> `ABORT`，**部分组**掉线 -> `HOLD_GROUP` + `degrade_groups`；`safety.fast_gate_group_degrade_enabled=true` 时 `run_real` 走新路径，`FailurePolicy.apply_fast_gate_group_degrade` 把这些组的 follower 推进 `watchdog_degraded_followers`。旧 `fast_gate()` 签名保持不变。
+- `CflibLinkManager.reconnect(drone_id, *, attempts, backoff_s, timeout_s)` 做有限次重连：close 旧 scf -> open 新 scf。`FailurePolicy.attempt_reconnect(drone_ids)` 消费 `comm.reconnect_*` 并记录 `RUNTIME_LINK_RECONNECT_{ATTEMPT,OK,FAILED}` 事件；`run_real` 在 fast_gate ABORT + 纯 disconnect 时会先尝试 reconnect，全部成功则跳过 emergency_land。
+
+**契约覆盖面**
+
+- 41 条契约测试（24 既有 + 17 新）全部通过：`test_link_quality_bus / test_link_quality_wire / test_telemetry_radio_link / test_replay_radio_link_summary / test_compare_runs_radio_link / test_comm_config_link_quality / test_group_executor_pool / test_follower_executor_group_parallel / test_leader_executor_group_parallel / test_wait_for_params_parallel / test_config_loader_connect_fields / test_link_manager_connect_report / test_radio_driver_select / test_scheduler_link_quality / test_safety_fast_gate_group / test_link_manager_reconnect` + 全部既有 run_real / scheduler / safety / telemetry 回归。
+- telemetry schema、config 字段、mission 行为在默认配置下均未改变。
+- 接入 cflib 0.1.30 的所有路径都走公开 API；`cflinkcpp` 为可选依赖。
 
 ---
 
@@ -861,6 +923,19 @@ python -m src.tests.test_cli
 - telemetry 不再卡主循环，使长任务的 wall-clock 更可预期
 - 把"cond 的权威"等语义收口到单点，避免重复计算漂移
 - 模块拆分与契约测试覆盖，使后续再改运行时更安全
+
+### 6. 通信链路层优化（PR10 / PR11）
+
+PR9 之后，工程侧剩下的扰动不再是 per-tick CPU，而是**链路与发包调度**本身。PR10–PR11 这一轮做了两件事：
+
+1. **PR10 可观测 + 默认生效的并行化**：把 cflib `radio_link_statistics` 的 6 个 `Caller` 接到 `LinkQualityBus`，每帧 snapshot 写进 `record.radio_link_quality`；离线 `replay` / `compare-runs` 直接出 `radio_link_summary`。`GroupExecutorPool` 给每个 `radio_group` 一条工作线程，`FollowerExecutor / LeaderExecutor.batch_goto / wait_for_params` 都按组并行；`ro_cache` 启用后 TOC 跨机复用；`connect_all` 报告新增 `parallel` 与 `per_group_duration_s`。
+2. **PR11 默认关闭的链路层干预**：`radio_driver: auto / python / cpp` 开关；基于 link_quality 的 tx 降频 + deadband 放大；部分组掉线不再 ABORT 而是推入 parked hold（`fast_gate_group_degrade_enabled`）；disconnect 前有限次数自动重连（`reconnect_enabled`）。这些开关全部默认关，便于真机上逐项 ablation。
+
+这一阶段和 PR1–PR9 一样，不直接宣称飞行表现变好；真正的价值是：
+
+- 链路抖动从"说不清"变成"可定位"：每架 drone 每个时刻的 link_quality / RSSI 都在 telemetry 里
+- 同 dongle 串行 + 跨 dongle 并行的语义正确落地，消除了之前跨组发包被 Python 主循环串行化的隐性瓶颈
+- 为后续真机 ablation 提供了现成开关，不用再改代码做"要不要并行"、"要不要重连"这种对照
 
 ---
 

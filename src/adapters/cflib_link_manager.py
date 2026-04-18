@@ -7,6 +7,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 from ..domain.fleet_model import FleetModel
+from ..runtime.link_quality_bus import LinkQualityBus
+from .radio_driver_select import RadioDriverMode, select_radio_driver
 
 cflib: Any | None = None
 Crazyflie: Any | None = None
@@ -25,14 +27,69 @@ logger = logging.getLogger(__name__)
 ConnectEventCallback = Callable[[dict[str, Any]], None]
 
 
+_LINK_METRIC_CALLERS = (
+    ("link_quality", "link_quality_updated"),
+    ("uplink_rssi", "uplink_rssi_updated"),
+    ("uplink_rate", "uplink_rate_updated"),
+    ("downlink_rate", "downlink_rate_updated"),
+    ("uplink_congestion", "uplink_congestion_updated"),
+    ("downlink_congestion", "downlink_congestion_updated"),
+)
+
+
+def wire_link_quality_callbacks(
+    cf: Any,
+    *,
+    drone_id: int,
+    bus: LinkQualityBus | None,
+    time_fn: Callable[[], float] = time.time,
+) -> None:
+    """把 cflib ``cf.link_statistics`` 的 6 个 Caller 挂到 ``bus`` 上。
+
+    ``bus=None`` 时不做任何挂接，并且不启动 link_statistics 采集——避免
+    cflib 在后台持续消耗 CPU / 网络但无人消费。
+    """
+    if bus is None:
+        return
+    link_stats = getattr(cf, "link_statistics", None)
+    if link_stats is None:
+        return
+    for metric, caller_name in _LINK_METRIC_CALLERS:
+        caller = getattr(link_stats, caller_name, None)
+        if caller is None:
+            continue
+
+        def _make_cb(metric=metric):
+            def _cb(value):
+                bus.update(drone_id, metric, value, time_fn())
+            return _cb
+
+        caller.add_callback(_make_cb())
+    start = getattr(link_stats, "start", None)
+    if callable(start):
+        start()
+
+
 class CflibLinkManager:
     """管理所有Crazyflie连接"""
 
-    def __init__(self, fleet: FleetModel):
+    def __init__(
+        self,
+        fleet: FleetModel,
+        *,
+        link_quality_bus: LinkQualityBus | None = None,
+        connect_pace_s: float = 0.2,
+        connect_timeout_s: float = 5.0,
+        radio_driver: RadioDriverMode | str = RadioDriverMode.AUTO,
+    ):
         self.fleet = fleet
         self._scfs = {}  # {drone_id: SyncCrazyflie}
         self._initialized = False
         self._last_connect_report: dict[str, Any] | None = None
+        self._link_quality_bus = link_quality_bus
+        self._connect_pace_s = float(connect_pace_s)
+        self._connect_timeout_s = float(connect_timeout_s)
+        self._radio_driver = radio_driver
 
     def _grouped_drone_ids(self) -> dict[int, list[int]]:
         grouped: dict[int, list[int]] = {}
@@ -47,13 +104,19 @@ class CflibLinkManager:
         uri = self.fleet.get_uri(drone_id)
         logger.info(f"Connecting to drone {drone_id} at {uri}")
 
-        # 创建Crazyflie实例
-        cf = Crazyflie(rw_cache="./cache")
+        # 创建Crazyflie实例。ro_cache 跨机共享只读 TOC，rw_cache 保留原 cache/
+        # 兼容旧目录：同时设置 ro_cache=cache/ro、rw_cache=cache/rw。
+        cf = Crazyflie(ro_cache="./cache/ro", rw_cache="./cache/rw")
+        # 在 open_link 之前挂上 link_quality 回调：cflib 的 RadioLinkStatistics 在
+        # open_link 触发 get_link_driver 时开始产生数据，太晚挂就会漏掉最开始几秒。
+        wire_link_quality_callbacks(
+            cf, drone_id=drone_id, bus=self._link_quality_bus
+        )
         scf = SyncCrazyflie(uri, cf=cf)
         scf.open_link()
 
         # 等待fully_connected
-        timeout = 5.0
+        timeout = self._connect_timeout_s
         start = time.time()
         while not scf.cf.is_connected():
             if time.time() - start > timeout:
@@ -62,7 +125,8 @@ class CflibLinkManager:
 
         self._scfs[drone_id] = scf
         logger.info(f"Connected to drone {drone_id}")
-        time.sleep(0.2)  # 多机连接间隔
+        if self._connect_pace_s > 0:
+            time.sleep(self._connect_pace_s)  # 多机连接间隔
 
     def _connect_group(self, group_id: int, drone_ids: list[int]) -> dict[str, Any]:
         started_at = time.time()
@@ -108,7 +172,7 @@ class CflibLinkManager:
             )
 
         if not self._initialized:
-            cflib.crtp.init_drivers()
+            select_radio_driver(self._radio_driver)
             self._initialized = True
 
         started_at = time.time()
@@ -117,6 +181,8 @@ class CflibLinkManager:
             "connected": [],
             "failures": [],
             "radio_groups": {},
+            "parallel": bool(parallel_groups),
+            "per_group_duration_s": {},
         }
         self._last_connect_report = report
 
@@ -128,6 +194,9 @@ class CflibLinkManager:
 
                 group_result = self._connect_group(group_id, drone_ids)
                 report["radio_groups"][group_id] = group_result
+                report["per_group_duration_s"][group_id] = float(
+                    group_result.get("duration_s", 0.0)
+                )
                 report["connected"].extend(group_result["connected"])
                 report["failures"].extend(group_result["failures"])
                 report["ok"] = report["ok"] and group_result["ok"]
@@ -165,6 +234,9 @@ class CflibLinkManager:
                 group_id = future_to_group[future]
                 group_result = future.result()
                 report["radio_groups"][group_id] = group_result
+                report["per_group_duration_s"][group_id] = float(
+                    group_result.get("duration_s", 0.0)
+                )
                 report["connected"].extend(group_result["connected"])
                 report["failures"].extend(group_result["failures"])
                 report["ok"] = report["ok"] and group_result["ok"]
@@ -205,3 +277,78 @@ class CflibLinkManager:
         if drone_id not in self._scfs:
             raise KeyError(f"Drone {drone_id} is not connected")
         return self._scfs[drone_id]
+
+    def reconnect(
+        self,
+        drone_id: int,
+        *,
+        attempts: int,
+        backoff_s: float,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        """对已断开的 drone 做有限次数重连。
+
+        每次尝试会先 close 旧链路、再 open 新链路，期间等待 ``backoff_s``。
+        成功时把新的 SyncCrazyflie 覆盖到 ``_scfs`` 中；失败时保留最后一次异常
+        的 error 字段。返回值结构可直接被 failure_policy 做事件记录。
+        """
+
+        if attempts <= 0:
+            raise ValueError("reconnect attempts 必须 >= 1")
+
+        assert Crazyflie is not None
+        assert SyncCrazyflie is not None
+
+        uri = self.fleet.get_uri(drone_id)
+        old_scf = self._scfs.pop(drone_id, None)
+        if old_scf is not None:
+            try:
+                old_scf.close_link()
+            except Exception:
+                logger.exception("Failed to close stale link for drone %s", drone_id)
+
+        last_error: str | None = None
+        for attempt_idx in range(1, attempts + 1):
+            if backoff_s > 0 and attempt_idx > 1:
+                time.sleep(backoff_s)
+
+            try:
+                cf = Crazyflie(ro_cache="./cache/ro", rw_cache="./cache/rw")
+                wire_link_quality_callbacks(
+                    cf, drone_id=drone_id, bus=self._link_quality_bus
+                )
+                scf = SyncCrazyflie(uri, cf=cf)
+                scf.open_link()
+
+                start = time.time()
+                while not scf.cf.is_connected():
+                    if time.time() - start > timeout_s:
+                        raise TimeoutError(
+                            f"Drone {drone_id} reconnect timeout"
+                        )
+                    time.sleep(0.05)
+
+                self._scfs[drone_id] = scf
+                return {
+                    "ok": True,
+                    "drone_id": drone_id,
+                    "attempt_count": attempt_idx,
+                    "radio_group": self.fleet.get_radio_group(drone_id),
+                }
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Reconnect attempt %d/%d for drone %s failed: %s",
+                    attempt_idx,
+                    attempts,
+                    drone_id,
+                    exc,
+                )
+
+        return {
+            "ok": False,
+            "drone_id": drone_id,
+            "attempt_count": attempts,
+            "error": last_error,
+            "radio_group": self.fleet.get_radio_group(drone_id),
+        }

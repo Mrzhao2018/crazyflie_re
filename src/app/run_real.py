@@ -197,12 +197,27 @@ class RealMissionApp:
         if self.comp["config"].comm.readiness_wait_for_params:
             drone_id = None
             try:
-                for drone_id in self.comp["fleet"].all_ids():
-                    self.comp["transport"].wait_for_params(drone_id)
+                group_pool = self.comp.get("group_executor_pool")
+
+                def _on_done(drone_id: int) -> None:
                     self._readiness_report["wait_for_params"][drone_id] = True
                     self.comp["telemetry"].record_event(
                         "wait_for_params", drone_id=drone_id, ok=True
                     )
+
+                if group_pool is not None:
+                    from ..adapters.wait_for_params import wait_for_params_per_group
+
+                    wait_for_params_per_group(
+                        self.comp["transport"],
+                        self.comp["fleet"],
+                        group_pool,
+                        on_done=_on_done,
+                    )
+                else:
+                    for drone_id in self.comp["fleet"].all_ids():
+                        self.comp["transport"].wait_for_params(drone_id)
+                        _on_done(drone_id)
             except Exception as exc:
                 return self._fail_start(
                     "参数同步失败",
@@ -544,6 +559,7 @@ class RealMissionApp:
         pose_bus = self.comp["pose_bus"]
         safety = self.comp["safety"]
         health_bus = self.comp["health_bus"]
+        link_quality_bus = self.comp.get("link_quality_bus")
         leader_ref_gen = self.comp["leader_ref_gen"]
         leader_executor = self.comp["leader_executor"]
         follower_executor = self.comp["follower_executor"]
@@ -570,13 +586,43 @@ class RealMissionApp:
                     continue
 
                 health_latest = health_bus.latest()
+                link_quality_latest = (
+                    link_quality_bus.latest() if link_quality_bus is not None else {}
+                )
 
                 # 2. Fast gate: 轻量 disconnected / boundary 检查，触发时跳过重算
-                fast_blocked, fast_reasons = safety.fast_gate(snapshot)
-                if fast_blocked:
-                    logger.error(f"Fast-gate triggered: {fast_reasons}")
-                    self._emergency_land()
-                    break
+                if getattr(
+                    self.comp["config"].safety,
+                    "fast_gate_group_degrade_enabled",
+                    False,
+                ):
+                    fg = safety.fast_gate_decision(snapshot)
+                    if fg.action == "ABORT":
+                        if self._try_reconnect_on_disconnect(snapshot, fg.reason_codes):
+                            continue
+                        logger.error(f"Fast-gate ABORT: {fg.reason_codes}")
+                        self._emergency_land()
+                        break
+                    if fg.action == "HOLD_GROUP":
+                        degraded = self.failure_policy.apply_fast_gate_group_degrade(
+                            fg.degrade_groups
+                        )
+                        if degraded:
+                            telemetry.record_event(
+                                "fast_gate_group_degrade",
+                                ok=True,
+                                groups=fg.degrade_groups,
+                                followers=degraded,
+                                reason_codes=fg.reason_codes,
+                            )
+                else:
+                    fast_blocked, fast_reasons = safety.fast_gate(snapshot)
+                    if fast_blocked:
+                        if self._try_reconnect_on_disconnect(snapshot, fast_reasons):
+                            continue
+                        logger.error(f"Fast-gate triggered: {fast_reasons}")
+                        self._emergency_land()
+                        break
 
                 t_elapsed = time.time() - mission_start_time
                 self._poll_manual_input()
@@ -803,6 +849,9 @@ class RealMissionApp:
                         leader_action_count=len(plan.leader_actions),
                         follower_action_count=len(plan.follower_actions),
                         follower_command_norms=follower_command_norms,
+                        radio_link_quality=self._radio_link_quality_payload(
+                            link_quality_latest
+                        ),
                     )
                 )
 
@@ -840,6 +889,9 @@ class RealMissionApp:
             self.comp["telemetry"].close()
         if "link_manager" in self.comp:
             self.comp["link_manager"].close_all()
+        group_pool = self.comp.get("group_executor_pool")
+        if group_pool is not None:
+            group_pool.shutdown(wait=True)
 
     def _graceful_shutdown_land(self) -> None:
         self.landing_flow.graceful_shutdown_land()
@@ -1054,6 +1106,42 @@ class RealMissionApp:
     def _on_pose_update(self, drone_id, pos, timestamp):
         """定位数据回调 - 直接推送到PoseBus"""
         self.comp["pose_bus"].update_agent(drone_id, pos, timestamp)
+
+    @staticmethod
+    def _radio_link_quality_payload(
+        link_quality_latest: dict,
+    ) -> dict[int, dict[str, float | None]]:
+        """把 LinkQualityBus 的 snapshot 映射成 telemetry record 可序列化的结构。"""
+        payload: dict[int, dict[str, float | None]] = {}
+        for drone_id, sample in link_quality_latest.items():
+            payload[int(drone_id)] = {
+                "link_quality": sample.link_quality,
+                "uplink_rssi": sample.uplink_rssi,
+                "uplink_rate": sample.uplink_rate,
+                "downlink_rate": sample.downlink_rate,
+                "uplink_congestion": sample.uplink_congestion,
+                "downlink_congestion": sample.downlink_congestion,
+                "last_update_t": sample.last_update_t,
+            }
+        return payload
+
+    def _try_reconnect_on_disconnect(
+        self, snapshot, reason_codes: list[str]
+    ) -> bool:
+        """fast_gate 触发 ABORT 时，若 reconnect 已启用且原因是纯 disconnect，
+        给 disconnected_ids 一次有限次数重连的机会。全部成功返回 True，主循环
+        应当 `continue` 跳过本帧 emergency_land；否则返回 False。
+        """
+
+        comm = self.comp["config"].comm
+        if not getattr(comm, "reconnect_enabled", False):
+            return False
+        if any(code == "OUT_OF_BOUNDS" for code in reason_codes):
+            return False
+        drone_ids = list(snapshot.disconnected_ids)
+        if not drone_ids:
+            return False
+        return self.failure_policy.attempt_reconnect(drone_ids)
 
     def _emergency_land(
         self,

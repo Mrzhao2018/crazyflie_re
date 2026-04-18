@@ -104,6 +104,43 @@ def _executor_failure_summary(events: list[dict]) -> dict:
     }
 
 
+def _radio_link_summary(records: list[dict]) -> dict:
+    per_drone: dict[str, list[float]] = {}
+    overall: list[float] = []
+    for record in records:
+        link_field = record.get("radio_link_quality", {}) or {}
+        if not isinstance(link_field, dict):
+            continue
+        for drone_id, per_metric in link_field.items():
+            if not isinstance(per_metric, dict):
+                continue
+            value = per_metric.get("link_quality")
+            if value is None:
+                continue
+            per_drone.setdefault(str(drone_id), []).append(float(value))
+            overall.append(float(value))
+
+    def _stats(values: list[float]) -> dict:
+        if not values:
+            return {"count": 0, "min": None, "mean": None, "p5": None, "max": None}
+        ordered = sorted(values)
+        p5_idx = min(len(ordered) - 1, max(0, int(round(0.05 * (len(ordered) - 1)))))
+        return {
+            "count": len(values),
+            "min": ordered[0],
+            "mean": sum(values) / len(values),
+            "p5": ordered[p5_idx],
+            "max": ordered[-1],
+        }
+
+    return {
+        "overall": _stats(overall),
+        "per_drone": {
+            drone_id: _stats(values) for drone_id, values in per_drone.items()
+        },
+    }
+
+
 def _iter_lines(path: str):
     with open(path, encoding="utf-8") as fh:
         for line_no, line in enumerate(fh, start=1):
@@ -233,6 +270,7 @@ def analyze_records(
         )
     watchdog_summary = _watchdog_summary(events)
     executor_failure_summary = _executor_failure_summary(events)
+    radio_link_summary = _radio_link_summary(records)
 
     max_command_norm_per_drone = {}
     valid_frame_count = 0
@@ -320,6 +358,7 @@ def analyze_records(
         "event_counts": dict(event_counts),
         "watchdog_summary": watchdog_summary,
         "executor_failure_summary": executor_failure_summary,
+        "radio_link_summary": radio_link_summary,
         "safety_counts": dict(safety_counts),
         "scheduler_reason_counts": dict(scheduler_reason_counts),
         "first_mission_state": records[0].get("mission_state") if records else None,

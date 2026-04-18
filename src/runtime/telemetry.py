@@ -7,7 +7,7 @@ schema_version=2 三种 kind：header / event / record。
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import json
 import queue
 import threading
@@ -56,6 +56,7 @@ class TelemetryRecord:
     leader_action_count: int
     follower_action_count: int
     follower_command_norms: dict
+    radio_link_quality: dict = field(default_factory=dict)
 
 
 @dataclass

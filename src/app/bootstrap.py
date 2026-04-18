@@ -21,15 +21,43 @@ from ..runtime.safety_manager import SafetyManager
 from ..runtime.scheduler import CommandScheduler
 from ..runtime.telemetry import TelemetryRecorder
 from ..runtime.health_bus import HealthBus
+from ..runtime.link_quality_bus import LinkQualityBus
 from ..runtime.manual_leader_state import ManualLeaderState
 from ..runtime.manual_leader_reference import ManualLeaderReferenceSource
 from .preflight import PreflightRunner
 from ..adapters.cflib_link_manager import CflibLinkManager
 from ..adapters.cflib_command_transport import CflibCommandTransport
+from ..adapters.group_executor_pool import GroupExecutorPool
 from ..adapters.leader_executor import LeaderExecutor
 from ..adapters.follower_executor import FollowerExecutor
 from ..adapters.lighthouse_pose_source import LighthousePoseSource
 from ..adapters.manual_input_keyboard import KeyboardManualInputSource
+
+
+def _build_link_quality_provider(fleet, link_quality_bus):
+    """Return ``callable(group_id) -> float|None`` giving worst-case link_quality
+    per radio_group, or ``None`` when the bus is not wired.
+    """
+
+    if link_quality_bus is None:
+        return None
+
+    def provider(group_id: int) -> float | None:
+        latest = link_quality_bus.latest()
+        if not latest:
+            return None
+        worst: float | None = None
+        for drone_id, sample in latest.items():
+            if fleet.get_radio_group(drone_id) != group_id:
+                continue
+            quality = sample.link_quality
+            if quality is None:
+                continue
+            if worst is None or quality < worst:
+                worst = float(quality)
+        return worst
+
+    return provider
 
 
 def build_core_app(config_dir: str, startup_mode_override: str | None = None):
@@ -69,9 +97,16 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
         follower_controller = FollowerController(config.control)
     fsm = MissionFSM()
     safety = SafetyManager(config.safety, fleet)
-    scheduler = CommandScheduler(config.comm, fsm, fleet)
     telemetry = TelemetryRecorder()
     health_bus = HealthBus()
+    link_quality_bus = LinkQualityBus() if config.comm.link_quality_enabled else None
+    link_quality_provider = _build_link_quality_provider(fleet, link_quality_bus)
+    scheduler = CommandScheduler(
+        config.comm,
+        fsm,
+        fleet,
+        link_quality_provider=link_quality_provider,
+    )
 
     startup_mode = config.startup.mode
     manual_state = None
@@ -107,6 +142,7 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
         "scheduler": scheduler,
         "telemetry": telemetry,
         "health_bus": health_bus,
+        "link_quality_bus": link_quality_bus,
         "manual_leader_state": manual_state,
         "manual_input": manual_input,
     }
@@ -119,10 +155,27 @@ def build_real_app(config_dir: str, startup_mode_override: str | None = None):
     """构建包含真机适配层的完整应用对象"""
     components = build_core_app(config_dir, startup_mode_override=startup_mode_override)
 
-    link_manager = CflibLinkManager(components["fleet"])
+    link_manager = CflibLinkManager(
+        components["fleet"],
+        link_quality_bus=components.get("link_quality_bus"),
+        connect_pace_s=components["config"].comm.connect_pace_s,
+        connect_timeout_s=components["config"].comm.connect_timeout_s,
+        radio_driver=components["config"].comm.radio_driver,
+    )
     transport = CflibCommandTransport(link_manager)
-    leader_executor = LeaderExecutor(transport)
-    follower_executor = FollowerExecutor(transport)
+    radio_groups = sorted(
+        {
+            components["fleet"].get_radio_group(drone_id)
+            for drone_id in components["fleet"].all_ids()
+        }
+    )
+    group_executor_pool = GroupExecutorPool(group_ids=radio_groups)
+    leader_executor = LeaderExecutor(
+        transport, group_executor_pool=group_executor_pool
+    )
+    follower_executor = FollowerExecutor(
+        transport, group_executor_pool=group_executor_pool
+    )
     pose_source = LighthousePoseSource(
         link_manager, components["fleet"], components["config"].comm.pose_log_freq
     )
@@ -131,6 +184,7 @@ def build_real_app(config_dir: str, startup_mode_override: str | None = None):
         {
             "link_manager": link_manager,
             "transport": transport,
+            "group_executor_pool": group_executor_pool,
             "leader_executor": leader_executor,
             "follower_executor": follower_executor,
             "pose_source": pose_source,

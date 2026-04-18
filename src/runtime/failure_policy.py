@@ -144,6 +144,103 @@ class FailurePolicy:
             newly_degraded=newly_degraded,
         )
 
+    def apply_fast_gate_group_degrade(self, group_ids: list[int]) -> list[int]:
+        """把 fast_gate_decision 报出的掉线 group 下的 follower 降级为 parked hold。
+
+        返回实际被新增到 watchdog_degraded_followers 的 drone 列表（可空）。
+        整体复用 watchdog_degrade 的 telemetry 通路，下游 replay / compare-runs
+        的 watchdog_summary 会直接把它算进 degrade 次数。
+        """
+
+        if not group_ids:
+            return []
+        follower_ids = self._follower_ids_for_groups(set(group_ids))
+        if not follower_ids:
+            return []
+
+        stale_followers = [
+            {
+                "drone_id": drone_id,
+                "source": "fast_gate_group_degrade",
+                "radio_group": self.app.fleet.get_radio_group(drone_id),
+            }
+            for drone_id in follower_ids
+        ]
+        self.apply_watchdog_degrade(stale_followers)
+        return follower_ids
+
+    def attempt_reconnect(self, drone_ids: list[int]) -> bool:
+        """对指定 drone 尝试有限次数重连。全部成功时返回 True。
+
+        读取 ``config.comm.reconnect_*`` 作为 attempts/backoff/timeout 参数。
+        每次尝试都会记录 ``RUNTIME_LINK_RECONNECT_*`` 事件，供 replay / 分析
+        定位链路抖动与恢复。
+        """
+
+        app = self.app
+        config = app.comp.get("config")
+        link_manager = app.comp.get("link_manager")
+        telemetry = app.telemetry
+        if config is None or link_manager is None or telemetry is None:
+            return False
+        if not drone_ids:
+            return True
+
+        attempts = int(getattr(config.comm, "reconnect_attempts", 0))
+        backoff_s = float(getattr(config.comm, "reconnect_backoff_s", 0.5))
+        timeout_s = float(getattr(config.comm, "reconnect_timeout_s", 5.0))
+        if attempts <= 0:
+            return False
+
+        all_ok = True
+        for drone_id in drone_ids:
+            attempt_def = MissionErrors.Runtime.LINK_RECONNECT_ATTEMPT
+            telemetry.record_event(
+                "link_reconnect_attempt",
+                ok=True,
+                category=attempt_def.category,
+                code=attempt_def.code,
+                stage=attempt_def.stage,
+                drone_id=drone_id,
+                attempts=attempts,
+            )
+
+            result = link_manager.reconnect(
+                drone_id,
+                attempts=attempts,
+                backoff_s=backoff_s,
+                timeout_s=timeout_s,
+            )
+
+            if result.get("ok"):
+                ok_def = MissionErrors.Runtime.LINK_RECONNECT_OK
+                telemetry.record_event(
+                    "link_reconnect_ok",
+                    ok=True,
+                    category=ok_def.category,
+                    code=ok_def.code,
+                    stage=ok_def.stage,
+                    drone_id=drone_id,
+                    attempt_count=result.get("attempt_count"),
+                    radio_group=result.get("radio_group"),
+                )
+            else:
+                fail_def = MissionErrors.Runtime.LINK_RECONNECT_FAILED
+                telemetry.record_event(
+                    "link_reconnect_failed",
+                    ok=False,
+                    category=fail_def.category,
+                    code=fail_def.code,
+                    stage=fail_def.stage,
+                    drone_id=drone_id,
+                    attempt_count=result.get("attempt_count"),
+                    error=result.get("error"),
+                    radio_group=result.get("radio_group"),
+                )
+                all_ok = False
+
+        return all_ok
+
     def clear_watchdog_degrade(
         self, *, active_commands: dict[int, object] | None = None
     ) -> None:

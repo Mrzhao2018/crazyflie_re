@@ -24,6 +24,20 @@ class SafetyDecision:
     structured_reasons: list[SafetyReason] = field(default_factory=list)
 
 
+@dataclass
+class FastGateDecision:
+    """fast_gate 细粒度结果。
+
+    ``HOLD_GROUP`` 表示 disconnect 只覆盖了部分 radio_group；主循环可以把这些
+    group 的 follower 降级为 parked hold 而不是整队 ABORT。``degrade_groups``
+    仅在 ``action == "HOLD_GROUP"`` 时有意义。
+    """
+
+    action: Literal["EXECUTE", "HOLD_GROUP", "ABORT"]
+    reason_codes: list[str] = field(default_factory=list)
+    degrade_groups: list[int] = field(default_factory=list)
+
+
 class SafetyManager:
     def __init__(self, config: SafetyConfig, fleet_model):
         self.config = config
@@ -185,3 +199,52 @@ class SafetyManager:
                 reasons.append("OUT_OF_BOUNDS")
 
         return (bool(reasons), reasons)
+
+    def fast_gate_decision(self, snapshot: PoseSnapshot) -> FastGateDecision:
+        """细粒度 fast_gate：区分整体 ABORT、部分组掉线 HOLD_GROUP、通过三种情况。
+
+        规则：
+        * 越界 => ABORT（始终）
+        * disconnected_ids 覆盖所有已知 radio_group => ABORT
+        * disconnected_ids 只覆盖部分 group => HOLD_GROUP，degrade_groups 列出受
+          影响的 group id
+        * 其他 => EXECUTE
+        """
+
+        reason_codes: list[str] = []
+
+        out_of_bounds = False
+        fresh = snapshot.fresh_mask
+        if fresh.any():
+            positions = snapshot.positions[fresh]
+            below = np.any(positions < self._boundary_min, axis=1)
+            above = np.any(positions > self._boundary_max, axis=1)
+            if below.any() or above.any():
+                out_of_bounds = True
+                reason_codes.append("OUT_OF_BOUNDS")
+
+        if out_of_bounds:
+            return FastGateDecision(action="ABORT", reason_codes=reason_codes, degrade_groups=[])
+
+        if not snapshot.disconnected_ids:
+            return FastGateDecision(action="EXECUTE", reason_codes=[], degrade_groups=[])
+
+        reason_codes.append(f"DISCONNECTED:{snapshot.disconnected_ids}")
+        disconnected_groups = {
+            self.fleet.get_radio_group(drone_id)
+            for drone_id in snapshot.disconnected_ids
+        }
+        all_groups = {
+            self.fleet.get_radio_group(drone_id) for drone_id in self._all_ids_cache
+        }
+
+        if disconnected_groups >= all_groups:
+            return FastGateDecision(
+                action="ABORT", reason_codes=reason_codes, degrade_groups=[]
+            )
+
+        return FastGateDecision(
+            action="HOLD_GROUP",
+            reason_codes=reason_codes,
+            degrade_groups=sorted(disconnected_groups),
+        )

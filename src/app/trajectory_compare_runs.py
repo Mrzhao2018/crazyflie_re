@@ -37,6 +37,18 @@ def _extract_metrics(summary: dict, source_path: Path) -> dict:
     executor_by_action = executor_failure.get("by_action", {}) or {}
     executor_by_group = executor_failure.get("by_group", {}) or {}
     executor_retryable = executor_failure.get("retryable_counts", {}) or {}
+    radio_link = formation.get("radio_link_summary", {}) or {}
+    radio_overall = radio_link.get("overall", {}) or {}
+    radio_per_drone = radio_link.get("per_drone", {}) or {}
+    worst_drone_min = None
+    for drone_stats in radio_per_drone.values():
+        if not isinstance(drone_stats, dict):
+            continue
+        drone_min = drone_stats.get("min")
+        if drone_min is None:
+            continue
+        if worst_drone_min is None or drone_min < worst_drone_min:
+            worst_drone_min = drone_min
     config_fingerprint = formation.get("config_fingerprint") or summary.get(
         "config_fingerprint"
     )
@@ -74,6 +86,12 @@ def _extract_metrics(summary: dict, source_path: Path) -> dict:
         "executor_failure_non_retryable_count": executor_retryable.get(
             "non_retryable", 0
         ),
+        "radio_link_sample_count": radio_overall.get("count", 0),
+        "radio_link_overall_min": radio_overall.get("min"),
+        "radio_link_overall_mean": radio_overall.get("mean"),
+        "radio_link_overall_p5": radio_overall.get("p5"),
+        "radio_link_overall_max": radio_overall.get("max"),
+        "radio_link_worst_drone_min": worst_drone_min,
     }
 
 
