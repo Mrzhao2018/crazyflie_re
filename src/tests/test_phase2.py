@@ -102,7 +102,9 @@ estimator = AffineFrameEstimator(fleet)
 frame = estimator.estimate(snapshot, fleet.leader_ids())
 print(f"[OK] Frame valid: {frame.valid}, cond: {frame.condition_number:.2f}")
 assert frame.valid == follower_ref.valid
-assert abs(frame.condition_number - follower_ref.frame_condition_number) < 1e-6
+# cond 的权威移到 frame；follower_ref 不再持有 cond（T2 契约）
+import math as _math
+assert _math.isnan(follower_ref.frame_condition_number)
 
 print("\n=== 测试FollowerController ===")
 controller = FollowerController(config.control)

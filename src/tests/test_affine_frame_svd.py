@@ -48,3 +48,32 @@ assert frame_a.condition_number == frame_b.condition_number
 assert frame_a.diagnostics["rank"] == frame_b.diagnostics["rank"]
 
 print("[OK] AffineFrameEstimator SVD fusion contracts verified")
+
+# 4) FollowerReferenceGenerator 在有效 leader 位置下不再做 SVD
+from src.domain.afc_model import AFCModel
+from src.domain.follower_reference import FollowerReferenceGenerator
+from src.domain.stress_matrix_solver import StressMatrixSolver
+from src.domain.formation_model import FormationModel
+
+formation = FormationModel(
+    np.array(config.mission.nominal_positions, dtype=float),
+    fleet.leader_ids(),
+    fleet,
+)
+solver_result = StressMatrixSolver(formation).solve_dense(fleet.leader_ids())
+afc = AFCModel(solver_result, fleet)
+ref_gen = FollowerReferenceGenerator(formation, afc)
+
+leader_measurements = {
+    lid: nominal[fleet.id_to_index(lid)] for lid in fleet.leader_ids()
+}
+ref_set = ref_gen.compute(leader_measurements, t_meas=0.0)
+assert ref_set.valid
+
+# NaN 输入仍应拒绝（轻量防御应保留）
+nan_meas = dict(leader_measurements)
+nan_meas[fleet.leader_ids()[0]] = np.array([np.nan, 0.0, 0.0])
+nan_set = ref_gen.compute(nan_meas, t_meas=0.1)
+assert not nan_set.valid
+
+print("[OK] FollowerReferenceGenerator trust contract verified")

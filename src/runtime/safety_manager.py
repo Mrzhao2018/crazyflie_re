@@ -88,13 +88,12 @@ class SafetyManager:
                     condition_number=frame.condition_number,
                 )
 
-        # 4. 检查follower_ref有效性
+        # 4. 检查follower_ref有效性（cond 的权威由 frame 持有，这里只看 valid）
         if follower_ref is not None and not follower_ref.valid:
             add_reason(
                 "FOLLOWER_REF_INVALID",
                 "HOLD",
-                f"Follower ref invalid: cond={follower_ref.frame_condition_number:.2f}",
-                condition_number=follower_ref.frame_condition_number,
+                "Follower ref invalid",
             )
 
         # 5. 检查命令饱和（优先复用 controller diagnostics 里的范数，避免重复计算）
