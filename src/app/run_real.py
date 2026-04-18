@@ -569,31 +569,12 @@ class RealMissionApp:
                     time.sleep(0.01)
                     continue
 
-                # 2. Pre-safety检查（基于snapshot）
-                pre_safety = safety.evaluate(
-                    snapshot,
-                    frame=None,
-                    commands=None,
-                    health=health_bus.latest(),
-                )
-
-                if pre_safety.action == "ABORT":
-                    logger.error(f"Pre-safety ABORT: {pre_safety.reasons}")
+                # 2. Fast gate: 轻量 disconnected / boundary 检查，触发时跳过重算
+                fast_blocked, fast_reasons = safety.fast_gate(snapshot)
+                if fast_blocked:
+                    logger.error(f"Fast-gate triggered: {fast_reasons}")
                     self._emergency_land()
                     break
-
-                if pre_safety.action == "HOLD":
-                    logger.warning(f"Pre-safety HOLD: {pre_safety.reasons}")
-                    self._enter_hold_mode()
-                    if self._check_hold_timeout(time.time() - mission_start_time):
-                        break
-                    time.sleep(0.1)
-                    continue
-
-                if fsm.state() == MissionState.HOLD:
-                    self._safe_transition(MissionState.RUN)
-                    telemetry.record_event("hold_recovered", ok=True)
-                    self._clear_hold_tracking()
 
                 t_elapsed = time.time() - mission_start_time
                 self._poll_manual_input()

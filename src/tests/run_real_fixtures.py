@@ -399,6 +399,10 @@ class FakeSafety:
         self.decisions = list(decisions)
         self.calls = 0
 
+    def fast_gate(self, snapshot):
+        # FakeSafety 默认不拦截；拦截路径由 evaluate() 返回 ABORT 触发
+        return (False, [])
+
     def evaluate(
         self, snapshot, frame=None, commands=None, follower_ref=None, health=None
     ):

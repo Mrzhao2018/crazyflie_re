@@ -151,3 +151,26 @@ class SafetyManager:
             return SafetyDecision(
                 action="EXECUTE", reasons=[], reason_codes=[], structured_reasons=[]
             )
+
+    def fast_gate(self, snapshot: PoseSnapshot) -> tuple[bool, list[str]]:
+        """轻量前置检查 —— 断连 / 越界。返回 (blocked, reason_codes)。
+
+        不生成 SafetyReason 对象，也不接受 frame / commands / health。
+        若 blocked=True，主循环应当按 ABORT 处理，跳过后续 frame / control 计算。
+        完整原因（含 severity / message / details）由后续 evaluate() 补齐。
+        """
+        reasons: list[str] = []
+        if snapshot.disconnected_ids:
+            reasons.append(f"DISCONNECTED:{snapshot.disconnected_ids}")
+
+        fresh = snapshot.fresh_mask
+        if fresh.any():
+            positions = snapshot.positions[fresh]
+            bmin = np.asarray(self.config.boundary_min, dtype=float)
+            bmax = np.asarray(self.config.boundary_max, dtype=float)
+            below = np.any(positions < bmin, axis=1)
+            above = np.any(positions > bmax, axis=1)
+            if below.any() or above.any():
+                reasons.append("OUT_OF_BOUNDS")
+
+        return (bool(reasons), reasons)
