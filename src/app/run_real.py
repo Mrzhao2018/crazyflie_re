@@ -569,6 +569,8 @@ class RealMissionApp:
                     time.sleep(0.01)
                     continue
 
+                health_latest = health_bus.latest()
+
                 # 2. Fast gate: 轻量 disconnected / boundary 检查，触发时跳过重算
                 fast_blocked, fast_reasons = safety.fast_gate(snapshot)
                 if fast_blocked:
@@ -660,7 +662,7 @@ class RealMissionApp:
                     frame,
                     commands,
                     follower_ref,
-                    health=health_bus.latest(),
+                    health=health_latest,
                 )
 
                 # 处理安全决策
@@ -780,7 +782,7 @@ class RealMissionApp:
                         disconnected_ids=list(snapshot.disconnected_ids),
                         health={
                             drone_id: sample.values
-                            for drone_id, sample in health_bus.latest().items()
+                            for drone_id, sample in health_latest.items()
                         },
                         frame_valid=(frame.valid if frame is not None else None),
                         frame_condition_number=(
