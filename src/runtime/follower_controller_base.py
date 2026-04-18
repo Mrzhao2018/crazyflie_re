@@ -52,24 +52,35 @@ class FollowerControllerBase:
     ) -> tuple[dict[int, tuple[float, float]], list[int]]:
         """Return ``{fid: (gain_scale_xy, ff_scale_xy)}`` plus radial-scaled ids."""
 
-        follower_radii = {
-            fid: float(
-                np.linalg.norm(
-                    np.array(references.target_positions[fid], dtype=float)[:2]
-                )
-            )
-            for fid in active_follower_ids
-            if fid in references.target_positions
-        }
-        max_radius = max(follower_radii.values(), default=0.0)
+        eligible = [
+            fid for fid in active_follower_ids if fid in references.target_positions
+        ]
+        if not eligible:
+            return {}, []
+
+        targets_xy = np.stack(
+            [
+                np.asarray(references.target_positions[fid], dtype=float)[:2]
+                for fid in eligible
+            ]
+        )
+        radii = np.linalg.norm(targets_xy, axis=1)
+        max_radius = float(radii.max()) if radii.size else 0.0
+        if max_radius > 1e-9:
+            ratios = radii / max_radius
+        else:
+            ratios = np.zeros_like(radii)
+
+        gain_scales_xy = 1.0 + self.radial_gain_scale_xy * ratios
+        ff_scales_xy = 1.0 + self.radial_feedforward_scale_xy * ratios
+
         scales: dict[int, tuple[float, float]] = {}
         radial_scaled: list[int] = []
-        for fid, radius_xy in follower_radii.items():
-            radius_ratio = radius_xy / max_radius if max_radius > 1e-9 else 0.0
-            gain_scale_xy = 1.0 + self.radial_gain_scale_xy * radius_ratio
-            ff_scale_xy = 1.0 + self.radial_feedforward_scale_xy * radius_ratio
-            scales[fid] = (gain_scale_xy, ff_scale_xy)
-            if gain_scale_xy > 1.0 or ff_scale_xy > 1.0:
+        for row, fid in enumerate(eligible):
+            gs = float(gain_scales_xy[row])
+            fs = float(ff_scales_xy[row])
+            scales[fid] = (gs, fs)
+            if gs > 1.0 or fs > 1.0:
                 radial_scaled.append(fid)
         return scales, radial_scaled
 
