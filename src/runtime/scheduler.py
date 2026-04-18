@@ -58,6 +58,15 @@ class CommandScheduler:
     def _group_drone_ids(self, drone_ids: list[int]) -> dict[int, list[int]]:
         if not drone_ids:
             return {}
+
+        # Fast path: drone_ids 恰好等于 follower_ids 全集或 leader_ids 全集
+        if self.fleet is not None:
+            drone_tuple = tuple(drone_ids)
+            if drone_tuple == tuple(self.fleet.follower_ids()):
+                return {g: list(m) for g, m in self._follower_groups.items()}
+            if drone_tuple == tuple(self.fleet.leader_ids()):
+                return {g: list(m) for g, m in self._leader_groups.items()}
+
         drone_set = set(drone_ids)
         grouped: dict[int, list[int]] = {}
         # fast path: restrict the prebuilt groups to the active subset
