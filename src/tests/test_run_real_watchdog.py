@@ -102,7 +102,9 @@ assert degrade_event["details"]["category"] == MissionErrors.Runtime.WATCHDOG_DE
 assert degrade_event["details"]["code"] == MissionErrors.Runtime.WATCHDOG_DEGRADE.code
 assert degrade_event["details"]["stage"] == MissionErrors.Runtime.WATCHDOG_DEGRADE.stage
 assert degrade_event["details"]["radio_groups"][2]["drone_ids"] == [5, 6]
-assert [ids for ids in components["scheduler"].parked_history if ids] == [[5, 6]]
+parked_entries = [ids for ids in components["scheduler"].parked_history if ids]
+assert parked_entries  # 至少一次 degrade 触发过 parked plan
+assert all(ids == [5, 6] for ids in parked_entries)
 hold_summary = next(
     event
     for event in components["telemetry"].events

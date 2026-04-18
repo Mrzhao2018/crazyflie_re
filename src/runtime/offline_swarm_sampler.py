@@ -318,7 +318,7 @@ def sample_offline_swarm(
 
     return OfflineSwarmReplay(
         times=times,
-        drone_ids=drone_ids,
+        drone_ids=list(drone_ids),
         roles=roles,
         phase_labels=phase_labels,
         positions=positions,
