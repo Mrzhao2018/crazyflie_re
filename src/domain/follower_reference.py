@@ -35,8 +35,10 @@ class FollowerReferenceGenerator:
         self.time_delay_compensation_enabled = time_delay_compensation_enabled
         self.estimated_total_delay_s = max(0.0, float(estimated_total_delay_ms)) / 1000.0
         self.delay_prediction_gain = max(0.0, float(delay_prediction_gain))
-        self._last_target_positions: dict[int, np.ndarray] | None = None
-        self._last_target_velocities: dict[int, np.ndarray] | None = None
+        self._last_target_positions: np.ndarray | None = None
+        self._last_target_ids: tuple[int, ...] | None = None
+        self._last_target_velocities: np.ndarray | None = None
+        self._last_target_velocity_ids: tuple[int, ...] | None = None
         self._last_t_meas: float | None = None
 
     def compute(
@@ -87,24 +89,32 @@ class FollowerReferenceGenerator:
         target_positions: dict[int, np.ndarray],
         t_meas: float | None,
     ) -> dict[int, np.ndarray] | None:
-        velocities = None
-        if self._last_target_positions is not None and self._last_t_meas is not None:
-            if t_meas is not None:
-                dt = float(t_meas) - self._last_t_meas
-            else:
-                dt = 0.0
-            if dt > 1e-9:
-                velocities = {}
-                for drone_id, target in target_positions.items():
-                    previous = self._last_target_positions.get(drone_id)
-                    if previous is None:
-                        continue
-                    velocities[drone_id] = (target - previous) / dt
+        velocities: dict[int, np.ndarray] | None = None
+        follower_ids = list(target_positions.keys())
+        current = (
+            np.stack(
+                [np.asarray(target_positions[fid], dtype=float) for fid in follower_ids]
+            )
+            if follower_ids
+            else np.zeros((0, 3))
+        )
 
-        self._last_target_positions = {
-            drone_id: np.array(target, dtype=float).copy()
-            for drone_id, target in target_positions.items()
-        }
+        if (
+            self._last_target_positions is not None
+            and self._last_target_ids == tuple(follower_ids)
+            and self._last_t_meas is not None
+            and t_meas is not None
+        ):
+            dt = float(t_meas) - self._last_t_meas
+            if dt > 1e-9:
+                vel_arr = (current - self._last_target_positions) / dt
+                velocities = {
+                    fid: vel_arr[row] for row, fid in enumerate(follower_ids)
+                }
+
+        # Freeze 当前 ids/positions 作为下次参考
+        self._last_target_positions = current.copy()
+        self._last_target_ids = tuple(follower_ids)
         return velocities
 
     def _estimate_target_accelerations(
@@ -112,31 +122,37 @@ class FollowerReferenceGenerator:
         target_velocities: dict[int, np.ndarray] | None,
         t_meas: float | None,
     ) -> dict[int, np.ndarray] | None:
-        accelerations = None
-        dt = 0.0
-        if self._last_t_meas is not None and t_meas is not None:
-            dt = float(t_meas) - self._last_t_meas
+        accelerations: dict[int, np.ndarray] | None = None
+        if target_velocities is None:
+            self._last_target_velocities = None
+            self._last_target_velocity_ids = None
+            self._last_t_meas = float(t_meas) if t_meas is not None else None
+            return None
+
+        follower_ids = list(target_velocities.keys())
+        current = (
+            np.stack(
+                [np.asarray(target_velocities[fid], dtype=float) for fid in follower_ids]
+            )
+            if follower_ids
+            else np.zeros((0, 3))
+        )
 
         if (
-            target_velocities is not None
-            and self._last_target_velocities is not None
-            and dt > 1e-9
+            self._last_target_velocities is not None
+            and self._last_target_velocity_ids == tuple(follower_ids)
+            and self._last_t_meas is not None
+            and t_meas is not None
         ):
-            accelerations = {}
-            for drone_id, velocity in target_velocities.items():
-                previous = self._last_target_velocities.get(drone_id)
-                if previous is None:
-                    continue
-                accelerations[drone_id] = (velocity - previous) / dt
+            dt = float(t_meas) - self._last_t_meas
+            if dt > 1e-9:
+                acc_arr = (current - self._last_target_velocities) / dt
+                accelerations = {
+                    fid: acc_arr[row] for row, fid in enumerate(follower_ids)
+                }
 
-        self._last_target_velocities = (
-            {
-                drone_id: np.array(velocity, dtype=float).copy()
-                for drone_id, velocity in target_velocities.items()
-            }
-            if target_velocities is not None
-            else None
-        )
+        self._last_target_velocities = current.copy()
+        self._last_target_velocity_ids = tuple(follower_ids)
         self._last_t_meas = float(t_meas) if t_meas is not None else None
         return accelerations
 
