@@ -1,6 +1,6 @@
 # Crazyflie AFC Swarm
 
-> 2026-04 状态更新。
+> 2026-04-18 状态更新。
 > 
 > 这是一个面向 **Crazyflie + Lighthouse + cflib** 的仿射编队控制实验仓库，当前重点是 **真实平台集成、leader 轨迹执行、follower 在线速度闭环、结构化 telemetry 与离线复盘**。
 
@@ -50,7 +50,8 @@
 - `src/domain/`
   - 编队模型、stress matrix、AFC、mission profile、leader/follower reference
 - `src/runtime/`
-  - pose bus、affine frame estimator、follower controller、scheduler、safety、telemetry、health
+  - pose bus、affine frame estimator、follower controller（v1 向量化、v2 二阶前馈）、scheduler、safety manager（evaluate + fast_gate）、telemetry（异步 writer）、health
+  - failure policy、landing flow、mission telemetry reporter、mission FSM、offline swarm sampler、telemetry replay
 - `src/adapters/`
   - cflib link/transport、Lighthouse pose source、leader/follower executor、键盘手动输入
 - `src/app/`
@@ -97,6 +98,8 @@
 - follower 发包受频率限制与 deadband 限制
 - follower / parked hold 的限流已按 `radio_group` 拆分，不再共用单个全局 follower 发送时钟
 - safety 动作为 `EXECUTE / HOLD / ABORT`
+- 主循环每帧只做**一次** `safety.evaluate`；ABORT 级前置拦截由轻量 `SafetyManager.fast_gate(snapshot)` 承担（只扫 `disconnected_ids` 与 `boundary`）
+- HOLD 只能被 full-safety `EXECUTE` 清除，`hold_entered_at` 不会被 fast_gate 提前 reset
 - `HOLD` 持续超时后会自动降落（`hold_auto_land_timeout`）
 - follower velocity stream 带 watchdog；当速度指令流长时间未刷新时，会按 `velocity_stream_watchdog_action` 执行 `telemetry / hold / degrade`
 
@@ -133,6 +136,8 @@
   - `kind=event`：结构化事件（连接阶段、watchdog、mission_error、executor summary 等）。
   - `kind=record`：每次新 pose 到达时的运行期快照（snapshot_seq、measured_positions、safety_action、scheduler_diagnostics、follower_command_norms 等）。
 - `record` 不再每帧拷贝 `phase_events` / `config_fingerprint` / `readiness`——这些字段只在 header 写一次，事件走独立流，整体 JSONL 体积大幅下降。
+- JSON 序列化 + 写盘发生在一条 daemon writer 线程上；主循环只做 `queue.put`，不再阻塞在 `json.dumps` / `fh.write`。`event` 与 `header` 立即 flush；`record` 批量 flush。`close()` 时 drain 队列并 join 线程。
+- 队列容量上限 4096：极端情况下 `record` 可能被丢弃并计入 `summary()["records_dropped"]`；`event` 始终阻塞 put（关键事件不丢）。
 
 当前 telemetry 已记录的内容包括：
 
@@ -277,8 +282,75 @@
 说明：
 
 - 默认仍然保持保守串行行为，不改变当前实验基线
-- 当前只完成了代码路径、配置开关和单元测试/准系统测试
+- 当前只完成了代码路径、配置开关和准系统测试
 - 真实硬件 smoke 还没有在当前环境执行，所以这两个开关暂时更适合实验模式，而不是默认生产路径
+
+### 7. 运行时性能与工程化优化
+
+这一节集中记录**已经合入 main** 的主循环/算法/遥测层工程优化。目标不是追求新功能，而是压低每帧 CPU、减少阻塞 I/O、让热路径更可控。默认行为保持不变，除非另行标注。
+
+**主循环（`src/app/run_real.py`）**
+
+- 每帧只做一次 `safety.evaluate`，ABORT 级前置检查改用 `SafetyManager.fast_gate(snapshot)`。`fast_gate` 只扫 `disconnected_ids` 与 `boundary`，不构造 `SafetyReason` 对象。
+- `health_bus.latest()` 每帧只调用一次，存进 loop-local 变量后由 `safety.evaluate()` 与 telemetry record 复用。
+- HOLD 状态只能被 full-safety `EXECUTE` 清除；`hold_entered_at` 不会被前置检查误 reset，`hold_auto_land_timeout` 能正确触发。
+- 仍然保留 `sleep(0.01)` 轮询结构；没有引入 `threading.Event`，避免与 `pose_source` 回调线程产生新的竞态面。
+
+**定位与 frame 估计（`src/runtime/affine_frame_estimator.py`）**
+
+- `rank` 与 `condition_number` 合并为一次 `np.linalg.svd(diff, compute_uv=False)`；旧版等价于两次 SVD（`matrix_rank` + `cond`）。
+- 组件 `__init__` 时缓存 `leader_ids_cache` 与 `leader_idx` 数组；热路径直接走数组索引，不再逐 id 调用 `fleet.id_to_index()`。
+- 退化场景（rank < 3）返回 `cond = inf` 并标记 `valid=False`，决策路径不变。
+
+**Follower reference（`src/domain/follower_reference.py`）**
+
+- 不再在 `compute()` 里复算 `rank` / `cond`——所有权归属 `AffineFrameEstimator`，只保留 NaN 防御。
+- `FollowerReferenceSet.frame_condition_number` 现在固定为 `nan`（语义：follower_ref 不是 cond 的权威）。上游若需要 cond，请读 `frame.condition_number`。
+- `_last_target_positions` / `_last_target_velocities` 内部状态改为 `(n_f, 3)` ndarray + `tuple(follower_ids)` 签名，不再每帧 dict-copy 全量。
+
+**Follower 控制器（`src/runtime/follower_controller.py`、`follower_controller_base.py`）**
+
+- `compute()` 内循环全向量化：一次 `np.stack` 抓出所有 active follower 的 P/T，`V = -K * (P - T) * scales` 一次成型。逐 follower 循环只保留在前馈 clip 与输出范数 clip 上（follower 规模小，通路清晰优先）。
+- `_compute_radial_scales` 用 `np.linalg.norm(T[:, :2], axis=1)` + `max` 一次得到所有 radius/ratio；不再逐 follower `np.array(...)`。
+- `command_norms` 由向量化 `np.linalg.norm(V, axis=1)` 一次算出，safety 不再重复做范数判定。
+
+**PoseBus（`src/runtime/pose_bus.py`）**
+
+- `latest()` 复用预分配的 `_scratch_positions` / `_scratch_fresh` 缓冲；每次调用只 `fill(0) + 填入 + .copy()` 给返回值，避免高频 `np.zeros((n,3))` 分配。
+- snapshot 之间仍然互相隔离（`.copy()` 保证），`update_agent` / `has_newer_than` 语义不变。
+
+**CommandScheduler（`src/runtime/scheduler.py`）**
+
+- `_group_drone_ids` 全集快速路径：当 `drone_ids == follower_ids` 或 `leader_ids` 全集时，直接返回预缓存的 `_follower_groups` / `_leader_groups`，不再 `for d in members if d in drone_set`。
+- 子集 / 未知 id 仍走慢路径，行为向后兼容。
+
+**Safety（`src/runtime/safety_manager.py`）**
+
+- `__init__` 一次性把 `boundary_min/max` 转成 ndarray，边界检查用 `np.any(P < bmin, axis=1)` 向量化。
+- `fast_gate` 与 `evaluate` 共享同一套 cached boundary 数组。
+
+**AFC 模型（`src/domain/afc_model.py`）**
+
+- 提供 `steady_state_array(leader_positions)`，直接返回 `(n_f, 3)` ndarray + `tuple(follower_ids)`，方便上层继续走向量运算。
+- 原 `steady_state(leader_positions) -> dict` 作为薄包装保留，向后兼容。
+
+**Telemetry（`src/runtime/telemetry.py`）**
+
+- JSON 序列化 + 写盘移到 daemon writer 线程；主循环只 `queue.put(("record"/"event"/"header", payload))`，热路径零阻塞。
+- `record` 走 `_json_safe_record` 快速路径（针对 `TelemetryRecord.asdict()` 的字段结构），避免深度递归 `isinstance` 链。
+- `record` 批量 flush；`event` / `header` 立即 flush。`close()` 用 sentinel drain 并 join。
+
+**FleetModel（`src/domain/fleet_model.py`）**
+
+- `all_ids() / leader_ids() / follower_ids() / get_group_members()` 改为返回 `tuple`（只读），不再每次 `.copy()` 一份 list。调用方若需要 mutate，请显式 `list(fleet.xxx_ids())`。
+
+**覆盖面**
+
+- 36 条既有 + 新增 contract 测试全部通过（包含 `test_affine_frame_svd` / `test_follower_controller` / `test_pose_bus_buffers` / `test_safety_fast_gate` / `test_scheduler_group_fast_path` / `test_afc_steady_state_array` / `test_telemetry_async` / `test_run_real_watchdog` 等）。
+- telemetry schema、config 字段、mission 行为均未改变。
+- 两处语义差异请留意：
+  - `follower_ref.frame_condition_number` 现为 `nan`（cond 权威移到 `frame`）
+  - `LOW_BATTERY`（`min_vbat > 0` 时）触发从 pre-safety 移到 full-safety，晚一帧才进入 emergency_land；默认 `min_vbat = 0.0` 无影响
 
 ---
 
@@ -766,6 +838,30 @@ python -m src.tests.test_cli
 - 不同机动强度、不同场地条件下的边界验证
 - 将已有经验整理成可复现的实验结论
 
+### 5. 工程侧运行时优化（非参数侧）
+
+在参数侧基本收敛之后，工程层面又做了一轮从 telemetry 到主循环再到算法的运行时优化（对应已合入 main 的 PR1–PR9 系列）。这一阶段不改控制律、不改 mission 行为，只是把"**同一套决策路径在每帧上做的事情更少、更便宜、不阻塞**"：
+
+- telemetry JSONL 拆成 `header / event / record` 三种 kind，record 不再内嵌 phase_events / config_fingerprint
+- telemetry 的 `json.dumps` 与 `fh.write` 移到后台 daemon writer 线程
+- `RealMissionApp` 从 1000+ 行巨类拆成 `FailurePolicy` / `LandingFlow` / `MissionTelemetryReporter` 等职责清晰的模块
+- AffineFrameEstimator 的 rank + cond 合并为一次 `svdvals`
+- FollowerReferenceGenerator 不再复算 rank/cond（权威归 frame）；内部状态改为 ndarray
+- FollowerController 内循环向量化，radial scales 一次算出
+- 主循环前置拦截由 `SafetyManager.fast_gate` 承担，`safety.evaluate` 每帧只跑一次
+- PoseBus 预分配缓冲，不再每次 `np.zeros` 分配
+- 组件 init 时缓存 `leader_idx / follower_idx` 数组
+- FleetModel getters 改为只读 tuple
+- scheduler `_group_drone_ids` 加全集快速路径
+- AFCModel 暴露 `steady_state_array(...)` ndarray 变体
+
+这一阶段不主张"**立刻改善飞行表现**"；真正的收益方向是：
+
+- 更紧的 per-tick CPU 预算，为未来加高频控制回路腾空间
+- telemetry 不再卡主循环，使长任务的 wall-clock 更可预期
+- 把"cond 的权威"等语义收口到单点，避免重复计算漂移
+- 模块拆分与契约测试覆盖，使后续再改运行时更安全
+
 ---
 
 ## `manual_leader` 模式键位
@@ -906,6 +1002,8 @@ python -m src.tests.test_cli
 - transport 层仍有继续补强空间
 - 默认 `min_vbat = 0.0`，即电池阈值保护默认关闭
 - 历史文档和旧产物中仍可能保留旧编队规模或旧说法
+- 运行时优化（PR1–PR9 系列）目前主要通过 36 条契约测试 + 离线 smoke 覆盖；**尚未在真机上做配套的基线 vs 优化版 benchmark 对比**——声称的 CPU / IO 节省是基于代码路径推断，不是测量数据
+- Telemetry 后台 writer 的队列容量上限是 4096；超出后主循环会丢弃 `record`（计入 `records_dropped`），`event` 始终阻塞 put 保证不丢。这个上限目前是代码常量，尚未暴露到配置
 
 ---
 
