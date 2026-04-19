@@ -1,0 +1,10 @@
+-r requirements.txt
+
+# 测试
+pytest
+pytest-asyncio
+httpx  # FastAPI TestClient 依赖
+
+# 文档
+sphinx
+sphinx-rtd-theme

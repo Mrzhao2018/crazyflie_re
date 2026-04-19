@@ -16,6 +16,7 @@ from . import (
 from .run_real import RealMissionApp
 from .trajectory_budget_summary import print_trajectory_budget_summary
 from .bootstrap import build_app
+from ..web import cli_entry as web_cli_entry
 
 
 CommandHandler = Callable[[argparse.Namespace], int]
@@ -84,6 +85,7 @@ def _command_handlers() -> dict[str, CommandHandler]:
         "compare": trajectory_comparison.run,
         "compare-runs": trajectory_compare_runs.run,
         "sim": run_sim.run,
+        "web": web_cli_entry.run,
     }
 
 
@@ -173,6 +175,23 @@ def build_parser() -> argparse.ArgumentParser:
         "sim",
         help="运行最小离线控制链 smoke test",
         parents=[sim_parent],
+    )
+
+    web_parser = subparsers.add_parser(
+        "web",
+        help="启动本地 Web 分析界面 (离线 telemetry 可视化)",
+    )
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8000)
+    web_parser.add_argument(
+        "--telemetry-dir",
+        default="telemetry",
+        help="telemetry JSONL 根目录 (默认 telemetry/)",
+    )
+    web_parser.add_argument(
+        "--artifacts-dir",
+        default="artifacts",
+        help="衍生产物根目录 (默认 artifacts/)",
     )
 
     return parser
