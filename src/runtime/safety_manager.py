@@ -204,10 +204,10 @@ class SafetyManager:
         """细粒度 fast_gate：区分整体 ABORT、部分组掉线 HOLD_GROUP、通过三种情况。
 
         规则：
+
         * 越界 => ABORT（始终）
         * disconnected_ids 覆盖所有已知 radio_group => ABORT
-        * disconnected_ids 只覆盖部分 group => HOLD_GROUP，degrade_groups 列出受
-          影响的 group id
+        * disconnected_ids 只覆盖部分 group => HOLD_GROUP，degrade_groups 列出受影响的 group id
         * 其他 => EXECUTE
         """
 
