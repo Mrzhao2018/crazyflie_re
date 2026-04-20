@@ -84,3 +84,58 @@ def test_text_reporter_set_total_phases(caplog):
 
 def test_text_reporter_conforms_to_protocol():
     assert isinstance(TextProgressReporter(), StartupProgressReporter)
+
+
+def test_rich_reporter_renders_phase_rows():
+    pytest.importorskip("rich")
+    from io import StringIO
+    from rich.console import Console
+
+    from src.app.startup_progress import RichProgressReporter
+
+    buf = StringIO()
+    console = Console(
+        file=buf, force_terminal=True, width=120, record=True, color_system=None
+    )
+    reporter = RichProgressReporter(verbose=False, total_phases=9, console=console)
+    try:
+        with reporter.phase("connect", "连接 Crazyflie"):
+            reporter.step(5, 10)
+        with pytest.raises(RuntimeError):
+            with reporter.phase("wait_for_params", "等参数"):
+                raise RuntimeError("boom")
+    finally:
+        reporter.close()
+
+    output = console.export_text(clear=False)
+    assert "连接 Crazyflie" in output
+    assert "OK" in output
+    assert "FAIL" in output
+    assert "boom" in output
+
+
+def test_rich_reporter_close_is_idempotent():
+    pytest.importorskip("rich")
+    from rich.console import Console
+
+    from src.app.startup_progress import RichProgressReporter
+
+    reporter = RichProgressReporter(total_phases=9, console=Console(quiet=True))
+    reporter.close()
+    reporter.close()
+
+
+def test_rich_reporter_conforms_to_protocol():
+    pytest.importorskip("rich")
+    from rich.console import Console
+
+    from src.app.startup_progress import (
+        RichProgressReporter,
+        StartupProgressReporter,
+    )
+
+    reporter = RichProgressReporter(total_phases=9, console=Console(quiet=True))
+    try:
+        assert isinstance(reporter, StartupProgressReporter)
+    finally:
+        reporter.close()

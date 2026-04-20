@@ -100,3 +100,116 @@ class TextProgressReporter:
 
     def close(self):
         pass
+
+
+class RichProgressReporter:
+    """Rich Live + Table TUI reporter. Only constructed when rich is importable."""
+
+    def __init__(
+        self,
+        verbose: bool = False,
+        total_phases: int = 9,
+        console: Any = None,
+    ):
+        from rich.console import Console
+
+        self._verbose = verbose
+        self._total_phases = total_phases
+        self._phase_index = 0
+        self._rows: list[dict[str, Any]] = []
+        self._active_row: dict[str, Any] | None = None
+        self.console: Any = console if console is not None else Console()
+        self._live: Any = None
+
+    def set_total_phases(self, total: int) -> None:
+        self._total_phases = total
+
+    def _ensure_live(self) -> None:
+        if self._live is None:
+            from rich.live import Live
+
+            self._live = Live(
+                self._render(),
+                console=self.console,
+                refresh_per_second=8,
+                transient=False,
+            )
+            self._live.start()
+
+    def _render(self):
+        from rich.table import Table
+
+        table = Table.grid(padding=(0, 1))
+        table.add_column()
+        table.add_column()
+        table.add_column()
+        for row in self._rows:
+            status = row["status"]
+            if status == "begin":
+                if row.get("total"):
+                    marker = f"{row.get('done', 0)}/{row['total']}"
+                else:
+                    marker = "..."
+            elif status == "ok":
+                marker = f"[green]OK[/] ({row['duration']:.1f}s)"
+            elif status == "fail":
+                marker = f"[red]FAIL[/] {row.get('reason', '')}"
+            else:
+                marker = status
+            prefix = f"[{row['index']}/{self._total_phases}]"
+            detail = row.get("detail") or ""
+            table.add_row(prefix, row["title"], f"{marker}  {detail}".rstrip())
+        return table
+
+    @contextmanager
+    def phase(self, key, title, total=None):
+        self._phase_index += 1
+        started_at = time.monotonic()
+        row: dict[str, Any] = {
+            "index": self._phase_index,
+            "key": key,
+            "title": title,
+            "status": "begin",
+            "total": total,
+            "done": 0,
+            "detail": None,
+        }
+        self._rows.append(row)
+        self._active_row = row
+        self._ensure_live()
+        self._live.update(self._render())
+        try:
+            yield self
+        except Exception as exc:
+            row["status"] = "fail"
+            row["duration"] = time.monotonic() - started_at
+            row["reason"] = str(exc)[:120]
+            self._live.update(self._render())
+            raise
+        else:
+            row["status"] = "ok"
+            row["duration"] = time.monotonic() - started_at
+            self._live.update(self._render())
+        finally:
+            self._active_row = None
+
+    def step(self, done, total, detail=None):
+        if self._active_row is None:
+            return
+        self._active_row["done"] = done
+        self._active_row["total"] = total
+        if self._verbose and detail:
+            self._active_row["detail"] = detail
+        if self._live is not None:
+            self._live.update(self._render())
+
+    def warn(self, msg):
+        if self._active_row is not None:
+            self._active_row["detail"] = f"WARN {msg}"
+            if self._live is not None:
+                self._live.update(self._render())
+
+    def close(self):
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
