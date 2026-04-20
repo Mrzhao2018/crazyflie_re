@@ -185,6 +185,13 @@ python -m src.app.cli run --startup-mode manual_leader
 
 行为：读取 `config/` → 组装 `build_app("config")` → 等待 Enter → 启动。需要真实 Crazyflie、radio 与 Lighthouse 环境就绪。
 
+**启动状态显示：**
+
+- 默认使用 rich TUI 展示启动阶段（连接 / 等参数 / 重置估计器 / onboard controller / 定位 / 健康 / 轨迹上传 / preflight / takeoff+settle+align；条件阶段按 config 启用）。
+- `--verbose` / `-v` 展开每台无人机的 per-step 细节；root logger 切 DEBUG。
+- rich 未安装、非 TTY（重定向）、或 `AFC_NO_RICH=1` 时自动降级为 `[HH:MM:SS] [i/N] 阶段名 ...` 滚动文本。
+- 每个阶段 begin/ok/fail 以 `startup_phase` 事件写入 telemetry。
+
 ### trajectory 预算 dry-run（不连接真机）
 
 ```bash
@@ -334,6 +341,7 @@ drone id 唯一、leader 数 ≥ 4、`nominal_positions` 与 drone 数一致、p
 
 - `cflinkcpp`（`comm.radio_driver=cpp` 时）
 - `Sphinx` / `sphinx-rtd-theme`（构建 `docs/` 时）
+- `rich`（真机 `run` 启动阶段 TUI；未安装时自动降级为滚动文本）
 
 ---
 
