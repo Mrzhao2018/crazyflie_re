@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -14,6 +15,7 @@ from ..runtime.mission_telemetry_reporter import MissionTelemetryReporter
 from ..runtime.failure_policy import FailurePolicy
 from ..runtime.landing_flow import LandingFlow
 from .mission_errors import MissionErrorDefinition, MissionErrors
+from .startup_progress import NullProgressReporter, StartupProgressReporter
 from ..adapters.cflib_command_transport import (
     POLY4D_RAW_PIECE_BYTES,
     TRAJECTORY_MEMORY_BYTES,
@@ -23,10 +25,18 @@ from ..runtime.offline_swarm_sampler import _evaluate_trajectory_spec
 logger = logging.getLogger(__name__)
 
 
+class _StartupAborted(Exception):
+    """Internal sentinel: _fail_start was invoked; start() should return False."""
+
+
 class RealMissionApp:
     """真机任务应用"""
 
-    def __init__(self, components: dict):
+    def __init__(
+        self,
+        components: dict,
+        progress: StartupProgressReporter | None = None,
+    ):
         self.comp = components
         # 常用组件在 __init__ 一次性取出，主循环 + _record_* 直接走属性而非 dict 访问。
         self.telemetry = components.get("telemetry")
@@ -53,6 +63,35 @@ class RealMissionApp:
             "pose_ready": False,
         }
         self._config_fingerprint = self._build_config_fingerprint()
+        self._progress: StartupProgressReporter = progress or NullProgressReporter()
+
+    @contextmanager
+    def _phase(self, key: str, title: str, total: int | None = None):
+        telemetry = self.telemetry
+        if telemetry is not None:
+            telemetry.record_event("startup_phase", phase=key, status="begin")
+        start = time.monotonic()
+        try:
+            with self._progress.phase(key, title, total):
+                yield
+        except Exception as exc:
+            if telemetry is not None:
+                telemetry.record_event(
+                    "startup_phase",
+                    phase=key,
+                    status="fail",
+                    duration_s=time.monotonic() - start,
+                    detail=str(exc)[:200],
+                )
+            raise
+        else:
+            if telemetry is not None:
+                telemetry.record_event(
+                    "startup_phase",
+                    phase=key,
+                    status="ok",
+                    duration_s=time.monotonic() - start,
+                )
 
     def _last_connect_report(self) -> dict[str, object]:
         link_manager = self.comp.get("link_manager")
@@ -125,7 +164,7 @@ class RealMissionApp:
         definition: MissionErrorDefinition = MissionErrors.Readiness.STARTUP_FAILED,
         exception: Exception | None = None,
         **details,
-    ) -> bool:
+    ) -> None:
         if exception is None:
             logger.error(reason)
         else:
@@ -138,11 +177,37 @@ class RealMissionApp:
         )
         self.comp["fsm"].force_abort()
         self.shutdown()
-        return False
+        raise _StartupAborted(reason)
 
     def start(self):
         """启动"""
         logger.info("=== 启动真机任务 ===")
+        try:
+            return self._start_impl()
+        except _StartupAborted:
+            return False
+        finally:
+            self._progress.close()
+
+    def _start_impl(self):
+        comm = self.comp["config"].comm
+        startup_mode = self.comp.get("startup_mode", "auto")
+        leader_ref_gen = self.comp["leader_ref_gen"]
+        first_leader_ref = leader_ref_gen.reference_at(0.0)
+        trajectory_enabled = (
+            startup_mode == "auto"
+            and first_leader_ref.mode == "trajectory"
+            and first_leader_ref.trajectory is not None
+        )
+        total_phases = 6  # connect + onboard_controller + pose + health + preflight + takeoff
+        if comm.readiness_wait_for_params:
+            total_phases += 1
+        if comm.readiness_reset_estimator:
+            total_phases += 1
+        if trajectory_enabled:
+            total_phases += 1
+        self._progress.set_total_phases(total_phases)
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         telemetry_path = Path("telemetry") / f"run_real_{timestamp}.jsonl"
         telemetry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,446 +227,511 @@ class RealMissionApp:
             fingerprint=self._config_fingerprint,
         )
 
-        # 连接
+        # 连接 (phase 1)
         if not self._safe_transition(MissionState.CONNECT):
-            return self._fail_start(
+            self._fail_start(
                 "FSM failed before connect",
                 definition=MissionErrors.Readiness.FSM_CONNECT_TRANSITION_FAILED,
             )
+
+        radio_group_count = len(
+            {
+                self.comp["fleet"].get_radio_group(d)
+                for d in self.comp["fleet"].all_ids()
+            }
+        )
+        connect_progress_state = {"done": 0}
+
+        def _connect_on_group_start(group_event):
+            self.telemetry_reporter.record_connect_group_start(group_event)
+
+        def _connect_on_group_result(group_result):
+            self.telemetry_reporter.record_connect_group_result(group_result)
+            connect_progress_state["done"] += 1
+            group_id = group_result.get("group_id") if isinstance(group_result, dict) else None
+            self._progress.step(
+                connect_progress_state["done"],
+                radio_group_count,
+                detail=f"group={group_id}" if group_id is not None else None,
+            )
+
         connect_report: dict[str, object] = {}
-        try:
-            connect_report = self.comp["link_manager"].connect_all(
-                on_group_start=self.telemetry_reporter.record_connect_group_start,
-                on_group_result=self.telemetry_reporter.record_connect_group_result,
-                parallel_groups=self.comp["config"].comm.connect_groups_in_parallel,
-            )
-            self.telemetry_reporter.record_connect_all(ok=True, report=connect_report)
-        except Exception as exc:
-            connect_report = self._last_connect_report()
-            self.telemetry_reporter.record_connect_all(
-                ok=False,
-                report=connect_report,
-                error=str(exc),
-            )
-            return self._fail_start(
-                "连接失败",
-                definition=MissionErrors.Connection.CONNECT_ALL_FAILED,
-                exception=exc,
-                connect_outcome=self.telemetry_reporter.connect_all_outcome(connect_report, False),
-                failed_group_ids=self.telemetry_reporter.failed_connect_group_ids(connect_report),
-                connected=connect_report.get("connected", []),
-                failures=connect_report.get("failures", []),
-                radio_groups=connect_report.get("radio_groups", {}),
-            )
-
-        if self.comp["config"].comm.readiness_wait_for_params:
-            drone_id = None
+        with self._phase("connect", "连接 Crazyflie", total=radio_group_count):
             try:
-                group_pool = self.comp.get("group_executor_pool")
+                connect_report = self.comp["link_manager"].connect_all(
+                    on_group_start=_connect_on_group_start,
+                    on_group_result=_connect_on_group_result,
+                    parallel_groups=comm.connect_groups_in_parallel,
+                )
+                self.telemetry_reporter.record_connect_all(ok=True, report=connect_report)
+            except Exception as exc:
+                connect_report = self._last_connect_report()
+                self.telemetry_reporter.record_connect_all(
+                    ok=False,
+                    report=connect_report,
+                    error=str(exc),
+                )
+                self._fail_start(
+                    "连接失败",
+                    definition=MissionErrors.Connection.CONNECT_ALL_FAILED,
+                    exception=exc,
+                    connect_outcome=self.telemetry_reporter.connect_all_outcome(connect_report, False),
+                    failed_group_ids=self.telemetry_reporter.failed_connect_group_ids(connect_report),
+                    connected=connect_report.get("connected", []),
+                    failures=connect_report.get("failures", []),
+                    radio_groups=connect_report.get("radio_groups", {}),
+                )
 
-                def _on_done(drone_id: int) -> None:
-                    self._readiness_report["wait_for_params"][drone_id] = True
-                    self.comp["telemetry"].record_event(
-                        "wait_for_params", drone_id=drone_id, ok=True
+        if comm.readiness_wait_for_params:
+            wfp_total = len(self.comp["fleet"].all_ids())
+            with self._phase(
+                "wait_for_params", "等待参数同步", total=wfp_total
+            ):
+                drone_id = None
+                wfp_done = {"count": 0}
+                try:
+                    group_pool = self.comp.get("group_executor_pool")
+
+                    def _on_done(drone_id: int) -> None:
+                        self._readiness_report["wait_for_params"][drone_id] = True
+                        self.comp["telemetry"].record_event(
+                            "wait_for_params", drone_id=drone_id, ok=True
+                        )
+                        wfp_done["count"] += 1
+                        self._progress.step(
+                            wfp_done["count"],
+                            wfp_total,
+                            detail=f"drone={drone_id}",
+                        )
+
+                    if group_pool is not None:
+                        from ..adapters.wait_for_params import wait_for_params_per_group
+
+                        wait_for_params_per_group(
+                            self.comp["transport"],
+                            self.comp["fleet"],
+                            group_pool,
+                            on_done=_on_done,
+                        )
+                    else:
+                        for drone_id in self.comp["fleet"].all_ids():
+                            self.comp["transport"].wait_for_params(drone_id)
+                            _on_done(drone_id)
+                except Exception as exc:
+                    self._fail_start(
+                        "参数同步失败",
+                        definition=MissionErrors.Readiness.WAIT_FOR_PARAMS_FAILED,
+                        exception=exc,
+                        drone_id=drone_id,
                     )
 
-                if group_pool is not None:
-                    from ..adapters.wait_for_params import wait_for_params_per_group
-
-                    wait_for_params_per_group(
-                        self.comp["transport"],
-                        self.comp["fleet"],
-                        group_pool,
-                        on_done=_on_done,
-                    )
-                else:
+        if comm.readiness_reset_estimator:
+            re_total = len(self.comp["fleet"].all_ids())
+            with self._phase("reset_estimator", "重置估计器", total=re_total):
+                drone_id = None
+                re_done = 0
+                try:
                     for drone_id in self.comp["fleet"].all_ids():
-                        self.comp["transport"].wait_for_params(drone_id)
-                        _on_done(drone_id)
-            except Exception as exc:
-                return self._fail_start(
-                    "参数同步失败",
-                    definition=MissionErrors.Readiness.WAIT_FOR_PARAMS_FAILED,
-                    exception=exc,
-                    drone_id=drone_id,
-                )
-
-        if self.comp["config"].comm.readiness_reset_estimator:
-            drone_id = None
-            try:
-                for drone_id in self.comp["fleet"].all_ids():
-                    self.comp["transport"].reset_estimator_and_wait(drone_id)
-                    self._readiness_report["reset_estimator"][drone_id] = True
-                    self.comp["telemetry"].record_event(
-                        "reset_estimator", drone_id=drone_id, ok=True
+                        self.comp["transport"].reset_estimator_and_wait(drone_id)
+                        self._readiness_report["reset_estimator"][drone_id] = True
+                        self.comp["telemetry"].record_event(
+                            "reset_estimator", drone_id=drone_id, ok=True
+                        )
+                        re_done += 1
+                        self._progress.step(
+                            re_done, re_total, detail=f"drone={drone_id}"
+                        )
+                except Exception as exc:
+                    self._fail_start(
+                        "重置估计器失败",
+                        definition=MissionErrors.Readiness.RESET_ESTIMATOR_FAILED,
+                        exception=exc,
+                        drone_id=drone_id,
                     )
-            except Exception as exc:
-                return self._fail_start(
-                    "重置估计器失败",
-                    definition=MissionErrors.Readiness.RESET_ESTIMATOR_FAILED,
-                    exception=exc,
-                    drone_id=drone_id,
-                )
 
         output_mode = self.comp["config"].control.output_mode
         onboard_ctrl = self.comp["config"].control.onboard_controller
-        drone_id = None
-        controller_switched: list[int] = []
-        try:
-            for drone_id in self.comp["fleet"].all_ids():
-                self.comp["transport"].set_onboard_controller(drone_id, onboard_ctrl)
-                controller_switched.append(drone_id)
+        oc_total = len(self.comp["fleet"].all_ids())
+        with self._phase(
+            "onboard_controller", "设置 onboard controller", total=oc_total
+        ):
+            drone_id = None
+            controller_switched: list[int] = []
+            oc_done = 0
+            try:
+                for drone_id in self.comp["fleet"].all_ids():
+                    self.comp["transport"].set_onboard_controller(drone_id, onboard_ctrl)
+                    controller_switched.append(drone_id)
+                    self.comp["telemetry"].record_event(
+                        "set_onboard_controller",
+                        drone_id=drone_id,
+                        controller=onboard_ctrl,
+                        ok=True,
+                    )
+                    oc_done += 1
+                    self._progress.step(
+                        oc_done, oc_total, detail=f"drone={drone_id}"
+                    )
+            except Exception as exc:
                 self.comp["telemetry"].record_event(
                     "set_onboard_controller",
                     drone_id=drone_id,
                     controller=onboard_ctrl,
-                    ok=True,
+                    ok=False,
+                    error=str(exc),
                 )
-        except Exception as exc:
-            self.comp["telemetry"].record_event(
-                "set_onboard_controller",
-                drone_id=drone_id,
-                controller=onboard_ctrl,
-                ok=False,
-                error=str(exc),
-            )
-            if output_mode == "full_state":
-                for rollback_drone_id in reversed(controller_switched):
-                    try:
-                        self.comp["transport"].set_onboard_controller(
-                            rollback_drone_id, "pid"
-                        )
-                        self.comp["telemetry"].record_event(
-                            "rollback_onboard_controller",
-                            drone_id=rollback_drone_id,
-                            from_controller=onboard_ctrl,
-                            controller="pid",
-                            ok=True,
-                        )
-                    except Exception as rollback_exc:
-                        self.comp["telemetry"].record_event(
-                            "rollback_onboard_controller",
-                            drone_id=rollback_drone_id,
-                            from_controller=onboard_ctrl,
-                            controller="pid",
-                            ok=False,
-                            error=str(rollback_exc),
-                        )
-                return self._fail_start(
-                    "full_state 模式下设置 onboard controller 失败，中止启动",
-                    exception=exc,
-                    drone_id=drone_id,
-                    controller=onboard_ctrl,
-                    output_mode=output_mode,
+                if output_mode == "full_state":
+                    for rollback_drone_id in reversed(controller_switched):
+                        try:
+                            self.comp["transport"].set_onboard_controller(
+                                rollback_drone_id, "pid"
+                            )
+                            self.comp["telemetry"].record_event(
+                                "rollback_onboard_controller",
+                                drone_id=rollback_drone_id,
+                                from_controller=onboard_ctrl,
+                                controller="pid",
+                                ok=True,
+                            )
+                        except Exception as rollback_exc:
+                            self.comp["telemetry"].record_event(
+                                "rollback_onboard_controller",
+                                drone_id=rollback_drone_id,
+                                from_controller=onboard_ctrl,
+                                controller="pid",
+                                ok=False,
+                                error=str(rollback_exc),
+                            )
+                    self._fail_start(
+                        "full_state 模式下设置 onboard controller 失败，中止启动",
+                        exception=exc,
+                        drone_id=drone_id,
+                        controller=onboard_ctrl,
+                        output_mode=output_mode,
+                    )
+                self._progress.warn(
+                    f"onboard controller {onboard_ctrl} 设置失败 (drone={drone_id}): {exc}"
                 )
-            logger.warning(
-                "onboard controller %s 设置失败 (drone=%s): %s —— 继续启动，但沿用机载当前 controller 状态",
-                onboard_ctrl,
-                drone_id,
-                exc,
-            )
+                logger.warning(
+                    "onboard controller %s 设置失败 (drone=%s): %s —— 继续启动，但沿用机载当前 controller 状态",
+                    onboard_ctrl,
+                    drone_id,
+                    exc,
+                )
 
-        # 启动定位
-        try:
-            self.comp["pose_source"].register_callback(self._on_pose_update)
-            self.comp["pose_source"].start()
-        except Exception as exc:
-            return self._fail_start(
-                "定位源启动失败",
-                definition=MissionErrors.Readiness.POSE_SOURCE_START_FAILED,
-                exception=exc,
-            )
-
-        # 启动 onboard console tap（诊断用，失败不致命）
-        console_tap = self.comp.get("console_tap")
-        if console_tap is not None:
+        pose_total = len(self.comp["fleet"].all_ids())
+        with self._phase("pose_source", "定位就绪", total=pose_total):
             try:
-                console_tap._on_line = self._on_console_line
-                console_tap.start()
-            except Exception:
-                logger.exception("Console tap start failed; 继续启动")
+                self.comp["pose_source"].register_callback(self._on_pose_update)
+                self.comp["pose_source"].start()
+            except Exception as exc:
+                self._fail_start(
+                    "定位源启动失败",
+                    definition=MissionErrors.Readiness.POSE_SOURCE_START_FAILED,
+                    exception=exc,
+                )
 
-        # 等待定位稳定
-        logger.info("等待定位数据...")
-        for _ in range(20):
-            snapshot = self.comp["pose_bus"].latest()
-            if snapshot and all(snapshot.fresh_mask):
-                logger.info("所有无人机定位就绪")
-                self._readiness_report["pose_ready"] = True
-                self.comp["telemetry"].record_event("pose_ready", ok=True)
-                break
-            time.sleep(0.1)
-        else:
-            self.comp["telemetry"].record_event("pose_ready", ok=False)
-            return self._fail_start(
-                "部分无人机定位未就绪，中止任务",
-                definition=MissionErrors.Readiness.POSE_TIMEOUT,
-            )
+            console_tap = self.comp.get("console_tap")
+            if console_tap is not None:
+                try:
+                    console_tap._on_line = self._on_console_line
+                    console_tap.start()
+                except Exception:
+                    logger.exception("Console tap start failed; 继续启动")
 
-        logger.info("等待健康数据...")
-        for _ in range(30):
-            health_samples = self.comp["health_bus"].latest()
-            if all(
-                drone_id in health_samples
-                and "pm.vbat" in health_samples[drone_id].values
-                for drone_id in self.comp["fleet"].all_ids()
-            ):
-                self._readiness_report["health_ready"] = True
-                self.comp["telemetry"].record_event("health_ready", ok=True)
-                break
-            time.sleep(0.1)
-        else:
-            self.comp["telemetry"].record_event("health_ready", ok=False)
-            return self._fail_start(
-                "健康状态数据未就绪，中止任务",
-                definition=MissionErrors.Readiness.HEALTH_TIMEOUT,
-            )
+            pose_ready = False
+            for _ in range(20):
+                snapshot = self.comp["pose_bus"].latest()
+                if snapshot:
+                    fresh_count = int(sum(1 for f in snapshot.fresh_mask if f))
+                    self._progress.step(fresh_count, pose_total)
+                    if all(snapshot.fresh_mask):
+                        self._readiness_report["pose_ready"] = True
+                        self.comp["telemetry"].record_event("pose_ready", ok=True)
+                        pose_ready = True
+                        break
+                time.sleep(0.1)
+            if not pose_ready:
+                self.comp["telemetry"].record_event("pose_ready", ok=False)
+                self._fail_start(
+                    "部分无人机定位未就绪，中止任务",
+                    definition=MissionErrors.Readiness.POSE_TIMEOUT,
+                )
+
+        health_total = len(self.comp["fleet"].all_ids())
+        with self._phase("health_ready", "健康数据就绪", total=health_total):
+            health_ok = False
+            for _ in range(30):
+                health_samples = self.comp["health_bus"].latest()
+                ready_ids = [
+                    drone_id
+                    for drone_id in self.comp["fleet"].all_ids()
+                    if drone_id in health_samples
+                    and "pm.vbat" in health_samples[drone_id].values
+                ]
+                self._progress.step(len(ready_ids), health_total)
+                if len(ready_ids) == health_total:
+                    self._readiness_report["health_ready"] = True
+                    self.comp["telemetry"].record_event("health_ready", ok=True)
+                    health_ok = True
+                    break
+                time.sleep(0.1)
+            if not health_ok:
+                self.comp["telemetry"].record_event("health_ready", ok=False)
+                self._fail_start(
+                    "健康状态数据未就绪，中止任务",
+                    definition=MissionErrors.Readiness.HEALTH_TIMEOUT,
+                )
 
         leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
-        if (
-            self.comp.get("startup_mode", "auto") == "auto"
-            and leader_ref.mode == "trajectory"
-            and leader_ref.trajectory is not None
-        ):
+        if trajectory_enabled and leader_ref.mode == "trajectory":
             per_leader = leader_ref.trajectory.get("per_leader", {})
-            try:
-                trajectory_upload_specs = {}
-                for drone_id in self.comp["fleet"].leader_ids():
-                    spec = per_leader.get(drone_id, {})
-                    pieces = spec.get("pieces", [])
-                    start_addr = spec.get("start_addr", 0)
-                    trajectory_id = spec.get("trajectory_id", 1)
-                    estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
-                    fits_memory = (
-                        start_addr + estimated_bytes <= TRAJECTORY_MEMORY_BYTES
-                    )
-                    self.comp["telemetry"].record_event(
-                        "trajectory_budget_check",
-                        drone_id=drone_id,
-                        pieces=len(pieces),
-                        estimated_bytes=estimated_bytes,
-                        start_addr=start_addr,
-                        capacity=TRAJECTORY_MEMORY_BYTES,
-                        fits_memory=fits_memory,
-                    )
-                    trajectory_upload_specs[drone_id] = {
-                        "pieces": pieces,
-                        "start_addr": start_addr,
-                        "trajectory_id": trajectory_id,
-                    }
+            leader_ids = list(self.comp["fleet"].leader_ids())
+            tu_total = len(leader_ids)
+            with self._phase("trajectory_upload", "轨迹上传", total=tu_total):
+                try:
+                    trajectory_upload_specs = {}
+                    for drone_id in leader_ids:
+                        spec = per_leader.get(drone_id, {})
+                        pieces = spec.get("pieces", [])
+                        start_addr = spec.get("start_addr", 0)
+                        trajectory_id = spec.get("trajectory_id", 1)
+                        estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
+                        fits_memory = (
+                            start_addr + estimated_bytes <= TRAJECTORY_MEMORY_BYTES
+                        )
+                        self.comp["telemetry"].record_event(
+                            "trajectory_budget_check",
+                            drone_id=drone_id,
+                            pieces=len(pieces),
+                            estimated_bytes=estimated_bytes,
+                            start_addr=start_addr,
+                            capacity=TRAJECTORY_MEMORY_BYTES,
+                            fits_memory=fits_memory,
+                        )
+                        trajectory_upload_specs[drone_id] = {
+                            "pieces": pieces,
+                            "start_addr": start_addr,
+                            "trajectory_id": trajectory_id,
+                        }
 
-                upload_results = self.comp["transport"].upload_trajectories_by_group(
-                    trajectory_upload_specs,
-                    parallel_groups=self.comp["config"].comm.trajectory_upload_groups_in_parallel,
+                    upload_results = self.comp["transport"].upload_trajectories_by_group(
+                        trajectory_upload_specs,
+                        parallel_groups=comm.trajectory_upload_groups_in_parallel,
+                    )
+
+                    tu_done = 0
+                    for drone_id in leader_ids:
+                        spec = per_leader.get(drone_id, {})
+                        pieces = spec.get("pieces", [])
+                        start_addr = spec.get("start_addr", 0)
+                        trajectory_id = spec.get("trajectory_id", 1)
+                        estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
+                        fits_memory = (
+                            start_addr + estimated_bytes <= TRAJECTORY_MEMORY_BYTES
+                        )
+                        piece_count = int(upload_results[drone_id]["piece_count"])
+                        self._readiness_report["trajectory_prepare"][drone_id] = {
+                            "uploaded": True,
+                            "defined": True,
+                            "pieces": piece_count,
+                            "estimated_bytes": estimated_bytes,
+                            "fits_memory": fits_memory,
+                            "trajectory_id": trajectory_id,
+                            "nominal_position": spec.get("nominal_position"),
+                        }
+                        self.comp["telemetry"].record_event(
+                            "trajectory_prepare",
+                            drone_id=drone_id,
+                            uploaded=True,
+                            defined=True,
+                            pieces=piece_count,
+                            estimated_bytes=estimated_bytes,
+                            fits_memory=fits_memory,
+                            trajectory_id=trajectory_id,
+                            nominal_position=spec.get("nominal_position"),
+                        )
+                        tu_done += 1
+                        self._progress.step(
+                            tu_done,
+                            tu_total,
+                            detail=f"leader={drone_id} pieces={piece_count}",
+                        )
+                except Exception as exc:
+                    self._fail_start(
+                        "轨迹准备失败",
+                        definition=MissionErrors.Readiness.TRAJECTORY_PREPARE_FAILED,
+                        exception=exc,
+                    )
+
+                self._set_trajectory_state("prepared")
+
+                self.comp["telemetry"].record_event(
+                    "trajectory_readiness_summary",
+                    ok=all(
+                        item.get("uploaded") and item.get("defined")
+                        for item in self._readiness_report["trajectory_prepare"].values()
+                    ),
+                    leaders=self._readiness_report["trajectory_prepare"],
                 )
-
-                for drone_id in self.comp["fleet"].leader_ids():
-                    spec = per_leader.get(drone_id, {})
-                    pieces = spec.get("pieces", [])
-                    start_addr = spec.get("start_addr", 0)
-                    trajectory_id = spec.get("trajectory_id", 1)
-                    estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
-                    fits_memory = (
-                        start_addr + estimated_bytes <= TRAJECTORY_MEMORY_BYTES
+                self._set_trajectory_state("ready")
+                logger.info("=== Trajectory readiness summary ===")
+                for drone_id, item in self._readiness_report["trajectory_prepare"].items():
+                    logger.info(
+                        "leader=%s pieces=%s est_bytes=%s fits=%s uploaded=%s defined=%s",
+                        drone_id,
+                        item.get("pieces"),
+                        item.get("estimated_bytes"),
+                        item.get("fits_memory"),
+                        item.get("uploaded"),
+                        item.get("defined"),
                     )
-                    piece_count = int(upload_results[drone_id]["piece_count"])
-                    self._readiness_report["trajectory_prepare"][drone_id] = {
-                        "uploaded": True,
-                        "defined": True,
-                        "pieces": piece_count,
-                        "estimated_bytes": estimated_bytes,
-                        "fits_memory": fits_memory,
-                        "trajectory_id": trajectory_id,
-                        "nominal_position": spec.get("nominal_position"),
-                    }
-                    self.comp["telemetry"].record_event(
-                        "trajectory_prepare",
-                        drone_id=drone_id,
-                        uploaded=True,
-                        defined=True,
-                        pieces=piece_count,
-                        estimated_bytes=estimated_bytes,
-                        fits_memory=fits_memory,
-                        trajectory_id=trajectory_id,
-                        nominal_position=spec.get("nominal_position"),
-                    )
-            except Exception as exc:
-                return self._fail_start(
-                    "轨迹准备失败",
-                    definition=MissionErrors.Readiness.TRAJECTORY_PREPARE_FAILED,
-                    exception=exc,
-                )
-
-            self._set_trajectory_state("prepared")
-
-            self.comp["telemetry"].record_event(
-                "trajectory_readiness_summary",
-                ok=all(
-                    item.get("uploaded") and item.get("defined")
-                    for item in self._readiness_report["trajectory_prepare"].values()
-                ),
-                leaders=self._readiness_report["trajectory_prepare"],
-            )
-            self._set_trajectory_state("ready")
-            logger.info("=== Trajectory readiness summary ===")
-            for drone_id, item in self._readiness_report["trajectory_prepare"].items():
-                logger.info(
-                    "leader=%s pieces=%s est_bytes=%s fits=%s uploaded=%s defined=%s",
-                    drone_id,
-                    item.get("pieces"),
-                    item.get("estimated_bytes"),
-                    item.get("fits_memory"),
-                    item.get("uploaded"),
-                    item.get("defined"),
-                )
 
         if not self._safe_transition(MissionState.POSE_READY):
-            return self._fail_start(
+            self._fail_start(
                 "FSM failed entering POSE_READY",
                 definition=MissionErrors.Readiness.FSM_POSE_READY_TRANSITION_FAILED,
             )
 
         if not self._safe_transition(MissionState.PREFLIGHT):
-            return self._fail_start(
+            self._fail_start(
                 "FSM failed entering PREFLIGHT",
                 definition=MissionErrors.Readiness.FSM_PREFLIGHT_TRANSITION_FAILED,
             )
         self.comp["readiness_report"] = self._readiness_report
-        try:
-            preflight_report = self.comp["preflight"].run()
-        except Exception as exc:
-            return self._fail_start(
-                "Preflight 执行异常",
-                definition=MissionErrors.Readiness.PREFLIGHT_EXCEPTION,
-                exception=exc,
-            )
-        self.comp["telemetry"].record_event(
-            "preflight",
-            ok=preflight_report.ok,
-            failed_codes=preflight_report.failed_codes,
-        )
-        if not preflight_report.ok:
-            return self._fail_start(
-                f"Preflight failed: {preflight_report.reasons} codes={preflight_report.failed_codes}",
-                definition=MissionErrors.Readiness.PREFLIGHT_FAILED,
+
+        with self._phase("preflight", "preflight"):
+            try:
+                preflight_report = self.comp["preflight"].run()
+            except Exception as exc:
+                self._fail_start(
+                    "Preflight 执行异常",
+                    definition=MissionErrors.Readiness.PREFLIGHT_EXCEPTION,
+                    exception=exc,
+                )
+            self.comp["telemetry"].record_event(
+                "preflight",
+                ok=preflight_report.ok,
                 failed_codes=preflight_report.failed_codes,
             )
+            if not preflight_report.ok:
+                self._fail_start(
+                    f"Preflight failed: {preflight_report.reasons} codes={preflight_report.failed_codes}",
+                    definition=MissionErrors.Readiness.PREFLIGHT_FAILED,
+                    failed_codes=preflight_report.failed_codes,
+                )
 
-        # Takeoff - 所有无人机起飞
-        logger.info("=== 起飞 ===")
-        if not self._safe_transition(MissionState.TAKEOFF):
-            return self._fail_start(
-                "FSM failed entering TAKEOFF",
-                definition=MissionErrors.Readiness.FSM_TAKEOFF_TRANSITION_FAILED,
-            )
+        with self._phase("takeoff_settle_align", "起飞 / settle / align"):
+            if not self._safe_transition(MissionState.TAKEOFF):
+                self._fail_start(
+                    "FSM failed entering TAKEOFF",
+                    definition=MissionErrors.Readiness.FSM_TAKEOFF_TRANSITION_FAILED,
+                )
 
-        self.comp["leader_executor"].execute(
-            [self._leader_takeoff_action(self.comp["fleet"].leader_ids())]
-        )
-        follower_takeoff_result = self.comp["follower_executor"].takeoff(
-            self.comp["fleet"].follower_ids(), height=0.5, duration=2.0
-        )
-        self.telemetry_reporter.record_executor_summary("follower_takeoff_execution", [follower_takeoff_result])
+            self.comp["leader_executor"].execute(
+                [self._leader_takeoff_action(self.comp["fleet"].leader_ids())]
+            )
+            follower_takeoff_result = self.comp["follower_executor"].takeoff(
+                self.comp["fleet"].follower_ids(), height=0.5, duration=2.0
+            )
+            self.telemetry_reporter.record_executor_summary("follower_takeoff_execution", [follower_takeoff_result])
 
-        time.sleep(3.0)
+            time.sleep(3.0)
 
-        # Settle - 等待稳定并验证
-        if not self._safe_transition(MissionState.SETTLE):
-            return self._fail_start(
-                "FSM failed entering SETTLE",
-                definition=MissionErrors.Readiness.FSM_SETTLE_TRANSITION_FAILED,
-            )
-        logger.info("等待稳定...")
-        time.sleep(2.0)
+            if not self._safe_transition(MissionState.SETTLE):
+                self._fail_start(
+                    "FSM failed entering SETTLE",
+                    definition=MissionErrors.Readiness.FSM_SETTLE_TRANSITION_FAILED,
+                )
+            time.sleep(2.0)
 
-        # 起飞后先对齐到初始编队，再进入 RUN
-        initial_leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
-        if self.comp.get("startup_mode", "auto") == "manual_leader":
-            initial_leader_ref = self._manual_initial_structure_reference()
-        if (
-            self.comp.get("startup_mode", "auto") == "auto"
-            and initial_leader_ref is not None
-            and initial_leader_ref.mode == "batch_goto"
-        ):
-            from ..runtime.command_plan import LeaderAction
-
-            align_action = LeaderAction(
-                kind="batch_goto",
-                drone_ids=self.comp["fleet"].leader_ids(),
-                payload={"positions": initial_leader_ref.positions, "duration": 2.0},
-            )
-            self.comp["leader_executor"].execute([align_action])
-            self.comp["telemetry"].record_event(
-                "formation_align", ok=True, duration=2.0
-            )
-            time.sleep(2.2)
-        elif (
-            self.comp.get("startup_mode", "auto") == "manual_leader"
-            and initial_leader_ref is not None
-            and initial_leader_ref.mode == "batch_goto"
-        ):
-            from ..runtime.command_plan import LeaderAction
-
-            align_action = LeaderAction(
-                kind="batch_goto",
-                drone_ids=self.comp["fleet"].leader_ids(),
-                payload={"positions": initial_leader_ref.positions, "duration": 2.0},
-            )
-            self.comp["leader_executor"].execute([align_action])
-            self.comp["telemetry"].record_event(
-                "manual_structure_align", ok=True, duration=2.0
-            )
-            time.sleep(2.2)
-        elif (
-            self.comp.get("startup_mode", "auto") == "auto"
-            and initial_leader_ref is not None
-            and initial_leader_ref.mode == "trajectory"
-        ):
-            trajectory_entry_positions = self._trajectory_entry_start_positions(
-                initial_leader_ref
-            )
-            if trajectory_entry_positions:
+            initial_leader_ref = self.comp["leader_ref_gen"].reference_at(0.0)
+            if startup_mode == "manual_leader":
+                initial_leader_ref = self._manual_initial_structure_reference()
+            if (
+                startup_mode == "auto"
+                and initial_leader_ref is not None
+                and initial_leader_ref.mode == "batch_goto"
+            ):
                 from ..runtime.command_plan import LeaderAction
 
                 align_action = LeaderAction(
                     kind="batch_goto",
                     drone_ids=self.comp["fleet"].leader_ids(),
-                    payload={"positions": trajectory_entry_positions, "duration": 2.0},
+                    payload={"positions": initial_leader_ref.positions, "duration": 2.0},
                 )
                 self.comp["leader_executor"].execute([align_action])
                 self.comp["telemetry"].record_event(
-                    "trajectory_entry_align",
-                    ok=True,
-                    duration=2.0,
-                    positions=trajectory_entry_positions,
+                    "formation_align", ok=True, duration=2.0
                 )
                 time.sleep(2.2)
+            elif (
+                startup_mode == "manual_leader"
+                and initial_leader_ref is not None
+                and initial_leader_ref.mode == "batch_goto"
+            ):
+                from ..runtime.command_plan import LeaderAction
 
-        # 验证所有无人机在空中
-        snapshot = self.comp["pose_bus"].latest()
-        if snapshot:
-            for drone_id in self.comp["fleet"].all_ids():
-                idx = self.comp["fleet"].id_to_index(drone_id)
-                if snapshot.positions[idx][2] < 0.3:
+                align_action = LeaderAction(
+                    kind="batch_goto",
+                    drone_ids=self.comp["fleet"].leader_ids(),
+                    payload={"positions": initial_leader_ref.positions, "duration": 2.0},
+                )
+                self.comp["leader_executor"].execute([align_action])
+                self.comp["telemetry"].record_event(
+                    "manual_structure_align", ok=True, duration=2.0
+                )
+                time.sleep(2.2)
+            elif (
+                startup_mode == "auto"
+                and initial_leader_ref is not None
+                and initial_leader_ref.mode == "trajectory"
+            ):
+                trajectory_entry_positions = self._trajectory_entry_start_positions(
+                    initial_leader_ref
+                )
+                if trajectory_entry_positions:
+                    from ..runtime.command_plan import LeaderAction
+
+                    align_action = LeaderAction(
+                        kind="batch_goto",
+                        drone_ids=self.comp["fleet"].leader_ids(),
+                        payload={"positions": trajectory_entry_positions, "duration": 2.0},
+                    )
+                    self.comp["leader_executor"].execute([align_action])
                     self.comp["telemetry"].record_event(
-                        "takeoff_validation", ok=False, drone_id=drone_id
+                        "trajectory_entry_align",
+                        ok=True,
+                        duration=2.0,
+                        positions=trajectory_entry_positions,
                     )
-                    self._record_error_event(
-                        definition=MissionErrors.Readiness.TAKEOFF_VALIDATION_FAILED,
-                        message="起飞后高度验证失败",
-                        drone_id=drone_id,
-                        altitude=float(snapshot.positions[idx][2]),
-                    )
-                    self._emergency_land(
-                        trigger_error=MissionErrors.Readiness.TAKEOFF_VALIDATION_FAILED,
-                    )
-                    return False
+                    time.sleep(2.2)
 
-        if self.comp.get("startup_mode", "auto") == "manual_leader":
-            self._initialize_manual_mode(snapshot)
+            snapshot = self.comp["pose_bus"].latest()
+            if snapshot:
+                for drone_id in self.comp["fleet"].all_ids():
+                    idx = self.comp["fleet"].id_to_index(drone_id)
+                    if snapshot.positions[idx][2] < 0.3:
+                        self.comp["telemetry"].record_event(
+                            "takeoff_validation", ok=False, drone_id=drone_id
+                        )
+                        self._record_error_event(
+                            definition=MissionErrors.Readiness.TAKEOFF_VALIDATION_FAILED,
+                            message="起飞后高度验证失败",
+                            drone_id=drone_id,
+                            altitude=float(snapshot.positions[idx][2]),
+                        )
+                        self._emergency_land(
+                            trigger_error=MissionErrors.Readiness.TAKEOFF_VALIDATION_FAILED,
+                        )
+                        raise _StartupAborted("takeoff validation failed")
+
+            if startup_mode == "manual_leader":
+                self._initialize_manual_mode(snapshot)
 
         logger.info("系统就绪")
         self.comp["telemetry"].record_event("startup_complete", ok=True)
+        self._progress.close()
         return True
 
     def run(self):

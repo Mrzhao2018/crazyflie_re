@@ -21,6 +21,18 @@ assert args.config_dir == "config"
 assert args.dt == 5.0
 assert args.output == "foo.json"
 
+args = build_parser().parse_args(["run", "--verbose"])
+assert args.verbose is True
+
+args = build_parser().parse_args(["run", "-v"])
+assert args.verbose is True
+
+args = build_parser().parse_args(["run"])
+assert args.verbose is False
+
+args = build_parser().parse_args(["--verbose"])
+assert args.verbose is True
+
 
 result = subprocess.run(
     [sys.executable, "-m", "src.app.cli", "budget", "--config-dir", "config"],

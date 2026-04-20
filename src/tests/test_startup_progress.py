@@ -1,0 +1,201 @@
+"""Unit tests for startup progress reporters."""
+
+import logging
+import pytest
+
+from src.app.startup_progress import (
+    NullProgressReporter,
+    StartupProgressReporter,
+    TextProgressReporter,
+)
+
+
+def test_null_reporter_is_silent(caplog):
+    reporter = NullProgressReporter()
+    with caplog.at_level(logging.DEBUG):
+        with reporter.phase("connect", "Connecting"):
+            reporter.step(3, 10, "drone=3")
+            reporter.warn("low battery")
+        reporter.close()
+    assert caplog.records == []
+
+
+def test_null_reporter_conforms_to_protocol():
+    assert isinstance(NullProgressReporter(), StartupProgressReporter)
+
+
+def test_text_reporter_logs_phase_ok(caplog):
+    reporter = TextProgressReporter(verbose=False, total_phases=9)
+    with caplog.at_level(logging.INFO, logger="src.app.startup_progress"):
+        with reporter.phase("connect", "连接 Crazyflie"):
+            pass
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("[1/9] 连接 Crazyflie ..." in m for m in messages)
+    assert any("[1/9] 连接 Crazyflie OK" in m for m in messages)
+
+
+def test_text_reporter_logs_phase_fail(caplog):
+    reporter = TextProgressReporter(verbose=False, total_phases=9)
+    with caplog.at_level(logging.INFO, logger="src.app.startup_progress"):
+        with pytest.raises(RuntimeError):
+            with reporter.phase("connect", "连接"):
+                raise RuntimeError("boom")
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("FAIL" in m and "boom" in m for m in messages)
+
+
+def test_text_reporter_step_hidden_by_default(caplog):
+    reporter = TextProgressReporter(verbose=False, total_phases=9)
+    with caplog.at_level(logging.INFO, logger="src.app.startup_progress"):
+        with reporter.phase("wait_for_params", "等参数"):
+            reporter.step(3, 10, "drone=3")
+    assert not any("drone=3" in r.getMessage() for r in caplog.records)
+
+
+def test_text_reporter_step_visible_when_verbose(caplog):
+    reporter = TextProgressReporter(verbose=True, total_phases=9)
+    with caplog.at_level(logging.INFO, logger="src.app.startup_progress"):
+        with reporter.phase("wait_for_params", "等参数"):
+            reporter.step(3, 10, "drone=3")
+    assert any("3/10" in r.getMessage() and "drone=3" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_text_reporter_phase_index_increments(caplog):
+    reporter = TextProgressReporter(verbose=False, total_phases=9)
+    with caplog.at_level(logging.INFO, logger="src.app.startup_progress"):
+        with reporter.phase("connect", "a"):
+            pass
+        with reporter.phase("wait_for_params", "b"):
+            pass
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("[1/9]" in m for m in messages)
+    assert any("[2/9]" in m for m in messages)
+
+
+def test_text_reporter_set_total_phases(caplog):
+    reporter = TextProgressReporter(verbose=False)
+    reporter.set_total_phases(7)
+    with caplog.at_level(logging.INFO, logger="src.app.startup_progress"):
+        with reporter.phase("connect", "a"):
+            pass
+    assert any("[1/7]" in r.getMessage() for r in caplog.records)
+
+
+def test_text_reporter_conforms_to_protocol():
+    assert isinstance(TextProgressReporter(), StartupProgressReporter)
+
+
+def test_rich_reporter_renders_phase_rows():
+    pytest.importorskip("rich")
+    from io import StringIO
+    from rich.console import Console
+
+    from src.app.startup_progress import RichProgressReporter
+
+    buf = StringIO()
+    console = Console(
+        file=buf, force_terminal=True, width=120, record=True, color_system=None
+    )
+    reporter = RichProgressReporter(verbose=False, total_phases=9, console=console)
+    try:
+        with reporter.phase("connect", "连接 Crazyflie"):
+            reporter.step(5, 10)
+        with pytest.raises(RuntimeError):
+            with reporter.phase("wait_for_params", "等参数"):
+                raise RuntimeError("boom")
+    finally:
+        reporter.close()
+
+    output = console.export_text(clear=False)
+    assert "连接 Crazyflie" in output
+    assert "OK" in output
+    assert "FAIL" in output
+    assert "boom" in output
+
+
+def test_rich_reporter_close_is_idempotent():
+    pytest.importorskip("rich")
+    from rich.console import Console
+
+    from src.app.startup_progress import RichProgressReporter
+
+    reporter = RichProgressReporter(total_phases=9, console=Console(quiet=True))
+    reporter.close()
+    reporter.close()
+
+
+def test_rich_reporter_conforms_to_protocol():
+    pytest.importorskip("rich")
+    from rich.console import Console
+
+    from src.app.startup_progress import (
+        RichProgressReporter,
+        StartupProgressReporter,
+    )
+
+    reporter = RichProgressReporter(total_phases=9, console=Console(quiet=True))
+    try:
+        assert isinstance(reporter, StartupProgressReporter)
+    finally:
+        reporter.close()
+
+
+def test_make_reporter_no_rich_env(monkeypatch):
+    monkeypatch.setenv("AFC_NO_RICH", "1")
+    from src.app.startup_progress import TextProgressReporter, make_reporter
+
+    assert isinstance(make_reporter(), TextProgressReporter)
+
+
+def test_make_reporter_non_tty(monkeypatch):
+    monkeypatch.delenv("AFC_NO_RICH", raising=False)
+
+    class FakeStream:
+        def isatty(self):
+            return False
+
+    from src.app.startup_progress import TextProgressReporter, make_reporter
+
+    reporter = make_reporter(stdout=FakeStream())
+    assert isinstance(reporter, TextProgressReporter)
+
+
+def test_make_reporter_rich_missing(monkeypatch):
+    monkeypatch.delenv("AFC_NO_RICH", raising=False)
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "rich" or name.startswith("rich."):
+            raise ImportError("simulated missing rich")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    class FakeStream:
+        def isatty(self):
+            return True
+
+    from src.app.startup_progress import TextProgressReporter, make_reporter
+
+    reporter = make_reporter(stdout=FakeStream())
+    assert isinstance(reporter, TextProgressReporter)
+
+
+def test_make_reporter_rich_tty(monkeypatch):
+    pytest.importorskip("rich")
+    monkeypatch.delenv("AFC_NO_RICH", raising=False)
+
+    class FakeStream:
+        def isatty(self):
+            return True
+
+    from src.app.startup_progress import RichProgressReporter, make_reporter
+
+    reporter = make_reporter(stdout=FakeStream())
+    try:
+        assert isinstance(reporter, RichProgressReporter)
+    finally:
+        reporter.close()
