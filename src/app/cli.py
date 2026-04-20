@@ -46,6 +46,12 @@ def _build_run_parent(
         action="store_true",
         help="跳过启动前按 Enter 确认",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="展开每台无人机的启动细节；root logger 切 DEBUG",
+    )
     return parser
 
 
@@ -68,7 +74,9 @@ def _command_config_dir(args: argparse.Namespace) -> str:
 
 
 def _run_command(args: argparse.Namespace) -> int:
-    return _run_real(args.config_dir, args.startup_mode, args.skip_confirm)
+    return _run_real(
+        args.config_dir, args.startup_mode, args.skip_confirm, args.verbose
+    )
 
 
 def _budget_command(args: argparse.Namespace) -> int:
@@ -202,12 +210,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_real(config_dir: str, startup_mode: str | None, skip_confirm: bool) -> int:
+def _run_real(
+    config_dir: str,
+    startup_mode: str | None,
+    skip_confirm: bool,
+    verbose: bool,
+) -> int:
+    from .log_setup import configure_logging
+    from .startup_progress import make_reporter
+
+    reporter = make_reporter(verbose=verbose)
+    configure_logging(verbose=verbose, reporter=reporter)
+
     print("=== Crazyflie AFC Swarm ===")
     print("构建系统...")
 
     components = build_app(config_dir, startup_mode_override=startup_mode)
-    app = RealMissionApp(components)
+    app = RealMissionApp(components, progress=reporter)
 
     print("系统构建完成")
     if not skip_confirm:
@@ -221,6 +240,7 @@ def _run_real(config_dir: str, startup_mode: str | None, skip_confirm: bool) -> 
         print("\n用户中断")
     finally:
         app.shutdown()
+        reporter.close()
     return 0
 
 
@@ -230,7 +250,9 @@ def main(argv: list[str] | None = None) -> int:
         config_dir = _command_config_dir(args)
         if args.trajectory_budget:
             return print_trajectory_budget_summary(config_dir)
-        return _run_real(config_dir, args.startup_mode, args.skip_confirm)
+        return _run_real(
+            config_dir, args.startup_mode, args.skip_confirm, args.verbose
+        )
 
     handler = _command_handlers().get(args.command)
     if handler is None:
