@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -14,6 +15,7 @@ from ..runtime.mission_telemetry_reporter import MissionTelemetryReporter
 from ..runtime.failure_policy import FailurePolicy
 from ..runtime.landing_flow import LandingFlow
 from .mission_errors import MissionErrorDefinition, MissionErrors
+from .startup_progress import NullProgressReporter, StartupProgressReporter
 from ..adapters.cflib_command_transport import (
     POLY4D_RAW_PIECE_BYTES,
     TRAJECTORY_MEMORY_BYTES,
@@ -23,10 +25,18 @@ from ..runtime.offline_swarm_sampler import _evaluate_trajectory_spec
 logger = logging.getLogger(__name__)
 
 
+class _StartupAborted(Exception):
+    """Internal sentinel: _fail_start was invoked; start() should return False."""
+
+
 class RealMissionApp:
     """真机任务应用"""
 
-    def __init__(self, components: dict):
+    def __init__(
+        self,
+        components: dict,
+        progress: StartupProgressReporter | None = None,
+    ):
         self.comp = components
         # 常用组件在 __init__ 一次性取出，主循环 + _record_* 直接走属性而非 dict 访问。
         self.telemetry = components.get("telemetry")
@@ -53,6 +63,35 @@ class RealMissionApp:
             "pose_ready": False,
         }
         self._config_fingerprint = self._build_config_fingerprint()
+        self._progress: StartupProgressReporter = progress or NullProgressReporter()
+
+    @contextmanager
+    def _phase(self, key: str, title: str, total: int | None = None):
+        telemetry = self.telemetry
+        if telemetry is not None:
+            telemetry.record_event("startup_phase", phase=key, status="begin")
+        start = time.monotonic()
+        try:
+            with self._progress.phase(key, title, total):
+                yield
+        except Exception as exc:
+            if telemetry is not None:
+                telemetry.record_event(
+                    "startup_phase",
+                    phase=key,
+                    status="fail",
+                    duration_s=time.monotonic() - start,
+                    detail=str(exc)[:200],
+                )
+            raise
+        else:
+            if telemetry is not None:
+                telemetry.record_event(
+                    "startup_phase",
+                    phase=key,
+                    status="ok",
+                    duration_s=time.monotonic() - start,
+                )
 
     def _last_connect_report(self) -> dict[str, object]:
         link_manager = self.comp.get("link_manager")
