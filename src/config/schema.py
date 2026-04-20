@@ -164,6 +164,13 @@ class ControlConfig:
     time_delay_compensation_enabled: bool = False
     estimated_total_delay_ms: float = 0.0
     delay_prediction_gain: float = 1.0
+    # follower setpoint 发送模式：
+    #   "velocity"    —— 默认；host 内部积分成速度，调 send_velocity_world_setpoint
+    #   "full_state"  —— host 只出 (pos, vel, acc) reference，调 send_full_state_setpoint，
+    #                    onboard Mellinger（stabilizer.controller=2）闭环。要求 bootstrap
+    #                    启动时为每架 drone 写 stabilizer.controller=2。
+    output_mode: Literal["velocity", "full_state"] = "velocity"
+    onboard_controller: Literal["pid", "mellinger", "indi"] = "pid"
 
 
 @dataclass

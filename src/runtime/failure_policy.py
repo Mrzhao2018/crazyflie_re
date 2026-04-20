@@ -180,6 +180,7 @@ class FailurePolicy:
         app = self.app
         config = app.comp.get("config")
         link_manager = app.comp.get("link_manager")
+        console_tap = app.comp.get("console_tap")
         telemetry = app.telemetry
         if config is None or link_manager is None or telemetry is None:
             return False
@@ -213,6 +214,14 @@ class FailurePolicy:
             )
 
             if result.get("ok"):
+                if console_tap is not None and hasattr(console_tap, "reattach_drone"):
+                    try:
+                        console_tap.reattach_drone(drone_id)
+                    except Exception:
+                        logger.exception(
+                            "Console tap reattach failed after reconnect for drone %s",
+                            drone_id,
+                        )
                 ok_def = MissionErrors.Runtime.LINK_RECONNECT_OK
                 telemetry.record_event(
                     "link_reconnect_ok",

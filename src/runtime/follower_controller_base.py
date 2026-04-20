@@ -42,6 +42,8 @@ class FollowerControllerBase:
         )
         self.radial_gain_scale_xy = config.radial_gain_scale_xy
         self.radial_feedforward_scale_xy = config.radial_feedforward_scale_xy
+        self.output_mode = getattr(config, "output_mode", "velocity")
+        self.onboard_controller = getattr(config, "onboard_controller", "pid")
 
     # ---- radial scaling ---------------------------------------------------
 

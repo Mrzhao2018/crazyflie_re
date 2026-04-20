@@ -100,24 +100,44 @@ class FollowerExecutor:
         return buckets
 
     def execute_velocity(self, actions: list[FollowerAction]):
-        """执行速度命令"""
-        if self._group_pool:
-            def _send(action: FollowerAction) -> None:
+        """执行 follower setpoint。
+
+        每个 action 自描述发送模式：``kind="velocity"`` 走 ``cmd_velocity_world``，
+        ``kind="full_state"`` 走 ``cmd_full_state``（onboard Mellinger 闭环）。
+        历史上只有 velocity 分支，现在在同一个入口里分发，保持 caller 侧代码不变。
+        """
+
+        def _send_one(action: FollowerAction) -> None:
+            if action.kind == "full_state":
+                if action.position is None or action.acceleration is None:
+                    raise ValueError(
+                        f"full_state action 缺 position/acceleration: drone={action.drone_id}"
+                    )
+                pos = action.position
+                vel = action.velocity
+                acc = action.acceleration
+                self.transport.cmd_full_state(
+                    action.drone_id,
+                    (float(pos[0]), float(pos[1]), float(pos[2])),
+                    (float(vel[0]), float(vel[1]), float(vel[2])),
+                    (float(acc[0]), float(acc[1]), float(acc[2])),
+                )
+            else:
                 vel = action.velocity
                 self.transport.cmd_velocity_world(
-                    action.drone_id, vel[0], vel[1], vel[2]
+                    action.drone_id, float(vel[0]), float(vel[1]), float(vel[2])
                 )
 
+        if self._group_pool:
             return self._run_group_parallel(
-                "velocity", self._bucket_by_group(actions), _send
+                "velocity", self._bucket_by_group(actions), _send_one
             )
 
         successes = []
         failures = []
         for action in actions:
-            vel = action.velocity
             try:
-                self.transport.cmd_velocity_world(action.drone_id, vel[0], vel[1], vel[2])
+                _send_one(action)
                 successes.append(action.drone_id)
             except Exception as exc:
                 failures.append(self._failure(action.drone_id, "velocity", exc))

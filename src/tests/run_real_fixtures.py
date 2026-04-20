@@ -115,6 +115,7 @@ class FakeTransport:
     def __init__(self):
         self.wait_calls = []
         self.reset_calls = []
+        self.controller_calls = []
         self.upload_calls = []
         self.define_calls = []
         self.velocity_calls = []
@@ -126,6 +127,9 @@ class FakeTransport:
 
     def reset_estimator_and_wait(self, drone_id):
         self.reset_calls.append(drone_id)
+
+    def set_onboard_controller(self, drone_id, controller):
+        self.controller_calls.append((drone_id, controller))
 
     def upload_trajectory(self, drone_id, pieces, start_addr=0):
         self.upload_calls.append((drone_id, pieces, start_addr))
@@ -606,6 +610,14 @@ def build_components(
                 {
                     "hold_auto_land_timeout": 0.2,
                     "velocity_stream_watchdog_action": watchdog_action,
+                },
+            )(),
+            "control": type(
+                "FakeControlCfg",
+                (),
+                {
+                    "output_mode": "velocity",
+                    "onboard_controller": "pid",
                 },
             )(),
         },

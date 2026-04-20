@@ -105,6 +105,40 @@ class CflibCommandTransport:
         scf.cf.commander.send_velocity_world_setpoint(vx, vy, vz, 0)
         self._mark_velocity_command(drone_id)
 
+    def cmd_full_state(
+        self,
+        drone_id: int,
+        pos: "tuple[float, float, float]",
+        vel: "tuple[float, float, float]",
+        acc: "tuple[float, float, float]",
+    ):
+        """Full-state setpoint：pos + vel + acc，onboard Mellinger/INDI 做闭环。
+
+        姿态 / 角速度 / 角加速度目前都喂零，让 onboard 自主解算。
+        """
+        scf = self.link_manager.get(drone_id)
+        scf.cf.commander.send_full_state_setpoint(
+            list(pos),
+            list(vel),
+            list(acc),
+            [0.0, 0.0, 0.0, 1.0],  # quaternion (x,y,z,w) identity
+            [0.0, 0.0, 0.0],        # body rates
+            [0.0, 0.0, 0.0],        # body accelerations
+        )
+        self._mark_velocity_command(drone_id)
+
+    def set_onboard_controller(self, drone_id: int, controller: str) -> None:
+        """切换 onboard 飞控控制器：pid(1) / mellinger(2) / indi(3)。
+
+        参数通过 cflib param port 一次性写入；真机现场实测 Mellinger 对
+        pos+vel+acc full-state 的跟踪质量最佳，但对 EKF 不稳很敏感。
+        """
+        mapping = {"pid": 1, "mellinger": 2, "indi": 3}
+        if controller not in mapping:
+            raise ValueError(f"Unsupported onboard controller: {controller}")
+        scf = self.link_manager.get(drone_id)
+        scf.cf.param.set_value("stabilizer.controller", str(mapping[controller]))
+
     def notify_setpoint_stop(self, drone_id: int):
         """通知停止低层setpoint流，恢复高层控制权限"""
         scf = self.link_manager.get(drone_id)

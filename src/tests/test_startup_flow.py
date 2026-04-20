@@ -59,6 +59,11 @@ def build_startup_components(
                     )(),
                 },
             )(),
+            "control": type(
+                "FakeControlCfg",
+                (),
+                {"output_mode": "velocity", "onboard_controller": "pid"},
+            )(),
         },
     )()
 
@@ -195,12 +200,58 @@ assert any(
 )
 
 components = build_startup_components()
+components["config"].control.output_mode = "full_state"
+components["config"].control.onboard_controller = "mellinger"
+
+def fail_set_onboard_controller(drone_id, controller):
+    raise RuntimeError("param write failed")
+
+
+components["transport"].set_onboard_controller = fail_set_onboard_controller
+app = RealMissionApp(components)
+assert app.start() is False
+assert components["fsm"].state() == MissionState.ABORT
+set_controller_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "set_onboard_controller"
+)
+assert set_controller_event["details"]["ok"] is False
+mission_error = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "mission_error"
+)
+assert mission_error["details"]["code"] == MissionErrors.Readiness.STARTUP_FAILED.code
+assert mission_error["details"]["drone_id"] == 1
+assert mission_error["details"]["output_mode"] == "full_state"
+
+components = build_startup_components()
+components["config"].control.output_mode = "full_state"
+components["config"].control.onboard_controller = "mellinger"
+
+def fail_on_second_controller_write(drone_id, controller):
+    components["transport"].controller_calls.append((drone_id, controller))
+    if controller == "mellinger" and drone_id == 2:
+        raise RuntimeError("partial write failed")
+
+
+components["transport"].set_onboard_controller = fail_on_second_controller_write
+app = RealMissionApp(components)
+assert app.start() is False
+assert (1, "mellinger") in components["transport"].controller_calls
+assert (1, "pid") in components["transport"].controller_calls
+
+components = build_startup_components()
 app = RealMissionApp(components)
 assert app.start() is True
 assert components["fsm"].state() == MissionState.SETTLE
 assert components["telemetry"].opened is not None
 assert components["transport"].wait_calls == components["fleet"].all_ids()
 assert components["transport"].reset_calls == components["fleet"].all_ids()
+assert components["transport"].controller_calls == [
+    (drone_id, "pid") for drone_id in components["fleet"].all_ids()
+]
 assert any(event["event"] == "startup_mode" for event in components["telemetry"].events)
 assert any(event["event"] == "config_fingerprint" for event in components["telemetry"].events)
 connect_group_events = [

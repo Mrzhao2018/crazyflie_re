@@ -124,10 +124,16 @@ class PreflightRunner:
 
                 sample = health_samples.get(drone_id)
                 has_health = sample is not None and "pm.vbat" in sample.values
+                safety_t_meas = (
+                    getattr(sample, "safety_t_meas", sample.t_meas)
+                    if sample is not None
+                    else None
+                )
                 health_fresh = bool(
                     has_health
                     and snapshot is not None
-                    and sample.t_meas >= snapshot.t_meas - config.safety.pose_timeout
+                    and safety_t_meas is not None
+                    and safety_t_meas >= snapshot.t_meas - config.safety.pose_timeout
                 )
                 add_check(
                     f"HEALTH_DRONE_{drone_id}",
@@ -141,7 +147,8 @@ class PreflightRunner:
                         health_fresh,
                         f"Drone {drone_id} health sample stale",
                         drone_id=drone_id,
-                        t_meas=sample.t_meas,
+                        t_meas=safety_t_meas,
+                        sample_t_meas=sample.t_meas,
                         snapshot_t_meas=snapshot.t_meas,
                     )
                     if config.safety.min_vbat > 0:

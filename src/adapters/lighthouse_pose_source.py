@@ -1,4 +1,13 @@
-"""Lighthouse定位数据源"""
+"""Lighthouse定位数据源
+
+单 drone 三路 LogConfig（cflib 每块 payload ≤ 26B 限制）：
+
+* pose (10 Hz, 24B) — stateEstimate.x/y/z + vx/vy/vz
+* health (2 Hz, 24B) — pm.vbat + kalman.varPX/Y/Z + motor.m1~m4
+* attitude (5 Hz, 14B) — stateEstimate.roll/pitch/yaw + stabilizer.thrust
+
+pose 推 PoseBus；health / attitude 合并推 HealthBus（后者 update 是 merge 语义）。
+"""
 
 import logging
 import threading
@@ -39,13 +48,31 @@ class LighthousePoseSource:
             pose_conf.add_variable("stateEstimate.x", "float")
             pose_conf.add_variable("stateEstimate.y", "float")
             pose_conf.add_variable("stateEstimate.z", "float")
+            pose_conf.add_variable("stateEstimate.vx", "float")
+            pose_conf.add_variable("stateEstimate.vy", "float")
+            pose_conf.add_variable("stateEstimate.vz", "float")
 
             health_conf = LogConfig(
-                name=f"health_{drone_id}", period_in_ms=max(100, self.log_period_ms * 5)
+                name=f"health_{drone_id}", period_in_ms=max(200, self.log_period_ms * 5)
             )
             health_conf.add_variable("pm.vbat", "float")
+            health_conf.add_variable("kalman.varPX", "float")
+            health_conf.add_variable("kalman.varPY", "float")
+            health_conf.add_variable("kalman.varPZ", "float")
+            health_conf.add_variable("motor.m1", "uint16_t")
+            health_conf.add_variable("motor.m2", "uint16_t")
+            health_conf.add_variable("motor.m3", "uint16_t")
+            health_conf.add_variable("motor.m4", "uint16_t")
 
-            sync_logger = SyncLogger(scf, [pose_conf, health_conf])
+            attitude_conf = LogConfig(
+                name=f"attitude_{drone_id}", period_in_ms=max(200, self.log_period_ms * 2)
+            )
+            attitude_conf.add_variable("stateEstimate.roll", "float")
+            attitude_conf.add_variable("stateEstimate.pitch", "float")
+            attitude_conf.add_variable("stateEstimate.yaw", "float")
+            attitude_conf.add_variable("stabilizer.thrust", "float")
+
+            sync_logger = SyncLogger(scf, [pose_conf, health_conf, attitude_conf])
             try:
                 sync_logger.connect()
             except RuntimeError as exc:
@@ -61,7 +88,7 @@ class LighthousePoseSource:
             )
             worker.start()
             self._sync_loggers[drone_id] = sync_logger
-            self._log_configs[drone_id] = [pose_conf, health_conf]
+            self._log_configs[drone_id] = [pose_conf, health_conf, attitude_conf]
             self._threads.append(worker)
 
         logger.info("Lighthouse pose source started")
@@ -83,32 +110,55 @@ class LighthousePoseSource:
         self._log_configs.clear()
 
     def register_callback(self, callback):
-        """注册回调函数"""
+        """注册回调函数 —— 接受 (drone_id, pos, ts, velocity=None)"""
         self._callbacks.append(callback)
 
     def register_health_callback(self, callback):
-        """注册健康回调函数"""
+        """注册健康回调函数 —— 接受 (drone_id, values_dict, ts)"""
         self._health_callbacks.append(callback)
 
     def _on_pose_data(self, drone_id, data):
-        """接收到定位数据"""
+        """pose block 触发"""
         if not self._running:
             return
 
         pos = np.array(
             [data["stateEstimate.x"], data["stateEstimate.y"], data["stateEstimate.z"]]
         )
+        vel = None
+        if "stateEstimate.vx" in data:
+            vel = np.array(
+                [
+                    data["stateEstimate.vx"],
+                    data["stateEstimate.vy"],
+                    data["stateEstimate.vz"],
+                ]
+            )
 
+        ts = time.time()
         for cb in self._callbacks:
-            cb(drone_id, pos, time.time())
+            try:
+                cb(drone_id, pos, ts, vel)
+            except TypeError:
+                cb(drone_id, pos, ts)
 
     def _on_health_data(self, drone_id, data):
+        """health block 触发 —— pm.vbat / kalman.var* / motor.m1~m4"""
         if not self._running:
             return
-
-        health = {"pm.vbat": float(data["pm.vbat"])}
+        values = {k: _coerce_scalar(v) for k, v in data.items()}
+        ts = time.time()
         for cb in self._health_callbacks:
-            cb(drone_id, health, time.time())
+            cb(drone_id, values, ts)
+
+    def _on_attitude_data(self, drone_id, data):
+        """attitude block 触发 —— roll/pitch/yaw/thrust"""
+        if not self._running:
+            return
+        values = {k: _coerce_scalar(v) for k, v in data.items()}
+        ts = time.time()
+        for cb in self._health_callbacks:
+            cb(drone_id, values, ts)
 
     def _logger_worker(self, drone_id, sync_logger):
         while self._running:
@@ -126,5 +176,15 @@ class LighthousePoseSource:
 
             if "stateEstimate.x" in data:
                 self._on_pose_data(drone_id, data)
-            if "pm.vbat" in data:
+            elif "stateEstimate.roll" in data:
+                self._on_attitude_data(drone_id, data)
+            elif "pm.vbat" in data or "kalman.varPX" in data:
                 self._on_health_data(drone_id, data)
+
+
+def _coerce_scalar(v):
+    """把 cflib 返回的 numpy 标量 / python number 统一成 float。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return v

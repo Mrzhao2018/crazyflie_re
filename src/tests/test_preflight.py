@@ -126,6 +126,40 @@ assert any(
 )
 assert any("stale" in reason for reason in stale_health_report.reasons)
 
+health_split_snapshot = PoseSnapshot(
+    seq=3,
+    t_meas=10.0,
+    positions=nominal,
+    fresh_mask=np.ones(len(nominal), dtype=bool),
+    disconnected_ids=[],
+)
+split_health_runner = PreflightRunner(
+    {
+        "fleet": fleet,
+        "formation": formation,
+        "pose_bus": FakePoseBus(health_split_snapshot),
+        "health_bus": HealthBus(),
+        "config": config,
+        "readiness_report": {
+            "trajectory_prepare": {
+                drone_id: {"uploaded": True, "defined": True, "fits_memory": True}
+                for drone_id in fleet.leader_ids()
+            }
+        },
+    }
+)
+for drone_id in fleet.all_ids():
+    split_health_runner.comp["health_bus"].update(drone_id, {"pm.vbat": 4.0}, 0.0)
+    split_health_runner.comp["health_bus"].update(
+        drone_id, {"stateEstimate.roll": 1.0}, 10.0
+    )
+split_health_report = split_health_runner.run()
+assert split_health_report.ok is False
+assert any(
+    code.startswith("HEALTH_FRESH_DRONE_") for code in split_health_report.failed_codes
+)
+assert any("stale" in reason for reason in split_health_report.reasons)
+
 bad_traj_runner = PreflightRunner(
     {
         "fleet": fleet,

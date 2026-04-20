@@ -79,6 +79,35 @@ assert preflight_error["details"]["stage"] == MissionErrors.Readiness.PREFLIGHT_
 assert preflight_error["details"]["failed_codes"] == ["BAD"]
 
 
+# reconnect success reattaches console tap once per drone
+components = build_components([make_snapshot(1)], [SafetyDecision("EXECUTE", [])])
+components["config"].comm.reconnect_attempts = 1
+components["config"].comm.reconnect_backoff_s = 0.0
+components["config"].comm.reconnect_timeout_s = 0.1
+components["console_tap"] = type(
+    "RecordingConsoleTap",
+    (),
+    {
+        "__init__": lambda self: setattr(self, "calls", []),
+        "reattach_drone": lambda self, drone_id: self.calls.append(drone_id),
+    },
+)()
+
+def reconnect_ok(drone_id, *, attempts, backoff_s, timeout_s):
+    return {
+        "ok": True,
+        "drone_id": drone_id,
+        "attempt_count": 1,
+        "radio_group": components["fleet"].get_radio_group(drone_id),
+    }
+
+
+components["link_manager"].reconnect = reconnect_ok
+app = RealMissionApp(components)
+assert app.failure_policy.attempt_reconnect([1]) is True
+assert components["console_tap"].calls == [1]
+
+
 # start() success drives startup stages and telemetry open
 components = build_components(
     [make_snapshot(1), make_snapshot(1)], [SafetyDecision("EXECUTE", [])]
@@ -193,6 +222,69 @@ app.run()
 assert len(components["follower_executor"].hold_calls) >= 1
 assert len(components["follower_executor"].velocity_calls) == 0
 assert components["fsm"].state() == MissionState.HOLD
+
+
+# degraded follower filtering preserves full_state references for remaining followers
+class CapturingScheduler:
+    def __init__(self):
+        self.commands_seen = None
+        self.app = None
+
+    def plan(
+        self,
+        snapshot,
+        mission_state,
+        leader_ref,
+        commands,
+        safety_decision,
+        parked_follower_ids=None,
+    ):
+        self.commands_seen = commands
+        if self.app is not None:
+            self.app._running = False
+        return type(
+            "Plan",
+            (),
+            {
+                "leader_actions": [],
+                "follower_actions": [],
+                "hold_actions": [],
+                "diagnostics": {"reason": "captured"},
+            },
+        )()
+
+
+class FullStateFollowerController:
+    def compute(self, snapshot, follower_ref, follower_ids, fleet):
+        return FollowerCommandSet(
+            commands={fid: np.zeros(3, dtype=float) for fid in follower_ids},
+            diagnostics={"output_mode": "full_state"},
+            target_positions={
+                5: np.array([0.0, 0.0, 1.0]),
+                6: np.array([0.5, 0.5, 1.0]),
+            },
+            target_accelerations={
+                5: np.array([0.0, 0.0, 0.0]),
+                6: np.array([0.1, 0.0, 0.0]),
+            },
+        )
+
+
+components = build_components([make_snapshot(1)], [SafetyDecision("EXECUTE", [])])
+components["scheduler"] = CapturingScheduler()
+components["follower_controller"] = FullStateFollowerController()
+app = RealMissionApp(components)
+components["scheduler"].app = app
+app.failure_policy.watchdog_degraded_followers.add(5)
+components["fsm"]._state = MissionState.SETTLE
+app.run()
+captured_commands = components["scheduler"].commands_seen
+assert captured_commands is not None
+assert set(captured_commands.commands.keys()) == {6}
+assert set(captured_commands.target_positions.keys()) == {6}
+assert set(captured_commands.target_accelerations.keys()) == {6}
+assert captured_commands.target_positions[6].tolist() == [0.5, 0.5, 1.0]
+assert captured_commands.target_accelerations[6].tolist() == [0.1, 0.0, 0.0]
 
 
 # executor summaries aggregate failures into radio-group buckets

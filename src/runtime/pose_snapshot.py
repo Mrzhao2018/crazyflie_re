@@ -11,3 +11,5 @@ class PoseSnapshot:
     positions: np.ndarray  # (n, 3) 所有无人机位置
     fresh_mask: np.ndarray  # (n,) bool数组，标记哪些是新数据
     disconnected_ids: list[int]  # 断连的drone_id列表
+    velocities: np.ndarray | None = None  # (n, 3) onboard EKF 融合速度；None 表示 adapter 未提供
+    velocity_fresh_mask: np.ndarray | None = None  # (n,) bool，velocities 是否有效

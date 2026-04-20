@@ -14,9 +14,18 @@ class LeaderAction:
 
 @dataclass
 class FollowerAction:
-    kind: Literal["velocity"]
+    """Follower setpoint。
+
+    ``kind="velocity"`` 走 ``send_velocity_world_setpoint``，只用 ``velocity``；
+    ``kind="full_state"`` 走 ``send_full_state_setpoint``，需要填 ``position`` +
+    ``velocity`` + ``acceleration`` 三元组，下游 onboard（Mellinger/INDI）闭环。
+    """
+
+    kind: Literal["velocity", "full_state"]
     drone_id: int
     velocity: np.ndarray  # [vx, vy, vz]
+    position: np.ndarray | None = None  # [x, y, z]，仅 full_state 必填
+    acceleration: np.ndarray | None = None  # [ax, ay, az]，仅 full_state 必填
 
 
 @dataclass

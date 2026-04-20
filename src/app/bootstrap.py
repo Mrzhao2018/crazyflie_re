@@ -32,6 +32,7 @@ from ..adapters.leader_executor import LeaderExecutor
 from ..adapters.follower_executor import FollowerExecutor
 from ..adapters.lighthouse_pose_source import LighthousePoseSource
 from ..adapters.manual_input_keyboard import KeyboardManualInputSource
+from ..adapters.cflib_console_tap import ConsoleTap
 
 
 def _build_link_quality_provider(fleet, link_quality_bus):
@@ -58,6 +59,21 @@ def _build_link_quality_provider(fleet, link_quality_bus):
         return worst
 
     return provider
+
+
+def _build_follower_controller(control_config):
+    """Select the host-side follower controller.
+
+    ``full_state`` requires the V2 controller path because it is the one that
+    emits ``target_positions`` / ``target_accelerations`` for downstream
+    scheduler/executor full-state dispatch.
+    """
+
+    if control_config.output_mode == "full_state":
+        return FollowerControllerV2(control_config)
+    if control_config.dynamics_model_order == 2:
+        return FollowerControllerV2(control_config)
+    return FollowerController(control_config)
 
 
 def build_core_app(config_dir: str, startup_mode_override: str | None = None):
@@ -91,10 +107,7 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
     # 3. Runtime层
     pose_bus = PoseBus(fleet, config.safety.pose_timeout)
     frame_estimator = AffineFrameEstimator(fleet)
-    if config.control.dynamics_model_order == 2:
-        follower_controller = FollowerControllerV2(config.control)
-    else:
-        follower_controller = FollowerController(config.control)
+    follower_controller = _build_follower_controller(config.control)
     fsm = MissionFSM()
     safety = SafetyManager(config.safety, fleet)
     telemetry = TelemetryRecorder()
@@ -188,6 +201,7 @@ def build_real_app(config_dir: str, startup_mode_override: str | None = None):
             "leader_executor": leader_executor,
             "follower_executor": follower_executor,
             "pose_source": pose_source,
+            "console_tap": ConsoleTap(link_manager),
         }
     )
 

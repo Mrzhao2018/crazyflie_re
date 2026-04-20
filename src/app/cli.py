@@ -16,7 +16,6 @@ from . import (
 from .run_real import RealMissionApp
 from .trajectory_budget_summary import print_trajectory_budget_summary
 from .bootstrap import build_app
-from ..web import cli_entry as web_cli_entry
 
 
 CommandHandler = Callable[[argparse.Namespace], int]
@@ -76,6 +75,12 @@ def _budget_command(args: argparse.Namespace) -> int:
     return print_trajectory_budget_summary(args.config_dir)
 
 
+def _web_command(args: argparse.Namespace) -> int:
+    from ..web import cli_entry as web_cli_entry
+
+    return web_cli_entry.run(args)
+
+
 def _command_handlers() -> dict[str, CommandHandler]:
     return {
         "run": _run_command,
@@ -85,7 +90,7 @@ def _command_handlers() -> dict[str, CommandHandler]:
         "compare": trajectory_comparison.run,
         "compare-runs": trajectory_compare_runs.run,
         "sim": run_sim.run,
-        "web": web_cli_entry.run,
+        "web": _web_command,
     }
 
 

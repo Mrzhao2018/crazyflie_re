@@ -156,6 +156,29 @@ class SafetyManager:
                         threshold=self.config.min_vbat,
                     )
 
+        # 7. 检查 onboard EKF 置信度（kalman variance）
+        if health is not None and self.config.estimator_variance_threshold > 0:
+            thr = float(self.config.estimator_variance_threshold)
+            for drone_id, sample in health.items():
+                var_values = [
+                    sample.values.get("kalman.varPX"),
+                    sample.values.get("kalman.varPY"),
+                    sample.values.get("kalman.varPZ"),
+                ]
+                present = [float(v) for v in var_values if v is not None]
+                if not present:
+                    continue
+                vmax = max(present)
+                if vmax > thr:
+                    add_reason(
+                        "ESTIMATOR_DIVERGENCE",
+                        "HOLD",
+                        f"Drone {drone_id} EKF variance high: {vmax:.4f}",
+                        drone_id=drone_id,
+                        variance=vmax,
+                        threshold=thr,
+                    )
+
         reasons = [reason.message for reason in structured_reasons]
         reason_codes = [reason.code for reason in structured_reasons]
 

@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from src.adapters import cflib_link_manager as link_manager_module
+from src.adapters.cflib_console_tap import ConsoleTap
 from src.adapters.cflib_link_manager import CflibLinkManager
 
 
@@ -90,5 +91,53 @@ except ValueError:
     pass
 else:
     raise AssertionError("attempts=0 应当被拒绝")
+
+
+class FakeCaller:
+    def __init__(self):
+        self.callbacks = []
+        self.removed = []
+
+    def add_callback(self, cb):
+        self.callbacks.append(cb)
+
+    def remove_callback(self, cb):
+        self.removed.append(cb)
+        self.callbacks.remove(cb)
+
+
+class FakeScf:
+    def __init__(self):
+        self.caller = FakeCaller()
+        self.cf = type(
+            "FakeCf",
+            (),
+            {"console": type("FakeConsole", (), {"receivedChar": self.caller})()},
+        )()
+
+
+class FakeConsoleLinkManager:
+    def __init__(self, scf):
+        self._scfs = {1: scf}
+
+
+initial_tap_scf = FakeScf()
+console_link_manager = FakeConsoleLinkManager(initial_tap_scf)
+tap = ConsoleTap(console_link_manager)
+tap.start()
+assert len(initial_tap_scf.caller.callbacks) == 1
+
+tap.reattach_drone(1)
+assert len(initial_tap_scf.caller.callbacks) == 1
+
+reconnected_tap_scf = FakeScf()
+console_link_manager._scfs[1] = reconnected_tap_scf
+tap.reattach_drone(1)
+assert initial_tap_scf.caller.removed
+assert len(initial_tap_scf.caller.callbacks) == 0
+assert len(reconnected_tap_scf.caller.callbacks) == 1
+
+tap.stop()
+assert len(reconnected_tap_scf.caller.callbacks) == 0
 
 print("[OK] CflibLinkManager.reconnect contracts verified")

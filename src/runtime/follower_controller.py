@@ -12,6 +12,9 @@ from .follower_controller_base import FollowerControllerBase
 class FollowerCommandSet:
     commands: dict
     diagnostics: dict
+    # full_state 模式额外携带的 reference 三元组；velocity 模式下保持为 None
+    target_positions: dict | None = None
+    target_accelerations: dict | None = None
 
 
 class FollowerController(FollowerControllerBase):

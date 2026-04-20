@@ -17,12 +17,18 @@ class ConfigLoader:
     @staticmethod
     def _validate_cross_config(config: AppConfig) -> None:
         pose_period = 1.0 / config.comm.pose_log_freq
+        pose_period_ms = int(1000.0 / config.comm.pose_log_freq)
         follower_period = 1.0 / config.comm.follower_tx_freq
         leader_period = 1.0 / config.comm.leader_update_freq
+        health_period = max(0.2, (pose_period_ms * 5) / 1000.0)
 
         if config.safety.pose_timeout <= pose_period:
             raise ValueError(
                 "pose_timeout 必须大于 pose_log_freq 对应的采样周期，否则新鲜度判断会误触发"
+            )
+        if config.safety.pose_timeout <= health_period:
+            raise ValueError(
+                "pose_timeout 必须大于 health log block 周期，否则 health freshness 会在 preflight 中误触发"
             )
 
         if config.comm.leader_update_freq > config.comm.follower_tx_freq:
@@ -146,6 +152,21 @@ class ConfigLoader:
             raise ValueError("max_feedforward_velocity 不能小于 0")
         if config.control.dynamics_model_order not in {1, 2}:
             raise ValueError("dynamics_model_order 只能是 1 或 2")
+        if config.control.output_mode not in {"velocity", "full_state"}:
+            raise ValueError("control.output_mode 只能是 'velocity' 或 'full_state'")
+        if config.control.onboard_controller not in {"pid", "mellinger", "indi"}:
+            raise ValueError("control.onboard_controller 只能是 'pid'/'mellinger'/'indi'")
+        if config.control.output_mode == "full_state" and config.control.onboard_controller == "pid":
+            raise ValueError(
+                "full_state 模式建议 onboard_controller=mellinger；PID 不吃 pos/vel/acc 三元组"
+            )
+        if (
+            config.control.output_mode == "full_state"
+            and config.control.dynamics_model_order != 2
+        ):
+            raise ValueError(
+                "full_state 模式要求 dynamics_model_order=2，确保 host 侧走能产出 pos/vel/acc 参考三元组的控制器路径"
+            )
         if config.control.velocity_feedback_gain < 0:
             raise ValueError("velocity_feedback_gain 不能小于 0")
         if config.control.acceleration_feedforward_gain < 0:

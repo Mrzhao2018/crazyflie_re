@@ -40,7 +40,10 @@ class FollowerControllerV2(FollowerControllerBase):
         fid: int,
         position: np.ndarray,
         t_meas: float,
+        onboard_velocity: np.ndarray | None = None,
     ) -> np.ndarray:
+        if onboard_velocity is not None:
+            return np.asarray(onboard_velocity, dtype=float)
         previous = self._state_estimates.get(fid)
         if previous is None:
             return np.zeros(3, dtype=float)
@@ -50,6 +53,89 @@ class FollowerControllerV2(FollowerControllerBase):
         return (position - previous.position) / dt
 
     def compute(
+        self,
+        snapshot: PoseSnapshot,
+        references: FollowerReferenceSet,
+        active_follower_ids: list[int],
+        fleet_model,
+    ) -> FollowerCommandSet:
+        if self.output_mode == "full_state":
+            return self._compute_full_state(
+                snapshot, references, active_follower_ids, fleet_model
+            )
+        return self._compute_velocity(
+            snapshot, references, active_follower_ids, fleet_model
+        )
+
+    def _compute_full_state(
+        self,
+        snapshot: PoseSnapshot,
+        references: FollowerReferenceSet,
+        active_follower_ids: list[int],
+        fleet_model,
+    ) -> FollowerCommandSet:
+        """full_state 模式：把 (pos, vel, acc) reference 透传给 onboard Mellinger。
+
+        host 侧不再做 PD / 积分 / 速度饱和 —— 所有闭环逻辑在飞控完成。
+        ``commands`` 里保留 ref velocity 仅供 scheduler 的 deadband 与 diagnostics
+        使用；真正下发的是 full_state action 里的 pos+vel+acc。
+        """
+        commands: dict[int, np.ndarray] = {}
+        target_positions: dict[int, np.ndarray] = {}
+        target_accelerations: dict[int, np.ndarray] = {}
+        skipped_stale: list[int] = []
+        missing_reference: list[int] = []
+        feedforward_applied: list[int] = []
+        acceleration_feedforward_applied: list[int] = []
+
+        for fid in active_follower_ids:
+            if fid not in references.target_positions:
+                missing_reference.append(fid)
+                continue
+            idx = fleet_model.id_to_index(fid)
+            if not snapshot.fresh_mask[idx]:
+                skipped_stale.append(fid)
+                continue
+
+            p_target = np.array(references.target_positions[fid], dtype=float)
+            v_target = np.zeros(3, dtype=float)
+            if references.target_velocities is not None:
+                raw_v = references.target_velocities.get(fid)
+                if raw_v is not None:
+                    v_target = np.array(raw_v, dtype=float)
+                    feedforward_applied.append(fid)
+            a_target = np.zeros(3, dtype=float)
+            if references.target_accelerations is not None:
+                raw_a = references.target_accelerations.get(fid)
+                if raw_a is not None:
+                    a_target = np.array(raw_a, dtype=float)
+                    acceleration_feedforward_applied.append(fid)
+
+            target_positions[fid] = p_target
+            target_accelerations[fid] = a_target
+            commands[fid] = v_target
+
+        command_norms = {
+            fid: float(np.linalg.norm(v)) for fid, v in commands.items()
+        }
+        return FollowerCommandSet(
+            commands=commands,
+            diagnostics={
+                "output_mode": "full_state",
+                "skipped_stale_followers": skipped_stale,
+                "missing_reference_followers": missing_reference,
+                "feedforward_followers": feedforward_applied,
+                "acceleration_feedforward_followers": acceleration_feedforward_applied,
+                "radial_scaled_followers": [],
+                "commanded_accelerations": {},
+                "command_norms": command_norms,
+                "commanded_acceleration_norms": {},
+            },
+            target_positions=target_positions,
+            target_accelerations=target_accelerations,
+        )
+
+    def _compute_velocity(
         self,
         snapshot: PoseSnapshot,
         references: FollowerReferenceSet,
@@ -79,7 +165,13 @@ class FollowerControllerV2(FollowerControllerBase):
 
             p_current = np.array(snapshot.positions[idx], dtype=float)
             p_target = np.array(references.target_positions[fid], dtype=float)
-            v_current = self._estimate_current_velocity(fid, p_current, snapshot.t_meas)
+            onboard_vel = None
+            if snapshot.velocities is not None and snapshot.velocity_fresh_mask is not None:
+                if snapshot.velocity_fresh_mask[idx]:
+                    onboard_vel = snapshot.velocities[idx]
+            v_current = self._estimate_current_velocity(
+                fid, p_current, snapshot.t_meas, onboard_vel
+            )
             gain_scale_xy, ff_scale_xy = radial_scales.get(fid, (1.0, 1.0))
 
             position_error = p_current - p_target

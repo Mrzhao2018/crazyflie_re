@@ -101,6 +101,68 @@ plan_changed = scheduler.plan(
 assert len(plan_changed.follower_actions) == len(fleet.follower_ids())
 assert sorted(plan_changed.diagnostics["follower_tx_groups_sent"]) == [0, 1, 2]
 
+full_state_scheduler = CommandScheduler(config.comm, fsm, fleet)
+follower_group_ids = sorted(
+    {fleet.get_radio_group(drone_id) for drone_id in fleet.follower_ids()}
+)
+full_state_commands_a = FollowerCommandSet(
+    commands={drone_id: np.zeros(3, dtype=float) for drone_id in fleet.follower_ids()},
+    diagnostics={"output_mode": "full_state"},
+    target_positions={
+        drone_id: nominal[fleet.id_to_index(drone_id)].copy()
+        for drone_id in fleet.follower_ids()
+    },
+    target_accelerations={
+        drone_id: np.zeros(3, dtype=float) for drone_id in fleet.follower_ids()
+    },
+)
+full_state_plan_a = full_state_scheduler.plan(
+    snapshot_newer,
+    MissionState.RUN,
+    leader_ref,
+    full_state_commands_a,
+    safety,
+)
+assert len(full_state_plan_a.follower_actions) == len(fleet.follower_ids())
+assert all(action.kind == "full_state" for action in full_state_plan_a.follower_actions)
+
+full_state_commands_b = FollowerCommandSet(
+    commands={drone_id: np.zeros(3, dtype=float) for drone_id in fleet.follower_ids()},
+    diagnostics={"output_mode": "full_state"},
+    target_positions={
+        drone_id: nominal[fleet.id_to_index(drone_id)] + np.array([0.2, 0.0, 0.0])
+        for drone_id in fleet.follower_ids()
+    },
+    target_accelerations={
+        drone_id: np.zeros(3, dtype=float) for drone_id in fleet.follower_ids()
+    },
+)
+full_state_scheduler.last_follower_tx_time = {}
+full_state_scheduler.last_pose_seq_by_group = {
+    group_id: -1 for group_id in follower_group_ids
+}
+full_state_plan_b = full_state_scheduler.plan(
+    PoseSnapshot(
+        seq=4,
+        t_meas=0.0,
+        positions=nominal,
+        fresh_mask=np.ones(len(nominal), dtype=bool),
+        disconnected_ids=[],
+    ),
+    MissionState.RUN,
+    leader_ref,
+    full_state_commands_b,
+    safety,
+)
+assert len(full_state_plan_b.follower_actions) == len(fleet.follower_ids())
+assert all(action.kind == "full_state" for action in full_state_plan_b.follower_actions)
+assert {
+    action.drone_id: action.position.tolist() for action in full_state_plan_b.follower_actions
+} == {
+    drone_id: position.tolist()
+    for drone_id, position in full_state_commands_b.target_positions.items()
+}
+
 fsm.transition(MissionState.HOLD)
 plan3 = scheduler.plan(
     snapshot,

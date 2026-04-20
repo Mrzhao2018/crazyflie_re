@@ -277,7 +277,7 @@ class CommandScheduler:
             diagnostics["reason"] = "hold_only" if hold_actions else "no_follower_commands"
             return TxPlan(leader_actions, [], hold_actions, diagnostics=diagnostics)
 
-        filtered_commands = self._filter_commands_by_deadband(command_dict)
+        filtered_commands = self._filter_commands_by_deadband(command_dict, follower_cmds)
         if not filtered_commands:
             diagnostics["reason"] = "deadband_blocked"
             return TxPlan(leader_actions, [], hold_actions, diagnostics=diagnostics)
@@ -304,8 +304,30 @@ class CommandScheduler:
                 continue
 
             for drone_id, vel in group_commands.items():
+                kind = "velocity"
+                position = None
+                acceleration = None
+                if follower_cmds is not None and follower_cmds.target_positions is not None:
+                    ref_pos = follower_cmds.target_positions.get(drone_id)
+                    ref_acc = (
+                        follower_cmds.target_accelerations.get(drone_id)
+                        if follower_cmds.target_accelerations is not None
+                        else None
+                    )
+                    if ref_pos is not None:
+                        kind = "full_state"
+                        position = ref_pos
+                        acceleration = (
+                            ref_acc if ref_acc is not None else np.zeros(3, dtype=float)
+                        )
                 actions.append(
-                    FollowerAction(kind="velocity", drone_id=drone_id, velocity=vel)
+                    FollowerAction(
+                        kind=kind,
+                        drone_id=drone_id,
+                        velocity=vel,
+                        position=position,
+                        acceleration=acceleration,
+                    )
                 )
             self.last_pose_seq_by_group[group_id] = snapshot.seq
             self.last_follower_tx_time[group_id] = now
@@ -338,12 +360,24 @@ class CommandScheduler:
             diagnostics=diagnostics,
         )
 
-    def _filter_commands_by_deadband(self, command_dict):
+    @staticmethod
+    def _has_full_state_reference(
+        follower_cmds: FollowerCommandSet | None, drone_id: int
+    ) -> bool:
+        if follower_cmds is None or follower_cmds.target_positions is None:
+            return False
+        return drone_id in follower_cmds.target_positions
+
+    def _filter_commands_by_deadband(self, command_dict, follower_cmds=None):
         if self.follower_cmd_deadband <= 0.0:
             return command_dict
 
         filtered = {}
         for drone_id, vel in command_dict.items():
+            if self._has_full_state_reference(follower_cmds, drone_id):
+                filtered[drone_id] = vel
+                continue
+
             deadband = self._deadband_for_drone(drone_id)
             last_vel = self.last_follower_cmd.get(drone_id)
             if last_vel is None:

@@ -243,6 +243,64 @@ class RealMissionApp:
                     drone_id=drone_id,
                 )
 
+        output_mode = self.comp["config"].control.output_mode
+        onboard_ctrl = self.comp["config"].control.onboard_controller
+        drone_id = None
+        controller_switched: list[int] = []
+        try:
+            for drone_id in self.comp["fleet"].all_ids():
+                self.comp["transport"].set_onboard_controller(drone_id, onboard_ctrl)
+                controller_switched.append(drone_id)
+                self.comp["telemetry"].record_event(
+                    "set_onboard_controller",
+                    drone_id=drone_id,
+                    controller=onboard_ctrl,
+                    ok=True,
+                )
+        except Exception as exc:
+            self.comp["telemetry"].record_event(
+                "set_onboard_controller",
+                drone_id=drone_id,
+                controller=onboard_ctrl,
+                ok=False,
+                error=str(exc),
+            )
+            if output_mode == "full_state":
+                for rollback_drone_id in reversed(controller_switched):
+                    try:
+                        self.comp["transport"].set_onboard_controller(
+                            rollback_drone_id, "pid"
+                        )
+                        self.comp["telemetry"].record_event(
+                            "rollback_onboard_controller",
+                            drone_id=rollback_drone_id,
+                            from_controller=onboard_ctrl,
+                            controller="pid",
+                            ok=True,
+                        )
+                    except Exception as rollback_exc:
+                        self.comp["telemetry"].record_event(
+                            "rollback_onboard_controller",
+                            drone_id=rollback_drone_id,
+                            from_controller=onboard_ctrl,
+                            controller="pid",
+                            ok=False,
+                            error=str(rollback_exc),
+                        )
+                return self._fail_start(
+                    "full_state 模式下设置 onboard controller 失败，中止启动",
+                    exception=exc,
+                    drone_id=drone_id,
+                    controller=onboard_ctrl,
+                    output_mode=output_mode,
+                )
+            logger.warning(
+                "onboard controller %s 设置失败 (drone=%s): %s —— 继续启动，但沿用机载当前 controller 状态",
+                onboard_ctrl,
+                drone_id,
+                exc,
+            )
+
         # 启动定位
         try:
             self.comp["pose_source"].register_callback(self._on_pose_update)
@@ -253,6 +311,15 @@ class RealMissionApp:
                 definition=MissionErrors.Readiness.POSE_SOURCE_START_FAILED,
                 exception=exc,
             )
+
+        # 启动 onboard console tap（诊断用，失败不致命）
+        console_tap = self.comp.get("console_tap")
+        if console_tap is not None:
+            try:
+                console_tap._on_line = self._on_console_line
+                console_tap.start()
+            except Exception:
+                logger.exception("Console tap start failed; 继续启动")
 
         # 等待定位稳定
         logger.info("等待定位数据...")
@@ -740,6 +807,24 @@ class RealMissionApp:
                     FollowerCommandSet(
                         commands=active_commands,
                         diagnostics=commands.diagnostics,
+                        target_positions=(
+                            {
+                                drone_id: position
+                                for drone_id, position in commands.target_positions.items()
+                                if drone_id in active_commands
+                            }
+                            if commands.target_positions is not None
+                            else None
+                        ),
+                        target_accelerations=(
+                            {
+                                drone_id: acceleration
+                                for drone_id, acceleration in commands.target_accelerations.items()
+                                if drone_id in active_commands
+                            }
+                            if commands.target_accelerations is not None
+                            else None
+                        ),
                     )
                     if commands is not None
                     else None
@@ -883,6 +968,12 @@ class RealMissionApp:
             self.comp["telemetry"].record_event("shutdown", ok=True)
         if "pose_source" in self.comp:
             self.comp["pose_source"].stop()
+        console_tap = self.comp.get("console_tap")
+        if console_tap is not None:
+            try:
+                console_tap.stop()
+            except Exception:
+                logger.exception("Console tap stop failed")
         if self.comp.get("manual_input") is not None:
             self.comp["manual_input"].stop()
         if "telemetry" in self.comp:
@@ -1103,9 +1194,18 @@ class RealMissionApp:
             },
         }
 
-    def _on_pose_update(self, drone_id, pos, timestamp):
+    def _on_pose_update(self, drone_id, pos, timestamp, velocity=None):
         """定位数据回调 - 直接推送到PoseBus"""
-        self.comp["pose_bus"].update_agent(drone_id, pos, timestamp)
+        self.comp["pose_bus"].update_agent(drone_id, pos, timestamp, velocity)
+
+    def _on_console_line(self, drone_id: int, line: str) -> None:
+        """onboard firmware consolePrintf 行回调 —— 落到 telemetry event。"""
+        try:
+            self.comp["telemetry"].record_event(
+                "onboard_console", drone_id=drone_id, line=line
+            )
+        except Exception:
+            logger.exception("Failed to record onboard_console event")
 
     @staticmethod
     def _radio_link_quality_payload(
