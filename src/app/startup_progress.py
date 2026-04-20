@@ -6,6 +6,8 @@ Rich TUI impl and factory live in the same module but added in later tasks.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Protocol, runtime_checkable
@@ -213,3 +215,32 @@ class RichProgressReporter:
         if self._live is not None:
             self._live.stop()
             self._live = None
+
+
+def make_reporter(
+    verbose: bool = False,
+    total_phases: int = 9,
+    stdout: Any = None,
+) -> StartupProgressReporter:
+    """Pick a reporter by the fallback decision tree.
+
+    Order: AFC_NO_RICH env -> rich import -> stdout.isatty() -> Rich.
+    """
+    stream = stdout if stdout is not None else sys.stdout
+
+    if os.environ.get("AFC_NO_RICH") == "1":
+        return TextProgressReporter(verbose=verbose, total_phases=total_phases)
+
+    try:
+        import rich  # noqa: F401
+    except ImportError:
+        logger.info(
+            "rich 未安装，降级滚动文本（可 `pip install rich` 启用 TUI）"
+        )
+        return TextProgressReporter(verbose=verbose, total_phases=total_phases)
+
+    is_tty = getattr(stream, "isatty", lambda: False)()
+    if not is_tty:
+        return TextProgressReporter(verbose=verbose, total_phases=total_phases)
+
+    return RichProgressReporter(verbose=verbose, total_phases=total_phases)

@@ -139,3 +139,63 @@ def test_rich_reporter_conforms_to_protocol():
         assert isinstance(reporter, StartupProgressReporter)
     finally:
         reporter.close()
+
+
+def test_make_reporter_no_rich_env(monkeypatch):
+    monkeypatch.setenv("AFC_NO_RICH", "1")
+    from src.app.startup_progress import TextProgressReporter, make_reporter
+
+    assert isinstance(make_reporter(), TextProgressReporter)
+
+
+def test_make_reporter_non_tty(monkeypatch):
+    monkeypatch.delenv("AFC_NO_RICH", raising=False)
+
+    class FakeStream:
+        def isatty(self):
+            return False
+
+    from src.app.startup_progress import TextProgressReporter, make_reporter
+
+    reporter = make_reporter(stdout=FakeStream())
+    assert isinstance(reporter, TextProgressReporter)
+
+
+def test_make_reporter_rich_missing(monkeypatch):
+    monkeypatch.delenv("AFC_NO_RICH", raising=False)
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "rich" or name.startswith("rich."):
+            raise ImportError("simulated missing rich")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    class FakeStream:
+        def isatty(self):
+            return True
+
+    from src.app.startup_progress import TextProgressReporter, make_reporter
+
+    reporter = make_reporter(stdout=FakeStream())
+    assert isinstance(reporter, TextProgressReporter)
+
+
+def test_make_reporter_rich_tty(monkeypatch):
+    pytest.importorskip("rich")
+    monkeypatch.delenv("AFC_NO_RICH", raising=False)
+
+    class FakeStream:
+        def isatty(self):
+            return True
+
+    from src.app.startup_progress import RichProgressReporter, make_reporter
+
+    reporter = make_reporter(stdout=FakeStream())
+    try:
+        assert isinstance(reporter, RichProgressReporter)
+    finally:
+        reporter.close()
