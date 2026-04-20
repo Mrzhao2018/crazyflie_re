@@ -10,7 +10,6 @@ import pytest
 from src.app.run_real import RealMissionApp
 from src.app.startup_progress import NullProgressReporter, TextProgressReporter
 
-
 def _bare_app(telemetry, progress):
     """Bypass __init__ because we only exercise _phase here."""
     app = RealMissionApp.__new__(RealMissionApp)
@@ -66,3 +65,35 @@ def test_phase_works_without_telemetry():
     app = _bare_app(telemetry=None, progress=NullProgressReporter())
     with app._phase("connect", "连接"):
         pass
+
+
+def test_fail_start_raises_startup_aborted():
+    """_fail_start must raise _StartupAborted so that _phase can mark the
+    phase FAIL. start() catches the sentinel at the top level and returns False.
+    """
+    from src.app.mission_errors import MissionErrors
+    from src.app.run_real import _StartupAborted
+
+    telemetry = MagicMock()
+    fsm = MagicMock()
+    app = _bare_app(telemetry, NullProgressReporter())
+    app.comp = {"fsm": fsm, "telemetry": telemetry}
+    app.fsm = fsm
+    app.telemetry_reporter = MagicMock()
+    app._running = False
+    app._shutdown_flushed = True
+    app._terminal_land_executed = True
+    app.landing_flow = MagicMock()
+
+    def _noop_shutdown():
+        pass
+
+    app.shutdown = _noop_shutdown  # type: ignore[assignment]
+
+    with pytest.raises(_StartupAborted):
+        app._fail_start(
+            "boom",
+            definition=MissionErrors.Readiness.STARTUP_FAILED,
+        )
+
+    fsm.force_abort.assert_called_once()

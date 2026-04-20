@@ -164,7 +164,7 @@ class RealMissionApp:
         definition: MissionErrorDefinition = MissionErrors.Readiness.STARTUP_FAILED,
         exception: Exception | None = None,
         **details,
-    ) -> bool:
+    ) -> None:
         if exception is None:
             logger.error(reason)
         else:
@@ -177,11 +177,17 @@ class RealMissionApp:
         )
         self.comp["fsm"].force_abort()
         self.shutdown()
-        return False
+        raise _StartupAborted(reason)
 
     def start(self):
         """启动"""
         logger.info("=== 启动真机任务 ===")
+        try:
+            return self._start_impl()
+        except _StartupAborted:
+            return False
+
+    def _start_impl(self):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         telemetry_path = Path("telemetry") / f"run_real_{timestamp}.jsonl"
         telemetry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -203,7 +209,7 @@ class RealMissionApp:
 
         # 连接
         if not self._safe_transition(MissionState.CONNECT):
-            return self._fail_start(
+            self._fail_start(
                 "FSM failed before connect",
                 definition=MissionErrors.Readiness.FSM_CONNECT_TRANSITION_FAILED,
             )
@@ -222,7 +228,7 @@ class RealMissionApp:
                 report=connect_report,
                 error=str(exc),
             )
-            return self._fail_start(
+            self._fail_start(
                 "连接失败",
                 definition=MissionErrors.Connection.CONNECT_ALL_FAILED,
                 exception=exc,
@@ -258,7 +264,7 @@ class RealMissionApp:
                         self.comp["transport"].wait_for_params(drone_id)
                         _on_done(drone_id)
             except Exception as exc:
-                return self._fail_start(
+                self._fail_start(
                     "参数同步失败",
                     definition=MissionErrors.Readiness.WAIT_FOR_PARAMS_FAILED,
                     exception=exc,
@@ -275,7 +281,7 @@ class RealMissionApp:
                         "reset_estimator", drone_id=drone_id, ok=True
                     )
             except Exception as exc:
-                return self._fail_start(
+                self._fail_start(
                     "重置估计器失败",
                     definition=MissionErrors.Readiness.RESET_ESTIMATOR_FAILED,
                     exception=exc,
@@ -326,7 +332,7 @@ class RealMissionApp:
                             ok=False,
                             error=str(rollback_exc),
                         )
-                return self._fail_start(
+                self._fail_start(
                     "full_state 模式下设置 onboard controller 失败，中止启动",
                     exception=exc,
                     drone_id=drone_id,
@@ -345,7 +351,7 @@ class RealMissionApp:
             self.comp["pose_source"].register_callback(self._on_pose_update)
             self.comp["pose_source"].start()
         except Exception as exc:
-            return self._fail_start(
+            self._fail_start(
                 "定位源启动失败",
                 definition=MissionErrors.Readiness.POSE_SOURCE_START_FAILED,
                 exception=exc,
@@ -372,7 +378,7 @@ class RealMissionApp:
             time.sleep(0.1)
         else:
             self.comp["telemetry"].record_event("pose_ready", ok=False)
-            return self._fail_start(
+            self._fail_start(
                 "部分无人机定位未就绪，中止任务",
                 definition=MissionErrors.Readiness.POSE_TIMEOUT,
             )
@@ -391,7 +397,7 @@ class RealMissionApp:
             time.sleep(0.1)
         else:
             self.comp["telemetry"].record_event("health_ready", ok=False)
-            return self._fail_start(
+            self._fail_start(
                 "健康状态数据未就绪，中止任务",
                 definition=MissionErrors.Readiness.HEALTH_TIMEOUT,
             )
@@ -465,7 +471,7 @@ class RealMissionApp:
                         nominal_position=spec.get("nominal_position"),
                     )
             except Exception as exc:
-                return self._fail_start(
+                self._fail_start(
                     "轨迹准备失败",
                     definition=MissionErrors.Readiness.TRAJECTORY_PREPARE_FAILED,
                     exception=exc,
@@ -495,13 +501,13 @@ class RealMissionApp:
                 )
 
         if not self._safe_transition(MissionState.POSE_READY):
-            return self._fail_start(
+            self._fail_start(
                 "FSM failed entering POSE_READY",
                 definition=MissionErrors.Readiness.FSM_POSE_READY_TRANSITION_FAILED,
             )
 
         if not self._safe_transition(MissionState.PREFLIGHT):
-            return self._fail_start(
+            self._fail_start(
                 "FSM failed entering PREFLIGHT",
                 definition=MissionErrors.Readiness.FSM_PREFLIGHT_TRANSITION_FAILED,
             )
@@ -509,7 +515,7 @@ class RealMissionApp:
         try:
             preflight_report = self.comp["preflight"].run()
         except Exception as exc:
-            return self._fail_start(
+            self._fail_start(
                 "Preflight 执行异常",
                 definition=MissionErrors.Readiness.PREFLIGHT_EXCEPTION,
                 exception=exc,
@@ -520,7 +526,7 @@ class RealMissionApp:
             failed_codes=preflight_report.failed_codes,
         )
         if not preflight_report.ok:
-            return self._fail_start(
+            self._fail_start(
                 f"Preflight failed: {preflight_report.reasons} codes={preflight_report.failed_codes}",
                 definition=MissionErrors.Readiness.PREFLIGHT_FAILED,
                 failed_codes=preflight_report.failed_codes,
@@ -529,7 +535,7 @@ class RealMissionApp:
         # Takeoff - 所有无人机起飞
         logger.info("=== 起飞 ===")
         if not self._safe_transition(MissionState.TAKEOFF):
-            return self._fail_start(
+            self._fail_start(
                 "FSM failed entering TAKEOFF",
                 definition=MissionErrors.Readiness.FSM_TAKEOFF_TRANSITION_FAILED,
             )
@@ -546,7 +552,7 @@ class RealMissionApp:
 
         # Settle - 等待稳定并验证
         if not self._safe_transition(MissionState.SETTLE):
-            return self._fail_start(
+            self._fail_start(
                 "FSM failed entering SETTLE",
                 definition=MissionErrors.Readiness.FSM_SETTLE_TRANSITION_FAILED,
             )
