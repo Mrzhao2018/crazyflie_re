@@ -37,3 +37,31 @@ def test_configure_logging_null_reporter_falls_back_to_stream():
     root = logging.getLogger()
     assert len(root.handlers) == 1
     assert isinstance(root.handlers[0], logging.StreamHandler)
+
+
+def test_configure_logging_quiets_cflib_by_default():
+    configure_logging(verbose=False, reporter=TextProgressReporter())
+    assert logging.getLogger("cflib").level == logging.WARNING
+    assert logging.getLogger("cflib.crazyflie").getEffectiveLevel() == logging.WARNING
+
+
+def test_configure_logging_quiets_adapter_noise_by_default():
+    configure_logging(verbose=False, reporter=TextProgressReporter())
+    assert (
+        logging.getLogger("src.adapters.cflib_link_manager").level
+        == logging.WARNING
+    )
+    assert (
+        logging.getLogger("src.adapters.cflib_command_transport").level
+        == logging.WARNING
+    )
+
+
+def test_configure_logging_verbose_releases_noisy_loggers():
+    configure_logging(verbose=True, reporter=TextProgressReporter())
+    # verbose 下 noisy logger 应回到 NOTSET（继承 root）
+    assert logging.getLogger("cflib").level == logging.NOTSET
+    assert (
+        logging.getLogger("src.adapters.cflib_link_manager").level
+        == logging.NOTSET
+    )

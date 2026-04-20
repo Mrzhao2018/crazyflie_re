@@ -14,6 +14,18 @@ from typing import Any
 _TEXT_FORMAT = "[%(asctime)s] %(message)s"
 _TEXT_DATEFMT = "%H:%M:%S"
 
+# 第三方库 + 项目 adapter 的 INFO 洪水会淹没 Rich Live 面板，默认压到 WARNING；
+# verbose 下放开（NOTSET → 继承 root）便于真机连接问题诊断。
+_NOISY_LOGGERS = (
+    "cflib",
+    "src.adapters.cflib_link_manager",
+    "src.adapters.cflib_command_transport",
+    "src.adapters.cflib_console_tap",
+    "src.adapters.lighthouse_pose_source",
+    "src.adapters.leader_executor",
+    "src.adapters.follower_executor",
+)
+
 
 def configure_logging(verbose: bool, reporter: Any) -> None:
     root = logging.getLogger()
@@ -47,3 +59,7 @@ def configure_logging(verbose: bool, reporter: Any) -> None:
 
     handler.setLevel(level)
     root.addHandler(handler)
+
+    noisy_level = logging.NOTSET if verbose else logging.WARNING
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(noisy_level)
