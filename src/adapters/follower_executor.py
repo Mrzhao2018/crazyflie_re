@@ -99,6 +99,63 @@ class FollowerExecutor:
             buckets.setdefault(group_id, []).append(action)
         return buckets
 
+    def _run_drone_ids_parallel(
+        self,
+        kind: str,
+        drone_ids: list[int],
+        send_one,
+    ) -> dict:
+        if not self._group_pool:
+            successes = []
+            failures = []
+            for drone_id in drone_ids:
+                try:
+                    send_one(drone_id)
+                    successes.append(drone_id)
+                except Exception as exc:
+                    failures.append(self._failure(drone_id, kind, exc))
+            return self._group_action_result(kind, successes, failures)
+
+        grouped: dict[int | None, list[int]] = {}
+        for drone_id in drone_ids:
+            grouped.setdefault(self._drone_radio_group(drone_id), []).append(drone_id)
+
+        futures: list[tuple[int, Future]] = []
+        unscheduled: list[int] = []
+        for group_id, group_drone_ids in grouped.items():
+            if group_id is None or group_id not in self._group_pool.group_ids:
+                unscheduled.extend(group_drone_ids)
+                continue
+
+            def _run_group(group_drone_ids=group_drone_ids):
+                group_successes: list[int] = []
+                group_failures: list[dict] = []
+                for drone_id in group_drone_ids:
+                    try:
+                        send_one(drone_id)
+                        group_successes.append(drone_id)
+                    except Exception as exc:
+                        group_failures.append(self._failure(drone_id, kind, exc))
+                return group_successes, group_failures
+
+            futures.append((group_id, self._group_pool.submit(group_id, _run_group)))
+
+        successes: list[int] = []
+        failures: list[dict] = []
+        for _, fut in futures:
+            ok, fail = fut.result()
+            successes.extend(ok)
+            failures.extend(fail)
+
+        for drone_id in unscheduled:
+            try:
+                send_one(drone_id)
+                successes.append(drone_id)
+            except Exception as exc:
+                failures.append(self._failure(drone_id, kind, exc))
+
+        return self._group_action_result(kind, successes, failures)
+
     def execute_velocity(self, actions: list[FollowerAction]):
         """执行 follower setpoint。
 
@@ -164,34 +221,22 @@ class FollowerExecutor:
         return self._group_action_result("hold", successes, failures)
 
     def takeoff(self, drone_ids: list[int], height: float = 0.5, duration: float = 2.0):
-        successes = []
-        failures = []
-        for drone_id in drone_ids:
-            try:
-                self.transport.hl_takeoff(drone_id, height, duration)
-                successes.append(drone_id)
-            except Exception as exc:
-                failures.append(self._failure(drone_id, "takeoff", exc))
-        return self._group_action_result("takeoff", successes, failures)
+        return self._run_drone_ids_parallel(
+            "takeoff",
+            drone_ids,
+            lambda drone_id: self.transport.hl_takeoff(drone_id, height, duration),
+        )
 
     def land(self, drone_ids: list[int], duration: float = 2.0):
-        successes = []
-        failures = []
-        for drone_id in drone_ids:
-            try:
-                self.transport.hl_land(drone_id, 0.0, duration)
-                successes.append(drone_id)
-            except Exception as exc:
-                failures.append(self._failure(drone_id, "land", exc))
-        return self._group_action_result("land", successes, failures)
+        return self._run_drone_ids_parallel(
+            "land",
+            drone_ids,
+            lambda drone_id: self.transport.hl_land(drone_id, 0.0, duration),
+        )
 
     def stop_velocity_mode(self, drone_ids: list[int]):
-        successes = []
-        failures = []
-        for drone_id in drone_ids:
-            try:
-                self.transport.notify_setpoint_stop(drone_id)
-                successes.append(drone_id)
-            except Exception as exc:
-                failures.append(self._failure(drone_id, "notify_stop", exc))
-        return self._group_action_result("notify_stop", successes, failures)
+        return self._run_drone_ids_parallel(
+            "notify_stop",
+            drone_ids,
+            lambda drone_id: self.transport.notify_setpoint_stop(drone_id),
+        )

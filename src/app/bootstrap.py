@@ -22,6 +22,7 @@ from ..runtime.scheduler import CommandScheduler
 from ..runtime.telemetry import TelemetryRecorder
 from ..runtime.health_bus import HealthBus
 from ..runtime.link_quality_bus import LinkQualityBus
+from ..runtime.link_state_bus import LinkStateBus
 from ..runtime.manual_leader_state import ManualLeaderState
 from ..runtime.manual_leader_reference import ManualLeaderReferenceSource
 from .preflight import PreflightRunner
@@ -109,8 +110,12 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
     frame_estimator = AffineFrameEstimator(fleet)
     follower_controller = _build_follower_controller(config.control)
     fsm = MissionFSM()
-    safety = SafetyManager(config.safety, fleet)
-    telemetry = TelemetryRecorder()
+    link_state_bus = LinkStateBus()
+    safety = SafetyManager(config.safety, fleet, link_state_bus=link_state_bus)
+    telemetry = TelemetryRecorder(
+        flush_every_n=config.comm.telemetry_flush_every_n,
+        queue_max_size=config.comm.telemetry_queue_max,
+    )
     health_bus = HealthBus()
     link_quality_bus = LinkQualityBus() if config.comm.link_quality_enabled else None
     link_quality_provider = _build_link_quality_provider(fleet, link_quality_bus)
@@ -156,6 +161,7 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
         "telemetry": telemetry,
         "health_bus": health_bus,
         "link_quality_bus": link_quality_bus,
+        "link_state_bus": link_state_bus,
         "manual_leader_state": manual_state,
         "manual_input": manual_input,
     }
@@ -171,6 +177,7 @@ def build_real_app(config_dir: str, startup_mode_override: str | None = None):
     link_manager = CflibLinkManager(
         components["fleet"],
         link_quality_bus=components.get("link_quality_bus"),
+        link_state_bus=components.get("link_state_bus"),
         connect_pace_s=components["config"].comm.connect_pace_s,
         connect_timeout_s=components["config"].comm.connect_timeout_s,
         radio_driver=components["config"].comm.radio_driver,
@@ -190,7 +197,11 @@ def build_real_app(config_dir: str, startup_mode_override: str | None = None):
         transport, group_executor_pool=group_executor_pool
     )
     pose_source = LighthousePoseSource(
-        link_manager, components["fleet"], components["config"].comm.pose_log_freq
+        link_manager,
+        components["fleet"],
+        components["config"].comm.pose_log_freq,
+        attitude_log_enabled=components["config"].comm.attitude_log_enabled,
+        motor_log_enabled=components["config"].comm.motor_log_enabled,
     )
 
     components.update(

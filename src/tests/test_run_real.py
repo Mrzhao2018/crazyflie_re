@@ -79,13 +79,21 @@ assert preflight_error["details"]["stage"] == MissionErrors.Readiness.PREFLIGHT_
 assert preflight_error["details"]["failed_codes"] == ["BAD"]
 
 
-# reconnect success reattaches console tap once per drone
+# reconnect success reattaches stream consumers once per drone
 components = build_components([make_snapshot(1)], [SafetyDecision("EXECUTE", [])])
 components["config"].comm.reconnect_attempts = 1
 components["config"].comm.reconnect_backoff_s = 0.0
 components["config"].comm.reconnect_timeout_s = 0.1
 components["console_tap"] = type(
     "RecordingConsoleTap",
+    (),
+    {
+        "__init__": lambda self: setattr(self, "calls", []),
+        "reattach_drone": lambda self, drone_id: self.calls.append(drone_id),
+    },
+)()
+components["pose_source"] = type(
+    "RecordingPoseSource",
     (),
     {
         "__init__": lambda self: setattr(self, "calls", []),
@@ -106,6 +114,7 @@ components["link_manager"].reconnect = reconnect_ok
 app = RealMissionApp(components)
 assert app.failure_policy.attempt_reconnect([1]) is True
 assert components["console_tap"].calls == [1]
+assert components["pose_source"].calls == [1]
 
 
 # start() success drives startup stages and telemetry open

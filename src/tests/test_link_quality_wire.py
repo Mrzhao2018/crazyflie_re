@@ -50,8 +50,9 @@ def fake_time():
 
 wire_link_quality_callbacks(cf, drone_id=7, bus=bus, time_fn=fake_time)
 
-# link_statistics.start 必须被调用，否则 cflib 不会触发回调
-assert cf.link_statistics.started is True
+# link_statistics.start 不应由 wire_*_callbacks 触发 —— cflib 0.1.31 会在
+# Crazyflie.connected Caller 里自动 start()，再手动调只是多余。
+assert cf.link_statistics.started is False
 
 # 模拟 cflib 触发每一个 Caller
 cf.link_statistics.link_quality_updated.call(93.0)
@@ -72,11 +73,11 @@ assert sample.uplink_congestion == 10.0
 assert sample.downlink_congestion == 2.0
 assert sample.last_update_t is not None
 
-# ---- bus=None 时 start 仍被调用，回调不挂（避免无意义开销） ------------------
+# ---- bus=None 时也不挂回调、不启动采集 --------------------------------------
 
 cf2 = FakeCF()
 wire_link_quality_callbacks(cf2, drone_id=8, bus=None, time_fn=fake_time)
-assert cf2.link_statistics.started is False  # bus=None 时不启动，避免白白采集
+assert cf2.link_statistics.started is False  # 从来就不该由 wire 触发
 assert len(cf2.link_statistics.link_quality_updated._callbacks) == 0
 
 # ---- 多 drone 隔离 -------------------------------------------------------

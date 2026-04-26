@@ -123,6 +123,8 @@ class ConfigLoader:
 
         if config.safety.hold_auto_land_timeout <= 0:
             raise ValueError("hold_auto_land_timeout 必须大于 0")
+        if config.safety.executor_group_failure_streak <= 0:
+            raise ValueError("executor_group_failure_streak 必须大于 0")
 
         if config.safety.velocity_stream_watchdog_action not in {
             "telemetry",
@@ -145,6 +147,10 @@ class ConfigLoader:
             raise ValueError("connect_pace_s 不能小于 0；0 表示不在多机连接之间 sleep")
         if config.comm.connect_timeout_s <= 0:
             raise ValueError("connect_timeout_s 必须大于 0")
+        if config.comm.telemetry_queue_max <= 0:
+            raise ValueError("telemetry_queue_max 必须大于 0")
+        if config.comm.telemetry_flush_every_n <= 0:
+            raise ValueError("telemetry_flush_every_n 必须大于 0")
 
         if config.control.feedforward_gain < 0:
             raise ValueError("feedforward_gain 不能小于 0")

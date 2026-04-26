@@ -45,6 +45,59 @@ class LeaderExecutor:
         except Exception:
             return None
 
+    def _execute_grouped(
+        self,
+        action: LeaderAction,
+        send_one,
+    ):
+        if not self._group_pool:
+            successes = []
+            failures = []
+            for drone_id in action.drone_ids:
+                try:
+                    send_one(drone_id)
+                    successes.append(drone_id)
+                except Exception as exc:
+                    failures.append(self._failure(drone_id, action, exc))
+            return self._group_action_result(action, successes, failures)
+
+        grouped: dict[int | None, list[int]] = {}
+        for drone_id in action.drone_ids:
+            grouped.setdefault(self._drone_radio_group(drone_id), []).append(drone_id)
+
+        futures: list[Future] = []
+        inline_drones: list[int] = []
+        for group_id, drones in grouped.items():
+            if group_id is None or group_id not in self._group_pool.group_ids:
+                inline_drones.extend(drones)
+                continue
+
+            def _run(drones=drones):
+                ok, fail = [], []
+                for drone_id in drones:
+                    try:
+                        send_one(drone_id)
+                        ok.append(drone_id)
+                    except Exception as exc:
+                        fail.append(self._failure(drone_id, action, exc))
+                return ok, fail
+
+            futures.append(self._group_pool.submit(group_id, _run))
+
+        successes = []
+        failures = []
+        for fut in futures:
+            ok, fail = fut.result()
+            successes.extend(ok)
+            failures.extend(fail)
+        for drone_id in inline_drones:
+            try:
+                send_one(drone_id)
+                successes.append(drone_id)
+            except Exception as exc:
+                failures.append(self._failure(drone_id, action, exc))
+        return self._group_action_result(action, successes, failures)
+
     def execute(self, actions: list[LeaderAction]):
         """执行leader动作列表"""
         results = []
@@ -63,15 +116,10 @@ class LeaderExecutor:
         """执行起飞"""
         height = action.payload.get("height", 0.5)
         duration = action.payload.get("duration", 2.0)
-        successes = []
-        failures = []
-        for drone_id in action.drone_ids:
-            try:
-                self.transport.hl_takeoff(drone_id, height, duration)
-                successes.append(drone_id)
-            except Exception as exc:
-                failures.append(self._failure(drone_id, action, exc))
-        return self._group_action_result(action, successes, failures)
+        return self._execute_grouped(
+            action,
+            lambda drone_id: self.transport.hl_takeoff(drone_id, height, duration),
+        )
 
     def _execute_batch_goto(self, action: LeaderAction):
         """批量go_to（共时更新），跨 radio_group 并行，组内按 drone_ids 顺序串行"""
@@ -134,15 +182,10 @@ class LeaderExecutor:
     def _execute_land(self, action: LeaderAction):
         """执行降落"""
         duration = action.payload.get("duration", 2.0)
-        successes = []
-        failures = []
-        for drone_id in action.drone_ids:
-            try:
-                self.transport.hl_land(drone_id, 0.0, duration)
-                successes.append(drone_id)
-            except Exception as exc:
-                failures.append(self._failure(drone_id, action, exc))
-        return self._group_action_result(action, successes, failures)
+        return self._execute_grouped(
+            action,
+            lambda drone_id: self.transport.hl_land(drone_id, 0.0, duration),
+        )
 
     def _execute_start_trajectory(self, action: LeaderAction):
         trajectory_id = action.payload.get("trajectory_id", 1)
@@ -150,19 +193,14 @@ class LeaderExecutor:
         relative_position = action.payload.get("relative_position", False)
         relative_yaw = action.payload.get("relative_yaw", False)
         reversed_mode = action.payload.get("reversed", False)
-        successes = []
-        failures = []
-        for drone_id in action.drone_ids:
-            try:
-                self.transport.hl_start_trajectory(
-                    drone_id,
-                    trajectory_id,
-                    time_scale=time_scale,
-                    relative_position=relative_position,
-                    relative_yaw=relative_yaw,
-                    reversed=reversed_mode,
-                )
-                successes.append(drone_id)
-            except Exception as exc:
-                failures.append(self._failure(drone_id, action, exc))
-        return self._group_action_result(action, successes, failures)
+        return self._execute_grouped(
+            action,
+            lambda drone_id: self.transport.hl_start_trajectory(
+                drone_id,
+                trajectory_id,
+                time_scale=time_scale,
+                relative_position=relative_position,
+                relative_yaw=relative_yaw,
+                reversed=reversed_mode,
+            ),
+        )

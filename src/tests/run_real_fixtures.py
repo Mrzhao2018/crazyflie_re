@@ -1,5 +1,7 @@
 """Shared fakes and builders for RealMissionApp tests."""
 
+import time
+
 import numpy as np
 
 from src.runtime.follower_controller import FollowerCommandSet
@@ -190,7 +192,7 @@ class FakeTransport:
 
     def cmd_velocity_world(self, drone_id, vx, vy, vz):
         self.velocity_calls.append((drone_id, vx, vy, vz))
-        self._last_velocity_command_time[drone_id] = 0.0
+        self._last_velocity_command_time[drone_id] = time.monotonic()
 
     def notify_setpoint_stop(self, drone_id):
         self.high_level_calls.append(("notify_stop", drone_id))
@@ -408,7 +410,13 @@ class FakeSafety:
         return (False, [])
 
     def evaluate(
-        self, snapshot, frame=None, commands=None, follower_ref=None, health=None
+        self,
+        snapshot,
+        frame=None,
+        commands=None,
+        follower_ref=None,
+        health=None,
+        ignored_disconnected_ids=None,
     ):
         idx = min(self.calls, len(self.decisions) - 1)
         self.calls += 1
@@ -618,6 +626,9 @@ def build_components(
                 {
                     "output_mode": "velocity",
                     "onboard_controller": "pid",
+                    "dynamics_model_order": 2,
+                    "max_velocity": 0.65,
+                    "max_acceleration": 1.5,
                 },
             )(),
         },

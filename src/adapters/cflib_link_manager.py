@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 from ..domain.fleet_model import FleetModel
 from ..runtime.link_quality_bus import LinkQualityBus
+from ..runtime.link_state_bus import LinkStateBus
 from .radio_driver_select import RadioDriverMode, select_radio_driver
 
 cflib: Any | None = None
@@ -46,8 +47,15 @@ def wire_link_quality_callbacks(
 ) -> None:
     """把 cflib ``cf.link_statistics`` 的 6 个 Caller 挂到 ``bus`` 上。
 
-    ``bus=None`` 时不做任何挂接，并且不启动 link_statistics 采集——避免
+    ``bus=None`` 时不做任何挂接；此时也不应启动 link_statistics 采集，避免
     cflib 在后台持续消耗 CPU / 网络但无人消费。
+
+    注意：cflib 0.1.31 已在 ``Crazyflie.__init__`` 里把
+    ``self.connected.add_callback(lambda uri: self.link_statistics.start())``
+    与对应的 ``disconnected → stop()`` 挂好（见 cflib
+    ``crazyflie/__init__.py`` 约 L159–L162），所以此函数**不**需要再手动
+    ``link_statistics.start()``——那是一次多余调用，对应 ``stop()`` 路径也由
+    cflib 自己管理。
     """
     if bus is None:
         return
@@ -65,9 +73,6 @@ def wire_link_quality_callbacks(
             return _cb
 
         caller.add_callback(_make_cb())
-    start = getattr(link_stats, "start", None)
-    if callable(start):
-        start()
 
 
 class CflibLinkManager:
@@ -78,6 +83,7 @@ class CflibLinkManager:
         fleet: FleetModel,
         *,
         link_quality_bus: LinkQualityBus | None = None,
+        link_state_bus: LinkStateBus | None = None,
         connect_pace_s: float = 0.2,
         connect_timeout_s: float = 5.0,
         radio_driver: RadioDriverMode | str = RadioDriverMode.AUTO,
@@ -87,6 +93,7 @@ class CflibLinkManager:
         self._initialized = False
         self._last_connect_report: dict[str, Any] | None = None
         self._link_quality_bus = link_quality_bus
+        self._link_state_bus = link_state_bus
         self._connect_pace_s = float(connect_pace_s)
         self._connect_timeout_s = float(connect_timeout_s)
         self._radio_driver = radio_driver
@@ -102,7 +109,7 @@ class CflibLinkManager:
         assert Crazyflie is not None
         assert SyncCrazyflie is not None
         uri = self.fleet.get_uri(drone_id)
-        logger.info(f"Connecting to drone {drone_id} at {uri}")
+        logger.info("Connecting to drone %s at %s", drone_id, uri)
 
         # 创建Crazyflie实例。ro_cache 跨机共享只读 TOC，rw_cache 保留原 cache/
         # 兼容旧目录：同时设置 ro_cache=cache/ro、rw_cache=cache/rw。
@@ -112,6 +119,17 @@ class CflibLinkManager:
         wire_link_quality_callbacks(
             cf, drone_id=drone_id, bus=self._link_quality_bus
         )
+        if self._link_state_bus is not None:
+            cf.connection_lost.add_callback(
+                lambda _uri, errmsg, _drone_id=drone_id: self._link_state_bus.mark_disconnected(
+                    _drone_id, error=str(errmsg)
+                )
+            )
+            cf.disconnected.add_callback(
+                lambda _uri, _drone_id=drone_id: self._link_state_bus.mark_disconnected(
+                    _drone_id
+                )
+            )
         scf = SyncCrazyflie(uri, cf=cf)
         scf.open_link()
 
@@ -124,7 +142,9 @@ class CflibLinkManager:
             time.sleep(0.1)
 
         self._scfs[drone_id] = scf
-        logger.info(f"Connected to drone {drone_id}")
+        if self._link_state_bus is not None:
+            self._link_state_bus.mark_connected(drone_id)
+        logger.info("Connected to drone %s", drone_id)
         if self._connect_pace_s > 0:
             time.sleep(self._connect_pace_s)  # 多机连接间隔
 
@@ -317,6 +337,17 @@ class CflibLinkManager:
                 wire_link_quality_callbacks(
                     cf, drone_id=drone_id, bus=self._link_quality_bus
                 )
+                if self._link_state_bus is not None:
+                    cf.connection_lost.add_callback(
+                        lambda _uri, errmsg, _drone_id=drone_id: self._link_state_bus.mark_disconnected(
+                            _drone_id, error=str(errmsg)
+                        )
+                    )
+                    cf.disconnected.add_callback(
+                        lambda _uri, _drone_id=drone_id: self._link_state_bus.mark_disconnected(
+                            _drone_id
+                        )
+                    )
                 scf = SyncCrazyflie(uri, cf=cf)
                 scf.open_link()
 
@@ -329,6 +360,8 @@ class CflibLinkManager:
                     time.sleep(0.05)
 
                 self._scfs[drone_id] = scf
+                if self._link_state_bus is not None:
+                    self._link_state_bus.mark_connected(drone_id)
                 return {
                     "ok": True,
                     "drone_id": drone_id,

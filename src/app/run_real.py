@@ -153,7 +153,7 @@ class RealMissionApp:
                 )
             return True
         except ValueError as exc:
-            logger.error(f"FSM transition failed: {exc}")
+            logger.error("FSM transition failed: %s", exc)
             self.comp["fsm"].force_abort()
             return False
 
@@ -254,6 +254,7 @@ class RealMissionApp:
                 radio_group_count,
                 detail=f"group={group_id}" if group_id is not None else None,
             )
+            self._record_link_state_events()
 
         connect_report: dict[str, object] = {}
         with self._phase("connect", "连接 Crazyflie", total=radio_group_count):
@@ -338,8 +339,26 @@ class RealMissionApp:
                             "reset_estimator", drone_id=drone_id, ok=True
                         )
                         re_done += 1
+                        detail = f"drone={drone_id}"
+                        health_sample = self.comp["health_bus"].latest().get(drone_id)
+                        if health_sample is not None:
+                            values = getattr(health_sample, "values", {})
+                            variances = [
+                                values.get("kalman.varPX"),
+                                values.get("kalman.varPY"),
+                                values.get("kalman.varPZ"),
+                            ]
+                            present = [
+                                float(value)
+                                for value in variances
+                                if value is not None
+                            ]
+                            if present:
+                                detail = (
+                                    f"{detail} var_max={max(present):.4g}"
+                                )
                         self._progress.step(
-                            re_done, re_total, detail=f"drone={drone_id}"
+                            re_done, re_total, detail=detail
                         )
                 except Exception as exc:
                     self._fail_start(
@@ -757,6 +776,7 @@ class RealMissionApp:
         safety = self.comp["safety"]
         health_bus = self.comp["health_bus"]
         link_quality_bus = self.comp.get("link_quality_bus")
+        link_state_bus = self.comp.get("link_state_bus")
         leader_ref_gen = self.comp["leader_ref_gen"]
         leader_executor = self.comp["leader_executor"]
         follower_executor = self.comp["follower_executor"]
@@ -776,6 +796,8 @@ class RealMissionApp:
                 )
 
             while self._running:
+                self._record_link_state_events()
+
                 # 1. 获取最新pose
                 snapshot = pose_bus.latest()
                 if snapshot is None:
@@ -797,7 +819,7 @@ class RealMissionApp:
                     if fg.action == "ABORT":
                         if self._try_reconnect_on_disconnect(snapshot, fg.reason_codes):
                             continue
-                        logger.error(f"Fast-gate ABORT: {fg.reason_codes}")
+                        logger.error("Fast-gate ABORT: %s", fg.reason_codes)
                         self._emergency_land()
                         break
                     if fg.action == "HOLD_GROUP":
@@ -817,7 +839,7 @@ class RealMissionApp:
                     if fast_blocked:
                         if self._try_reconnect_on_disconnect(snapshot, fast_reasons):
                             continue
-                        logger.error(f"Fast-gate triggered: {fast_reasons}")
+                        logger.error("Fast-gate triggered: %s", fast_reasons)
                         self._emergency_land()
                         break
 
@@ -906,16 +928,19 @@ class RealMissionApp:
                     commands,
                     follower_ref,
                     health=health_latest,
+                    ignored_disconnected_ids=set(
+                        self.failure_policy.watchdog_degraded_followers
+                    ),
                 )
 
                 # 处理安全决策
                 if safety_decision.action == "ABORT":
-                    logger.error(f"ABORT triggered: {safety_decision.reasons}")
+                    logger.error("ABORT triggered: %s", safety_decision.reasons)
                     self._emergency_land()
                     break
 
                 if safety_decision.action == "HOLD":
-                    logger.warning(f"HOLD triggered: {safety_decision.reasons}")
+                    logger.warning("HOLD triggered: %s", safety_decision.reasons)
                     self._enter_hold_mode()
                     if self._check_hold_timeout(t_elapsed):
                         break
@@ -970,6 +995,9 @@ class RealMissionApp:
                     parked_follower_ids=parked_follower_ids,
                 )
 
+                plan_diagnostics = plan.diagnostics or {}
+                blocked_groups = plan_diagnostics.get("follower_tx_groups_blocked") or []
+                stale_groups = plan_diagnostics.get("follower_tx_groups_stale") or []
                 # 9. 执行
                 if plan.leader_actions:
                     leader_results = leader_executor.execute(plan.leader_actions)
@@ -990,6 +1018,14 @@ class RealMissionApp:
                     self.telemetry_reporter.record_executor_summary(
                         "follower_hold_execution",
                         [follower_hold_result],
+                    )
+                    hold_success_ids = set(
+                        follower_hold_result.get("successes", [])
+                    )
+                    self._clear_watchdog_degrade(
+                        active_commands={
+                            drone_id: None for drone_id in hold_success_ids
+                        }
                     )
 
                 self._check_velocity_stream_watchdog(snapshot.t_meas)
@@ -1355,6 +1391,26 @@ class RealMissionApp:
             }
         return payload
 
+    def _record_link_state_events(self) -> None:
+        link_state_bus = self.comp.get("link_state_bus")
+        telemetry = self.telemetry
+        if link_state_bus is None or telemetry is None:
+            return
+        definition = MissionErrors.Runtime.LINK_STATE_CHANGE
+        for event in link_state_bus.drain_events():
+            state = event.get("state")
+            telemetry.record_event(
+                "link_state_change",
+                ok=(state == "connected"),
+                category=definition.category,
+                code=definition.code,
+                stage=definition.stage,
+                drone_id=event.get("drone_id"),
+                state=state,
+                error=event.get("error"),
+                t_wall=event.get("t_wall"),
+            )
+
     def _try_reconnect_on_disconnect(
         self, snapshot, reason_codes: list[str]
     ) -> bool:
@@ -1368,7 +1424,15 @@ class RealMissionApp:
             return False
         if any(code == "OUT_OF_BOUNDS" for code in reason_codes):
             return False
-        drone_ids = list(snapshot.disconnected_ids)
+        drone_ids = set(snapshot.disconnected_ids)
+        link_state_bus = self.comp.get("link_state_bus")
+        if link_state_bus is not None:
+            try:
+                drone_ids.update(link_state_bus.disconnected_ids())
+            except Exception:
+                logger.exception("Failed to query link_state_bus disconnected ids")
+                return False
+        drone_ids = list(drone_ids)
         if not drone_ids:
             return False
         return self.failure_policy.attempt_reconnect(drone_ids)

@@ -18,8 +18,8 @@ app = RealMissionApp(components)
 
 transport = components["transport"]
 transport._last_velocity_command_time = {
-    5: time.time() - 10.0,
-    6: time.time() - 10.0,
+    5: time.monotonic() - 10.0,
+    6: time.monotonic() - 10.0,
 }
 
 app._check_velocity_stream_watchdog(snapshot_t_meas=1.0)
@@ -50,7 +50,7 @@ components = build_components(
 app = RealMissionApp(components)
 components["fsm"]._state = MissionState.RUN
 transport = components["transport"]
-transport._last_velocity_command_time = {5: time.time() - 10.0}
+transport._last_velocity_command_time = {5: time.monotonic() - 10.0}
 
 stale = app._check_velocity_stream_watchdog(snapshot_t_meas=1.0)
 
@@ -82,7 +82,10 @@ components = build_components(
 app = RealMissionApp(components)
 components["fsm"]._state = MissionState.SETTLE
 transport = components["transport"]
-transport._last_velocity_command_time = {5: time.time() - 10.0, 6: time.time() - 10.0}
+transport._last_velocity_command_time = {
+    5: time.monotonic() - 10.0,
+    6: time.monotonic() - 10.0,
+}
 
 app.run()
 

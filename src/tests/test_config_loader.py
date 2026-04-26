@@ -5,16 +5,21 @@ from src.config.loader import ConfigLoader
 
 config = ConfigLoader.load("config")
 ConfigLoader._validate(config)
-assert config.comm.connect_groups_in_parallel is False
-assert config.comm.trajectory_upload_groups_in_parallel is False
+assert config.comm.connect_groups_in_parallel is True
+assert config.comm.trajectory_upload_groups_in_parallel is True
 assert config.control.time_delay_compensation_enabled is False
 assert config.control.estimated_total_delay_ms == 0.0
-assert config.control.dynamics_model_order == 1
-assert config.control.velocity_feedback_gain == 0.8
-assert config.control.acceleration_feedforward_gain == 1.0
+assert config.control.dynamics_model_order == 2
+assert config.control.velocity_feedback_gain == 1.2
+assert config.control.acceleration_feedforward_gain == 0.5
 assert config.control.mass_kg == 0.033
-assert config.control.damping_coeff == 0.15
+assert config.control.damping_coeff == 0.05
 assert config.control.max_acceleration == 2.0
+assert config.comm.telemetry_queue_max == 4096
+assert config.comm.telemetry_flush_every_n == 50
+assert config.safety.executor_group_failure_streak == 2
+assert config.safety.min_vbat == 3.15
+assert config.safety.fast_gate_group_degrade_enabled is True
 
 bad_model_order = ConfigLoader.load("config")
 bad_model_order.control.dynamics_model_order = 3
@@ -80,5 +85,13 @@ try:
     raise AssertionError("Expected watchdog action validation to fail")
 except ValueError as exc:
     assert "velocity_stream_watchdog_action" in str(exc)
+
+bad_executor_streak = ConfigLoader.load("config")
+bad_executor_streak.safety.executor_group_failure_streak = 0
+try:
+    ConfigLoader._validate(bad_executor_streak)
+    raise AssertionError("Expected executor_group_failure_streak validation to fail")
+except ValueError as exc:
+    assert "executor_group_failure_streak" in str(exc)
 
 print("[OK] ConfigLoader cross-config checks verified")

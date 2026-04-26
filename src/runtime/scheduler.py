@@ -19,6 +19,17 @@ class CommandScheduler:
     def _interval_from_frequency(freq: float) -> float:
         return 1.0 / freq
 
+    @staticmethod
+    def _now_monotonic() -> float:
+        """Monotonic clock for all rate-limit / cadence comparisons.
+
+        Scheduler internals compare timestamps such as ``last_follower_tx_time`` and
+        ``last_hold_tx_time``; these must not depend on wall-clock time because NTP
+        or manual clock changes can otherwise make a just-sent packet look "old" or
+        "from the future". Keep telemetry timestamps elsewhere on ``time.time()``.
+        """
+        return time.monotonic()
+
     def __init__(
         self,
         config: CommConfig,
@@ -47,7 +58,13 @@ class CommandScheduler:
         self.last_follower_cmd: dict[int, object] = {}
         self.follower_tx_interval = self._interval_from_frequency(config.follower_tx_freq)
         self.leader_update_interval = self._interval_from_frequency(config.leader_update_freq)
-        self.hold_tx_interval = self._interval_from_frequency(config.parked_hold_freq)
+        # Parked followers still rely on velocity-world hold packets to satisfy the
+        # velocity-stream watchdog, so never let hold cadence be slower than the
+        # normal follower transmit cadence.
+        self.hold_tx_interval = min(
+            self._interval_from_frequency(config.parked_hold_freq),
+            self.follower_tx_interval,
+        )
         self.follower_cmd_deadband = config.follower_cmd_deadband
         # 预先按 radio group 分桶，避免每次 plan() 都重新聚合
         self._follower_groups: dict[int, list[int]] = {}
@@ -166,7 +183,7 @@ class CommandScheduler:
 
     def should_update_leaders(self) -> bool:
         """判断是否该更新leaders"""
-        now = time.time()
+        now = self._now_monotonic()
         if now - self.last_leader_update_time >= self.leader_update_interval:
             self.last_leader_update_time = now
             return True
@@ -182,7 +199,7 @@ class CommandScheduler:
         parked_follower_ids: list | None = None,
     ) -> TxPlan:
         """生成发送计划"""
-        now = time.time()
+        now = self._now_monotonic()
         policy = self.mission_fsm.allowed_command_policy() if self.mission_fsm else None
         diagnostics = {
             "policy": policy,

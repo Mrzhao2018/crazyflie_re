@@ -39,15 +39,25 @@ class FastGateDecision:
 
 
 class SafetyManager:
-    def __init__(self, config: SafetyConfig, fleet_model):
+    def __init__(self, config: SafetyConfig, fleet_model, link_state_bus=None):
         self.config = config
         self.fleet = fleet_model
+        self.link_state_bus = link_state_bus
         self._all_ids_cache = tuple(fleet_model.all_ids())
         self._all_idx = np.asarray(
             [fleet_model.id_to_index(d) for d in self._all_ids_cache], dtype=int
         )
         self._boundary_min = np.asarray(config.boundary_min, dtype=float)
         self._boundary_max = np.asarray(config.boundary_max, dtype=float)
+
+    def _combined_disconnected_ids(self, snapshot: PoseSnapshot) -> list[int]:
+        combined = set(snapshot.disconnected_ids)
+        if self.link_state_bus is not None:
+            try:
+                combined.update(self.link_state_bus.disconnected_ids())
+            except Exception:
+                pass
+        return sorted(combined)
 
     def evaluate(
         self,
@@ -56,9 +66,11 @@ class SafetyManager:
         commands: FollowerCommandSet | None = None,
         follower_ref=None,
         health: dict | None = None,
+        ignored_disconnected_ids: set[int] | None = None,
     ) -> SafetyDecision:
         """评估安全状态"""
         structured_reasons: list[SafetyReason] = []
+        ignored_disconnects = set(ignored_disconnected_ids or ())
 
         def add_reason(
             code: str, severity: Literal["HOLD", "ABORT"], message: str, **details
@@ -70,12 +82,18 @@ class SafetyManager:
             )
 
         # 1. 检查断连
-        if snapshot.disconnected_ids:
+        remaining_disconnected = [
+            drone_id
+            for drone_id in self._combined_disconnected_ids(snapshot)
+            if drone_id not in ignored_disconnects
+        ]
+        if remaining_disconnected:
             add_reason(
                 "DISCONNECTED",
                 "ABORT",
-                f"Disconnected drones: {snapshot.disconnected_ids}",
-                drone_ids=snapshot.disconnected_ids,
+                f"Disconnected drones: {remaining_disconnected}",
+                drone_ids=remaining_disconnected,
+                ignored_drone_ids=sorted(ignored_disconnects),
             )
 
         # 2. 检查边界（向量化）
@@ -210,8 +228,9 @@ class SafetyManager:
         完整原因（含 severity / message / details）由后续 evaluate() 补齐。
         """
         reasons: list[str] = []
-        if snapshot.disconnected_ids:
-            reasons.append(f"DISCONNECTED:{snapshot.disconnected_ids}")
+        disconnected_ids = self._combined_disconnected_ids(snapshot)
+        if disconnected_ids:
+            reasons.append(f"DISCONNECTED:{disconnected_ids}")
 
         fresh = snapshot.fresh_mask
         if fresh.any():
@@ -249,13 +268,14 @@ class SafetyManager:
         if out_of_bounds:
             return FastGateDecision(action="ABORT", reason_codes=reason_codes, degrade_groups=[])
 
-        if not snapshot.disconnected_ids:
+        disconnected_ids = self._combined_disconnected_ids(snapshot)
+        if not disconnected_ids:
             return FastGateDecision(action="EXECUTE", reason_codes=[], degrade_groups=[])
 
-        reason_codes.append(f"DISCONNECTED:{snapshot.disconnected_ids}")
+        reason_codes.append(f"DISCONNECTED:{disconnected_ids}")
         disconnected_groups = {
             self.fleet.get_radio_group(drone_id)
-            for drone_id in snapshot.disconnected_ids
+            for drone_id in disconnected_ids
         }
         all_groups = {
             self.fleet.get_radio_group(drone_id) for drone_id in self._all_ids_cache

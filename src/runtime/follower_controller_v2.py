@@ -142,6 +142,11 @@ class FollowerControllerV2(FollowerControllerBase):
         active_follower_ids: list[int],
         fleet_model,
     ) -> FollowerCommandSet:
+        active_follower_set = set(active_follower_ids)
+        for fid in list(self._state_estimates):
+            if fid not in active_follower_set:
+                self._state_estimates.pop(fid, None)
+
         commands: dict[int, np.ndarray] = {}
         skipped_stale: list[int] = []
         missing_reference: list[int] = []
@@ -156,11 +161,13 @@ class FollowerControllerV2(FollowerControllerBase):
         for fid in active_follower_ids:
             if fid not in references.target_positions:
                 missing_reference.append(fid)
+                self._state_estimates.pop(fid, None)
                 continue
 
             idx = fleet_model.id_to_index(fid)
             if not snapshot.fresh_mask[idx]:
                 skipped_stale.append(fid)
+                self._state_estimates.pop(fid, None)
                 continue
 
             p_current = np.array(snapshot.positions[idx], dtype=float)
@@ -222,7 +229,7 @@ class FollowerControllerV2(FollowerControllerBase):
 
             previous = self._state_estimates.get(fid)
             previous_velocity = (
-                previous.velocity.copy()
+                v_current.copy()
                 if previous is not None
                 else np.zeros(3, dtype=float)
             )

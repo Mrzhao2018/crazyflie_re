@@ -1,5 +1,9 @@
 """Offline smoke runner contracts."""
 
+from src.tests.slow_guard import skip_when_fast_marker_requested
+
+skip_when_fast_marker_requested()
+
 import json
 import subprocess
 import sys

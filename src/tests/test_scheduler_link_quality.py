@@ -67,7 +67,7 @@ base_interval = 1.0 / comm.follower_tx_freq  # 0.125s
 assert base_interval == 0.125
 
 # Seed scheduler: 两个 group 都刚刚发过
-now = time.time()
+now = time.monotonic()
 scheduler.last_follower_tx_time = {0: now - 0.15, 1: now - 0.15}
 scheduler.last_pose_seq_by_group = {0: -1, 1: -1}
 

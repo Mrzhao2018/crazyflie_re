@@ -14,7 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ..app.bootstrap import build_core_app
+from .bootstrap import build_core_app
 from ..runtime.offline_swarm_sampler import evaluate_offline_swarm_at_time
 from ..runtime.telemetry_replay import load_records, analyze_records
 

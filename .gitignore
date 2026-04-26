@@ -16,3 +16,8 @@ docs/
 doc/
 
 .superpowers/
+
+# debug / tooling caches
+debug-*.log
+.ruff_cache/
+.pytest_cache/

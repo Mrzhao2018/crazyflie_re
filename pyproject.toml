@@ -1,0 +1,16 @@
+[tool.pytest.ini_options]
+# 本仓库历史上大部分 contract test 以"脚本风格"写成（模块顶层 assert + print）
+# 而不是 def test_*() 函数。通过 src/tests/conftest.py 的 pytest_collect_file
+# hook，把每个 test_*.py 的脚本执行包成一个 pytest item，这样：
+#   * pytest src/tests 一键全绿
+#   * 旧的 `python -m src.tests.test_xxx` 调用方式继续有效
+#   * 新测试可以直接写 def test_*() 函数，两种风格共存
+testpaths = ["src/tests"]
+python_files = ["test_*.py"]
+markers = [
+    "slow: long-running offline/CLI/trajectory tests; skip in daily loops with -m 'not slow'",
+]
+filterwarnings = [
+    # cflib 0.1.31 在旧协议版本下对 commander 发 DeprecationWarning；测试里我们不实际走 radio
+    "ignore:Using legacy TYPE_VELOCITY_WORLD_LEGACY:DeprecationWarning",
+]

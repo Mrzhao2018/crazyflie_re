@@ -29,6 +29,11 @@ class FailurePolicy:
         self.follower_group_failure_streaks: dict[int, int] = {}
         self.hold_entered_at: float | None = None
 
+    @staticmethod
+    def _now_monotonic() -> float:
+        """Monotonic clock for watchdog / hold timeout comparisons."""
+        return time.monotonic()
+
     # ---- helpers ----------------------------------------------------------
 
     def _follower_ids_for_groups(self, group_ids: set[int]) -> list[int]:
@@ -56,6 +61,21 @@ class FailurePolicy:
             grouped.setdefault(int(group_id), []).append(failure)
         return grouped
 
+    def _executor_failure_streak_threshold(self) -> int:
+        config = self.app.comp.get("config")
+        if config is None:
+            return EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD
+        safety = getattr(config, "safety", None)
+        if safety is None:
+            return EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD
+        return int(
+            getattr(
+                safety,
+                "executor_group_failure_streak",
+                EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD,
+            )
+        )
+
     # ---- velocity stream watchdog ----------------------------------------
 
     def check_velocity_stream_watchdog(
@@ -76,7 +96,7 @@ class FailurePolicy:
             last_tx_time = transport.last_velocity_command_time(drone_id)
             if last_tx_time is None:
                 continue
-            command_age = time.time() - last_tx_time
+            command_age = self._now_monotonic() - last_tx_time
             if command_age > watchdog_timeout:
                 stale_followers.append(
                     {
@@ -181,6 +201,7 @@ class FailurePolicy:
         config = app.comp.get("config")
         link_manager = app.comp.get("link_manager")
         console_tap = app.comp.get("console_tap")
+        pose_source = app.comp.get("pose_source")
         telemetry = app.telemetry
         if config is None or link_manager is None or telemetry is None:
             return False
@@ -214,6 +235,14 @@ class FailurePolicy:
             )
 
             if result.get("ok"):
+                if pose_source is not None and hasattr(pose_source, "reattach_drone"):
+                    try:
+                        pose_source.reattach_drone(drone_id)
+                    except Exception:
+                        logger.exception(
+                            "Pose source reattach failed after reconnect for drone %s",
+                            drone_id,
+                        )
                 if console_tap is not None and hasattr(console_tap, "reattach_drone"):
                     try:
                         console_tap.reattach_drone(drone_id)
@@ -309,6 +338,7 @@ class FailurePolicy:
 
         triggered_groups: set[int] = set()
         triggered_details = []
+        streak_threshold = self._executor_failure_streak_threshold()
         for group_id, group_failures in failure_groups.items():
             next_streak = self.follower_group_failure_streaks.get(group_id, 0) + 1
             self.follower_group_failure_streaks[group_id] = next_streak
@@ -317,7 +347,7 @@ class FailurePolicy:
             )
             if (
                 non_retryable
-                or next_streak >= EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD
+                or next_streak >= streak_threshold
             ):
                 triggered_groups.add(group_id)
                 triggered_details.append(
@@ -362,7 +392,7 @@ class FailurePolicy:
                 code=definition.code,
                 stage=definition.stage,
                 action="hold",
-                streak_threshold=EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD,
+                streak_threshold=streak_threshold,
                 triggered_groups=triggered_details,
                 active_group_ids=sorted(active_group_ids),
                 follower_ids=follower_ids,
@@ -388,7 +418,7 @@ class FailurePolicy:
             code=definition.code,
             stage=definition.stage,
             action="degrade",
-            streak_threshold=EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD,
+            streak_threshold=streak_threshold,
             triggered_groups=triggered_details,
             active_group_ids=sorted(active_group_ids),
             follower_ids=follower_ids,
@@ -409,7 +439,7 @@ class FailurePolicy:
         if app.fsm.state() != MissionState.HOLD:
             app._safe_transition(MissionState.HOLD)
         if self.hold_entered_at is None:
-            self.hold_entered_at = time.time()
+            self.hold_entered_at = self._now_monotonic()
             hold_definition = (
                 MissionErrors.Runtime.WATCHDOG_HOLD
                 if reason == "watchdog"
@@ -449,7 +479,7 @@ class FailurePolicy:
         if self.hold_entered_at is None:
             return False
 
-        hold_duration = time.time() - self.hold_entered_at
+        hold_duration = self._now_monotonic() - self.hold_entered_at
         timeout = self.app.comp["config"].safety.hold_auto_land_timeout
         if hold_duration < timeout:
             return False

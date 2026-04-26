@@ -1,5 +1,9 @@
 """Phase 1A baseline sweep helper tests."""
 
+from src.tests.slow_guard import skip_when_fast_marker_requested
+
+skip_when_fast_marker_requested()
+
 import json
 import tempfile
 from pathlib import Path

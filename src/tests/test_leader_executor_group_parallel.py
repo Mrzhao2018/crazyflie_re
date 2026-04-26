@@ -1,8 +1,7 @@
 """LeaderExecutor batch_goto 跨组并行契约：
 
-当 batch_goto 涉及多个 radio_group 的 leader，使用 GroupExecutorPool 时应跨组
-并行、组内保序。takeoff / land / start_trajectory 这些对时序更敏感的动作在
-真机上默认不要求并行化——测试保证这些路径旧行为不变。
+当 high-level leader action 涉及多个 radio_group 的 leader，使用
+GroupExecutorPool 时应跨组并行、组内保序。
 """
 
 import threading
@@ -98,21 +97,31 @@ assert elapsed < 0.1, f"跨组 batch_goto 应并行（实测 {elapsed:.3f}s）"
 group2_order = [drone for _, gid, drone, _ in transport.calls if gid == 2]
 assert group2_order == [7, 8]
 
-# ---- takeoff / land / trajectory 不受 pool 影响（保持旧同步行为） --------
+# ---- takeoff / land / trajectory 同样跨组并行 ---------------------------
 
-transport2 = RecordingTransport(radio_groups, per_send_s=0.01)
-executor2 = LeaderExecutor(transport2, group_executor_pool=pool)
-executor2.execute(
-    [
-        LeaderAction(
-            kind="takeoff",
-            drone_ids=[1, 4, 7, 8],
-            payload={"height": 0.5, "duration": 2.0},
-        )
-    ]
-)
-takeoff_order = [d for _, _, d, kind in transport2.calls if kind == "takeoff"]
-assert takeoff_order == [1, 4, 7, 8], "takeoff 保留旧的同步按序行为"
+for kind, payload, call_kind in (
+    ("takeoff", {"height": 0.5, "duration": 2.0}, "takeoff"),
+    ("land", {"duration": 2.0}, "land"),
+    ("start_trajectory", {"trajectory_id": 1}, "traj"),
+):
+    transport2 = RecordingTransport(radio_groups, per_send_s=0.03)
+    executor2 = LeaderExecutor(transport2, group_executor_pool=pool)
+    t0 = time.time()
+    result = executor2.execute(
+        [
+            LeaderAction(
+                kind=kind,
+                drone_ids=[1, 4, 7, 8],
+                payload=payload,
+            )
+        ]
+    )[0]
+    elapsed = time.time() - t0
+    assert set(result["successes"]) == {1, 4, 7, 8}
+    assert result["failures"] == []
+    assert elapsed < 0.1, f"{kind} 应跨组并行（实测 {elapsed:.3f}s）"
+    group2_order = [d for _, gid, d, k in transport2.calls if gid == 2 and k == call_kind]
+    assert group2_order == [7, 8], f"{kind} 同组内必须保持提交顺序"
 
 # ---- 无 pool 时，batch_goto 走旧同步路径 ----------------------------------
 

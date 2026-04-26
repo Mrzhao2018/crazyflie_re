@@ -183,3 +183,8 @@ class MissionErrors:
             code="RUNTIME_LINK_RECONNECT_FAILED",
             stage="link_reconnect",
         )
+        LINK_STATE_CHANGE = MissionErrorDefinition(
+            category="runtime",
+            code="RUNTIME_LINK_STATE_CHANGE",
+            stage="link_state_change",
+        )

@@ -69,12 +69,28 @@ with tempfile.TemporaryDirectory() as tmp_str:
     cfg = ConfigLoader.load(str(tmp))
     assert cfg.comm.connect_pace_s == 0.2
     assert cfg.comm.connect_timeout_s == 5.0
+    assert cfg.comm.telemetry_queue_max == 4096
+    assert cfg.comm.telemetry_flush_every_n == 50
+    assert cfg.comm.attitude_log_enabled is False
+    assert cfg.comm.motor_log_enabled is False
 
     # 合法：显式设 0（关闭间隔）/较大超时
     _write_comm(tmp, connect_pace_s=0.0, connect_timeout_s=30.0)
     cfg = ConfigLoader.load(str(tmp))
     assert cfg.comm.connect_pace_s == 0.0
     assert cfg.comm.connect_timeout_s == 30.0
+
+    # 合法：显式 telemetry 队列 / flush 周期
+    _write_comm(tmp, telemetry_queue_max=32, telemetry_flush_every_n=3)
+    cfg = ConfigLoader.load(str(tmp))
+    assert cfg.comm.telemetry_queue_max == 32
+    assert cfg.comm.telemetry_flush_every_n == 3
+
+    # 合法：关闭诊断日志流，保留 pose + vbat + kalman variance 的安全日志
+    _write_comm(tmp, attitude_log_enabled=False, motor_log_enabled=False)
+    cfg = ConfigLoader.load(str(tmp))
+    assert cfg.comm.attitude_log_enabled is False
+    assert cfg.comm.motor_log_enabled is False
 
     # 非法：负的 pace
     _write_comm(tmp, connect_pace_s=-0.01)
@@ -93,5 +109,23 @@ with tempfile.TemporaryDirectory() as tmp_str:
         assert "connect_timeout_s" in str(exc)
     else:
         raise AssertionError("connect_timeout_s 必须大于 0")
+
+    # 非法：telemetry_queue_max <= 0
+    _write_comm(tmp, telemetry_queue_max=0)
+    try:
+        ConfigLoader.load(str(tmp))
+    except ValueError as exc:
+        assert "telemetry_queue_max" in str(exc)
+    else:
+        raise AssertionError("telemetry_queue_max 必须大于 0")
+
+    # 非法：telemetry_flush_every_n <= 0
+    _write_comm(tmp, telemetry_flush_every_n=0)
+    try:
+        ConfigLoader.load(str(tmp))
+    except ValueError as exc:
+        assert "telemetry_flush_every_n" in str(exc)
+    else:
+        raise AssertionError("telemetry_flush_every_n 必须大于 0")
 
 print("[OK] ConfigLoader validation for new comm fields verified")

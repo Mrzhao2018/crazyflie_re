@@ -43,7 +43,7 @@ decision = safety.evaluate(snapshot, commands=commands)
 assert decision.action == "HOLD"
 assert "COMMAND_SATURATED" in decision.reason_codes
 
-health = {5: HealthSample(t_meas=0.0, values={"pm.vbat": 3.0})}
+health = {5: HealthSample(t_meas=0.0, values={"pm.vbat": 4.0})}
 decision = safety.evaluate(snapshot, health=health)
 assert decision.action == "EXECUTE"
 assert "LOW_BATTERY" not in decision.reason_codes

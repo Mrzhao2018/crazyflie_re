@@ -6,5 +6,5 @@ max_command_norm: 2.5
 estimator_variance_threshold: 0.001
 hold_auto_land_timeout: 3.0
 velocity_stream_watchdog_action: degrade
-min_vbat: 0.0
-fast_gate_group_degrade_enabled: false
+min_vbat: 3.15
+fast_gate_group_degrade_enabled: true

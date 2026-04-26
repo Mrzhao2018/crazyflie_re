@@ -160,6 +160,27 @@ class PreflightRunner:
                             vbat=float(sample.values["pm.vbat"]),
                             threshold=config.safety.min_vbat,
                         )
+                    if config.safety.estimator_variance_threshold > 0:
+                        variance_values = [
+                            sample.values.get("kalman.varPX"),
+                            sample.values.get("kalman.varPY"),
+                            sample.values.get("kalman.varPZ"),
+                        ]
+                        present = [
+                            float(value)
+                            for value in variance_values
+                            if value is not None
+                        ]
+                        if present:
+                            variance_max = max(present)
+                            add_check(
+                                f"ESTIMATOR_VARIANCE_DRONE_{drone_id}",
+                                variance_max <= config.safety.estimator_variance_threshold,
+                                f"Drone {drone_id} estimator variance too high",
+                                drone_id=drone_id,
+                                variance=variance_max,
+                                threshold=config.safety.estimator_variance_threshold,
+                            )
 
         reasons = [check.message for check in checks if not check.passed]
         return PreflightReport(

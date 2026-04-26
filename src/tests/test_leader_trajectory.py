@@ -1,5 +1,9 @@
 """Leader trajectory dispatch tests"""
 
+from src.tests.slow_guard import skip_when_fast_marker_requested
+
+skip_when_fast_marker_requested()
+
 from src.config.loader import ConfigLoader
 from src.domain.fleet_model import FleetModel
 from src.domain.formation_model import FormationModel

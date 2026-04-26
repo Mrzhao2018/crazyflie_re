@@ -11,6 +11,8 @@ trajectory_upload_groups_in_parallel: true
 connect_pace_s: 0.2              # 多机连接间隔；实飞稳定后可下调到 0.05 做冷启动提速
 connect_timeout_s: 5.0           # 单机 open_link 超时；radio 拥塞时可抬到 10.0
 link_quality_enabled: true       # 接入 cflib radio_link_statistics，写入 telemetry.radio_link_quality
+attitude_log_enabled: false      # 诊断流：roll/pitch/yaw/thrust；默认关闭以降低 log 带宽
+motor_log_enabled: false         # 诊断流：motor.m1~m4；默认关闭，核心 vbat/kalman variance 保留
 # PR11: 链路驱动开关 + 自适应 + 重连
 radio_driver: auto               # auto（保持 cflib 默认）/ python / cpp（需要 cflinkcpp 包）
 link_quality_soft_floor: 0.0     # 0 表示不启用自适应；推荐 60.0（link_quality < 60 时按 scale 降频）

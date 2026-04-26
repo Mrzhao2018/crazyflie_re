@@ -23,6 +23,15 @@ fleet = FleetModel(config.fleet)
 nominal = np.array(config.mission.nominal_positions, dtype=float)
 formation = FormationModel(nominal, fleet.leader_ids(), fleet)
 
+
+def healthy_values(vbat=4.0, variance=0.0005):
+    return {
+        "pm.vbat": vbat,
+        "kalman.varPX": variance,
+        "kalman.varPY": variance,
+        "kalman.varPZ": variance,
+    }
+
 snapshot = PoseSnapshot(
     seq=1,
     t_meas=0.0,
@@ -47,7 +56,7 @@ runner = PreflightRunner(
     }
 )
 for drone_id in fleet.all_ids():
-    runner.comp["health_bus"].update(drone_id, {"pm.vbat": 4.0}, 0.0)
+    runner.comp["health_bus"].update(drone_id, healthy_values(), 0.0)
 report = runner.run()
 assert report.ok is True
 assert report.failed_codes == []
@@ -95,8 +104,9 @@ low_bat_runner = PreflightRunner(
         },
     }
 )
+low_bat_runner.comp["config"].safety.min_vbat = 0.0
 for drone_id in fleet.all_ids():
-    low_bat_runner.comp["health_bus"].update(drone_id, {"pm.vbat": 3.0}, 0.0)
+    low_bat_runner.comp["health_bus"].update(drone_id, healthy_values(vbat=3.0), 0.0)
 low_bat_report = low_bat_runner.run()
 assert low_bat_report.ok is True
 assert not any(code.startswith("VBAT_DRONE_") for code in low_bat_report.failed_codes)
@@ -118,7 +128,7 @@ stale_health_runner = PreflightRunner(
     }
 )
 for drone_id in fleet.all_ids():
-    stale_health_runner.comp["health_bus"].update(drone_id, {"pm.vbat": 4.0}, -10.0)
+    stale_health_runner.comp["health_bus"].update(drone_id, healthy_values(), -10.0)
 stale_health_report = stale_health_runner.run()
 assert stale_health_report.ok is False
 assert any(
@@ -149,7 +159,7 @@ split_health_runner = PreflightRunner(
     }
 )
 for drone_id in fleet.all_ids():
-    split_health_runner.comp["health_bus"].update(drone_id, {"pm.vbat": 4.0}, 0.0)
+    split_health_runner.comp["health_bus"].update(drone_id, healthy_values(), 0.0)
     split_health_runner.comp["health_bus"].update(
         drone_id, {"stateEstimate.roll": 1.0}, 10.0
     )
@@ -175,9 +185,36 @@ bad_traj_runner = PreflightRunner(
     }
 )
 for drone_id in fleet.all_ids():
-    bad_traj_runner.comp["health_bus"].update(drone_id, {"pm.vbat": 4.0}, 0.0)
+    bad_traj_runner.comp["health_bus"].update(drone_id, healthy_values(), 0.0)
 bad_traj_report = bad_traj_runner.run()
 assert bad_traj_report.ok is False
 assert "TRAJECTORY_READY" in bad_traj_report.failed_codes
+
+high_var_runner = PreflightRunner(
+    {
+        "fleet": fleet,
+        "formation": formation,
+        "pose_bus": FakePoseBus(snapshot),
+        "health_bus": HealthBus(),
+        "config": config,
+        "readiness_report": {
+            "trajectory_prepare": {
+                drone_id: {"uploaded": True, "defined": True, "fits_memory": True}
+                for drone_id in fleet.leader_ids()
+            }
+        },
+    }
+)
+for drone_id in fleet.all_ids():
+    high_var_runner.comp["health_bus"].update(drone_id, healthy_values(), 0.0)
+high_var_runner.comp["health_bus"].update(
+    fleet.all_ids()[0],
+    healthy_values(variance=config.safety.estimator_variance_threshold * 2.0),
+    0.0,
+)
+high_var_report = high_var_runner.run()
+assert high_var_report.ok is False
+assert f"ESTIMATOR_VARIANCE_DRONE_{fleet.all_ids()[0]}" in high_var_report.failed_codes
+assert any("variance" in reason for reason in high_var_report.reasons)
 
 print("[OK] Preflight structured report contracts verified")

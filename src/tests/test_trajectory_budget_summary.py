@@ -1,5 +1,9 @@
 """Trajectory budget dry-run summary tests."""
 
+from src.tests.slow_guard import skip_when_fast_marker_requested
+
+skip_when_fast_marker_requested()
+
 from src.app.trajectory_budget_summary import build_trajectory_budget_summary
 
 

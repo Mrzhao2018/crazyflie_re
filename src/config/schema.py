@@ -96,6 +96,10 @@ class CommConfig:
     reconnect_attempts: int = 2
     reconnect_backoff_s: float = 0.5
     reconnect_timeout_s: float = 5.0
+    telemetry_queue_max: int = 4096
+    telemetry_flush_every_n: int = 50
+    attitude_log_enabled: bool = False
+    motor_log_enabled: bool = False
 
 
 @dataclass
@@ -129,13 +133,14 @@ class SafetyConfig:
     max_condition_number: float
     max_command_norm: float = 2.0
     estimator_variance_threshold: float = 0.001
-    min_vbat: float = 3.6
+    min_vbat: float = 3.15
     hold_auto_land_timeout: float = 3.0
     velocity_stream_watchdog_action: Literal[
         "telemetry", "hold", "degrade"
     ] = "telemetry"
+    executor_group_failure_streak: int = 2
     # PR11: 部分组掉线时降级为 parked hold 而不是整队 ABORT（默认关闭，向后兼容）
-    fast_gate_group_degrade_enabled: bool = False
+    fast_gate_group_degrade_enabled: bool = True
 
 
 @dataclass

@@ -41,6 +41,21 @@ class RecordingTransport:
         with self._lock:
             self.order.append((time.time(), self._radio_groups[drone_id], drone_id, "vel"))
 
+    def hl_takeoff(self, drone_id, height, duration):
+        time.sleep(self._per_send_s)
+        with self._lock:
+            self.order.append((time.time(), self._radio_groups[drone_id], drone_id, "takeoff"))
+
+    def hl_land(self, drone_id, height, duration):
+        time.sleep(self._per_send_s)
+        with self._lock:
+            self.order.append((time.time(), self._radio_groups[drone_id], drone_id, "land"))
+
+    def notify_setpoint_stop(self, drone_id):
+        time.sleep(self._per_send_s)
+        with self._lock:
+            self.order.append((time.time(), self._radio_groups[drone_id], drone_id, "notify_stop"))
+
 
 # ---- 旧路径：无 pool，串行 ------------------------------------------------
 
@@ -135,6 +150,32 @@ result = exec_hold.execute_hold([HoldAction(drone_id=1), HoldAction(drone_id=3),
 elapsed = time.time() - t0
 assert set(result["successes"]) == {1, 3, 5}
 assert elapsed < 0.07
+
+# ---- terminal follower high-level actions 等价并行化 -----------------------
+
+for method_name, call_kind in (
+    ("takeoff", "takeoff"),
+    ("land", "land"),
+    ("stop_velocity_mode", "notify_stop"),
+):
+    transport_terminal = RecordingTransport({1: 0, 3: 1, 5: 2})
+    pool_terminal = GroupExecutorPool(group_ids=[0, 1, 2])
+    exec_terminal = FollowerExecutor(
+        transport_terminal, group_executor_pool=pool_terminal
+    )
+    t0 = time.time()
+    if method_name == "takeoff":
+        terminal_result = exec_terminal.takeoff([1, 3, 5], height=0.5, duration=2.0)
+    elif method_name == "land":
+        terminal_result = exec_terminal.land([1, 3, 5], duration=2.0)
+    else:
+        terminal_result = exec_terminal.stop_velocity_mode([1, 3, 5])
+    elapsed = time.time() - t0
+    assert set(terminal_result["successes"]) == {1, 3, 5}
+    assert terminal_result["failures"] == []
+    assert elapsed < 0.07, f"{method_name} 应跨组并行（实测 {elapsed:.3f}s）"
+    assert {kind for _, _, _, kind in transport_terminal.order} == {call_kind}
+    pool_terminal.shutdown(wait=True)
 
 pool.shutdown(wait=True)
 pool2.shutdown(wait=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from cflib.crazyflie.mem import MemoryElement, Poly4D
@@ -14,6 +15,38 @@ logger = logging.getLogger(__name__)
 POLY4D_RAW_PIECE_BYTES = 132
 TRAJECTORY_MEMORY_BYTES = 4096
 
+# cflib `send_full_state_setpoint` 内部把 pos/vel/acc 乘 1000 量化成 int16（见
+# cflib/crazyflie/commander.py ~ L203）。可表示范围 [-32.767, +32.767]，我们留
+# 一点 headroom 拒绝 |v| > 32.0 的输入，避免 struct.pack `<h` 静默溢出或抛
+# `struct.error` 把一整组 follower 拖进 executor_group_hold。NaN/Inf 同样拦截。
+FULL_STATE_INT16_LIMIT = 32.0
+
+
+def _validate_full_state_vector(name: str, vec) -> None:
+    """Reject NaN/Inf 与 int16 量化越界的 full-state 分量。
+
+    vec 可能是 tuple/list/ndarray。要求长度恰好为 3 且每个分量满足
+    ``math.isfinite(v) and abs(v) <= FULL_STATE_INT16_LIMIT``；否则抛
+    ``ValueError``。不做 clip / clamp —— 静默截断一个真实的数值爆炸比显式拒绝
+    更危险。
+    """
+    try:
+        components = [float(vec[0]), float(vec[1]), float(vec[2])]
+    except (TypeError, IndexError, ValueError) as exc:
+        raise ValueError(
+            f"full_state {name} must be length-3 numeric vector, got {vec!r}"
+        ) from exc
+    for axis, value in zip(("x", "y", "z"), components):
+        if not math.isfinite(value):
+            raise ValueError(
+                f"full_state {name}.{axis} is not finite: {value!r}"
+            )
+        if abs(value) > FULL_STATE_INT16_LIMIT:
+            raise ValueError(
+                f"full_state {name}.{axis}={value} exceeds int16 quantization "
+                f"range (|v| <= {FULL_STATE_INT16_LIMIT})"
+            )
+
 
 class CflibCommandTransport:
     """封装cflib命令，上层不直接调用cflib"""
@@ -24,7 +57,10 @@ class CflibCommandTransport:
 
     @staticmethod
     def _now() -> float:
-        return time.time()
+        # Velocity-stream watchdog compares these timestamps against scheduler /
+        # failure-policy cadence windows, so use a monotonic clock rather than
+        # wall clock to stay immune to NTP or manual clock adjustments.
+        return time.monotonic()
 
     def _mark_velocity_command(self, drone_id: int) -> None:
         self._last_velocity_command_time[drone_id] = self._now()
@@ -85,19 +121,21 @@ class CflibCommandTransport:
         """高层起飞"""
         scf = self.link_manager.get(drone_id)
         scf.cf.high_level_commander.takeoff(height, duration)
-        logger.info(f"Drone {drone_id} takeoff to {height}m")
+        logger.info("Drone %s takeoff to %sm", drone_id, height)
 
     def hl_land(self, drone_id: int, height: float, duration: float):
         """高层降落"""
         scf = self.link_manager.get(drone_id)
         scf.cf.high_level_commander.land(height, duration)
-        logger.info(f"Drone {drone_id} landing")
+        logger.info("Drone %s landing", drone_id)
 
     def hl_go_to(self, drone_id: int, x: float, y: float, z: float, duration: float):
         """高层go_to"""
         scf = self.link_manager.get(drone_id)
         scf.cf.high_level_commander.go_to(x, y, z, 0, duration)
-        logger.debug(f"Drone {drone_id} go_to ({x:.2f}, {y:.2f}, {z:.2f})")
+        logger.debug(
+            "Drone %s go_to (%.2f, %.2f, %.2f)", drone_id, x, y, z
+        )
 
     def cmd_velocity_world(self, drone_id: int, vx: float, vy: float, vz: float):
         """速度命令（世界坐标系）"""
@@ -115,7 +153,17 @@ class CflibCommandTransport:
         """Full-state setpoint：pos + vel + acc，onboard Mellinger/INDI 做闭环。
 
         姿态 / 角速度 / 角加速度目前都喂零，让 onboard 自主解算。
+
+        会在下发前 reject NaN/Inf 与任意分量 |v| > ``FULL_STATE_INT16_LIMIT`` 的
+        输入。cflib 的 `send_full_state_setpoint` 会把三组向量量化成 int16 mm/
+        mm·s/mm·s^2，超界时 `struct.pack('<h', ...)` 会抛 ``struct.error``，放任
+        下去会把整组 follower 拖进 ``executor_group_hold``，所以在此主动拦截并
+        `raise ValueError` 让上层 `classify_command_failure` 归入
+        `invalid_command` / `retryable=false`。
         """
+        _validate_full_state_vector("pos", pos)
+        _validate_full_state_vector("vel", vel)
+        _validate_full_state_vector("acc", acc)
         scf = self.link_manager.get(drone_id)
         scf.cf.commander.send_full_state_setpoint(
             list(pos),
@@ -150,7 +198,7 @@ class CflibCommandTransport:
         """定义已上传轨迹"""
         scf = self.link_manager.get(drone_id)
         scf.cf.high_level_commander.define_trajectory(trajectory_id, offset, n_pieces)
-        logger.info(f"Drone {drone_id} define trajectory {trajectory_id}")
+        logger.info("Drone %s define trajectory %s", drone_id, trajectory_id)
 
     def hl_start_trajectory(
         self,
@@ -170,7 +218,7 @@ class CflibCommandTransport:
             relative_yaw=relative_yaw,
             reversed=reversed,
         )
-        logger.info(f"Drone {drone_id} start trajectory {trajectory_id}")
+        logger.info("Drone %s start trajectory %s", drone_id, trajectory_id)
 
     def wait_for_params(self, drone_id: int):
         """等待参数更新完成"""
@@ -208,7 +256,9 @@ class CflibCommandTransport:
             raise RuntimeError(f"Failed to upload trajectory for drone {drone_id}")
 
         logger.info(
-            f"Drone {drone_id} uploaded trajectory with {len(trajectory_mem.trajectory)} pieces"
+            "Drone %s uploaded trajectory with %d pieces",
+            drone_id,
+            len(trajectory_mem.trajectory),
         )
         return len(trajectory_mem.trajectory)
 

@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover
 
 SCHEMA_VERSION = 2
 _DEFAULT_FLUSH_EVERY_N = 50
-_QUEUE_MAX_SIZE = 4096  # record-heavy 长任务上限；超过后主循环会丢 record（但保留 event）
+_DEFAULT_QUEUE_MAX_SIZE = 4096  # record-heavy 长任务上限；超过后主循环会丢 record（但保留 event）
 
 
 @dataclass
@@ -67,15 +67,20 @@ class _RecordProjection:
 
 
 class TelemetryRecorder:
-    def __init__(self, flush_every_n: int = _DEFAULT_FLUSH_EVERY_N):
+    def __init__(
+        self,
+        flush_every_n: int = _DEFAULT_FLUSH_EVERY_N,
+        queue_max_size: int = _DEFAULT_QUEUE_MAX_SIZE,
+    ):
         self._fh = None
         self._phase_events: list[dict] = []
         self._record_projections: list[_RecordProjection] = []
         self._record_count = 0
         self._header_written = False
         self._flush_every_n = max(1, int(flush_every_n))
+        self._queue_max_size = max(1, int(queue_max_size))
         self._queue: queue.Queue[tuple[str, dict] | None] = queue.Queue(
-            maxsize=_QUEUE_MAX_SIZE
+            maxsize=self._queue_max_size
         )
         self._writer_thread: threading.Thread | None = None
         self._records_dropped = 0
