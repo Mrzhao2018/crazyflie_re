@@ -147,6 +147,12 @@ class ConfigLoader:
             raise ValueError("min_inter_drone_distance 不能小于 0")
         if config.safety.inter_drone_separation_action not in {"telemetry", "hold"}:
             raise ValueError("inter_drone_separation_action 必须是 telemetry 或 hold")
+        if config.safety.runtime_pose_jump_threshold < 0:
+            raise ValueError("runtime_pose_jump_threshold 不能小于 0")
+        if config.safety.runtime_pose_speed_threshold < 0:
+            raise ValueError("runtime_pose_speed_threshold 不能小于 0")
+        if config.safety.runtime_vertical_speed_threshold < 0:
+            raise ValueError("runtime_vertical_speed_threshold 不能小于 0")
 
         if config.safety.hold_auto_land_timeout <= 0:
             raise ValueError("hold_auto_land_timeout 必须大于 0")
@@ -226,6 +232,10 @@ class ConfigLoader:
             raise ValueError("full_state_position_smoothing_alpha 必须在 (0, 1] 范围内")
         if config.control.full_state_max_position_step <= 0:
             raise ValueError("full_state_max_position_step 必须大于 0")
+        if config.control.full_state_warmup_s < 0:
+            raise ValueError("full_state_warmup_s 不能小于 0")
+        if config.control.full_state_warmup_rate_hz <= 0:
+            raise ValueError("full_state_warmup_rate_hz 必须大于 0")
         if config.control.active_follower_ids is not None:
             fleet_follower_ids = {
                 drone.id for drone in config.fleet.drones if drone.role == "follower"

@@ -40,6 +40,9 @@ class FakeCF:
     def notifySetpointsStop(self):
         self.calls.append(("notifySetpointsStop",))
 
+    def stop(self):
+        self.calls.append(("stop",))
+
     def setParam(self, name, value):
         self.calls.append(("setParam", name, value))
 
@@ -91,11 +94,13 @@ transport.set_onboard_controller(1, "mellinger")
 transport.cmd_full_state(1, (0.1, 0.2, 0.3), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
 transport.cmd_velocity_world(1, 1.0, 0.0, 0.0)
 transport.notify_setpoint_stop(1)
+transport.stop_high_level_commander(1)
 assert ("takeoff", 0.5, 2.0) in link_manager.get(1).calls
 assert ("goTo", (1.0, 2.0, 0.5), 0.0, 1.5) in link_manager.get(1).calls
 assert ("setParam", "stabilizer.controller", 2) in link_manager.get(1).calls
-assert link_manager.get(1).calls[-2][0] == "cmdFullState"
-assert link_manager.get(1).calls[-1] == ("notifySetpointsStop",)
+assert link_manager.get(1).calls[-3][0] == "cmdFullState"
+assert link_manager.get(1).calls[-2] == ("notifySetpointsStop",)
+assert link_manager.get(1).calls[-1] == ("stop",)
 assert transport.last_velocity_command_time(1) is not None
 
 failure = transport.classify_command_failure(

@@ -19,6 +19,8 @@ assert config.control.damping_coeff == 0.05
 assert config.control.max_acceleration == 2.0
 assert config.control.full_state_position_smoothing_alpha == 0.45
 assert config.control.full_state_max_position_step == 0.04
+assert config.control.full_state_warmup_s == 1.0
+assert config.control.full_state_warmup_rate_hz == 20.0
 assert config.control.active_follower_ids == [5]
 assert config.comm.telemetry_queue_max == 4096
 assert config.comm.telemetry_flush_every_n == 50
@@ -35,6 +37,9 @@ assert config.safety.fast_gate_group_degrade_enabled is True
 assert config.safety.pose_jitter_threshold == 0.05
 assert config.safety.estimator_variance_window_s == 1.0
 assert config.safety.lighthouse_required_method is None
+assert config.safety.runtime_pose_jump_threshold == 0.35
+assert config.safety.runtime_pose_speed_threshold == 3.0
+assert config.safety.runtime_vertical_speed_threshold == 1.5
 assert config.mission.leader_motion.trajectory_type == "poly4d_compressed"
 assert config.mission.leader_motion.trajectory_sample_dt == 0.1334
 
@@ -85,6 +90,22 @@ try:
     raise AssertionError("Expected full_state_max_position_step validation to fail")
 except ValueError as exc:
     assert "full_state_max_position_step" in str(exc)
+
+bad_full_state_warmup = ConfigLoader.load("config")
+bad_full_state_warmup.control.full_state_warmup_rate_hz = 0.0
+try:
+    ConfigLoader._validate(bad_full_state_warmup)
+    raise AssertionError("Expected full_state_warmup_rate_hz validation to fail")
+except ValueError as exc:
+    assert "full_state_warmup_rate_hz" in str(exc)
+
+bad_pose_jump = ConfigLoader.load("config")
+bad_pose_jump.safety.runtime_pose_jump_threshold = -1.0
+try:
+    ConfigLoader._validate(bad_pose_jump)
+    raise AssertionError("Expected runtime_pose_jump_threshold validation to fail")
+except ValueError as exc:
+    assert "runtime_pose_jump_threshold" in str(exc)
 
 bad_active_followers = ConfigLoader.load("config")
 bad_active_followers.control.active_follower_ids = [1]

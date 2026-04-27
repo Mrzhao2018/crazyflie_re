@@ -113,6 +113,78 @@ class RealMissionApp:
         follower_set = set(self.comp["fleet"].follower_ids())
         return [int(drone_id) for drone_id in configured if int(drone_id) in follower_set]
 
+    def _stop_high_level_commander(self, drone_id: int) -> None:
+        stop_fn = getattr(self.transport, "stop_high_level_commander", None)
+        if not callable(stop_fn):
+            return
+        stop_fn(drone_id)
+        if self.telemetry is not None:
+            self.telemetry.record_event(
+                "stop_high_level_commander",
+                ok=True,
+                drone_id=int(drone_id),
+            )
+
+    def _warmup_full_state_followers(self, follower_ids: list[int]) -> None:
+        control = self.comp["config"].control
+        duration_s = float(getattr(control, "full_state_warmup_s", 0.0))
+        if duration_s <= 0.0 or not follower_ids:
+            return
+
+        snapshot = self.comp["pose_bus"].latest()
+        if snapshot is None:
+            raise RuntimeError("full_state warmup requires a fresh pose snapshot")
+
+        targets: dict[int, np.ndarray] = {}
+        for drone_id in follower_ids:
+            idx = self.comp["fleet"].id_to_index(drone_id)
+            if not snapshot.fresh_mask[idx]:
+                raise RuntimeError(
+                    f"full_state warmup requires fresh pose for drone {drone_id}"
+                )
+            targets[int(drone_id)] = np.array(snapshot.positions[idx], dtype=float)
+
+        from ..runtime.command_plan import FollowerAction
+
+        rate_hz = float(getattr(control, "full_state_warmup_rate_hz", 20.0))
+        period_s = 1.0 / max(rate_hz, 1e-6)
+        deadline = time.monotonic() + duration_s
+        ticks = 0
+        while time.monotonic() < deadline:
+            actions = [
+                FollowerAction(
+                    kind="full_state",
+                    drone_id=drone_id,
+                    velocity=np.zeros(3, dtype=float),
+                    position=target,
+                    acceleration=np.zeros(3, dtype=float),
+                )
+                for drone_id, target in targets.items()
+            ]
+            result = self.comp["follower_executor"].execute_velocity(actions)
+            ticks += 1
+            failures = result.get("failures") or []
+            if failures:
+                self.telemetry_reporter.record_executor_summary(
+                    "full_state_warmup_execution", [result]
+                )
+                raise RuntimeError(f"full_state warmup failed: {failures}")
+            time.sleep(period_s)
+
+        if self.telemetry is not None:
+            self.telemetry.record_event(
+                "full_state_warmup",
+                ok=True,
+                drone_ids=[int(drone_id) for drone_id in follower_ids],
+                duration_s=duration_s,
+                rate_hz=rate_hz,
+                ticks=ticks,
+                target_positions={
+                    int(drone_id): target.tolist()
+                    for drone_id, target in targets.items()
+                },
+            )
+
     def _record_error_event(
         self,
         *,
@@ -234,6 +306,8 @@ class RealMissionApp:
             total_phases += 1
         if output_mode == "full_state" and onboard_ctrl != "pid":
             total_phases += 1
+            if getattr(self.comp["config"].control, "full_state_warmup_s", 0.0) > 0:
+                total_phases += 1
         self._progress.set_total_phases(total_phases)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -836,6 +910,7 @@ class RealMissionApp:
                     drone_id = None
                     try:
                         for drone_id in follower_ids:
+                            self._stop_high_level_commander(drone_id)
                             self.comp["transport"].set_onboard_controller(
                                 drone_id, onboard_ctrl
                             )
@@ -896,6 +971,32 @@ class RealMissionApp:
                             trigger_error=MissionErrors.Readiness.STARTUP_FAILED,
                         )
                         raise _StartupAborted("runtime onboard controller switch failed")
+
+                if getattr(self.comp["config"].control, "full_state_warmup_s", 0.0) > 0:
+                    with self._phase(
+                        "full_state_warmup",
+                        "full-state 接管预热",
+                        total=len(follower_ids),
+                    ):
+                        try:
+                            self._warmup_full_state_followers(follower_ids)
+                        except Exception as exc:
+                            self.comp["telemetry"].record_event(
+                                "full_state_warmup",
+                                ok=False,
+                                error=str(exc),
+                                drone_ids=follower_ids,
+                            )
+                            self._record_error_event(
+                                definition=MissionErrors.Readiness.STARTUP_FAILED,
+                                message="full_state 接管预热失败",
+                                exception=exc,
+                                output_mode=output_mode,
+                            )
+                            self._emergency_land(
+                                trigger_error=MissionErrors.Readiness.STARTUP_FAILED,
+                            )
+                            raise _StartupAborted("full_state warmup failed")
 
             if startup_mode == "manual_leader":
                 self._initialize_manual_mode(snapshot)
@@ -1082,6 +1183,12 @@ class RealMissionApp:
                     if callable(health_window_fn)
                     else None
                 )
+                pose_window_fn = getattr(self.comp["pose_bus"], "recent_samples", None)
+                pose_window = (
+                    pose_window_fn(self.comp["config"].safety.estimator_variance_window_s)
+                    if callable(pose_window_fn)
+                    else None
+                )
                 safety_decision = safety.evaluate(
                     snapshot,
                     frame,
@@ -1089,6 +1196,7 @@ class RealMissionApp:
                     follower_ref,
                     health=health_latest,
                     health_window=health_window,
+                    pose_window=pose_window,
                     ignored_disconnected_ids=set(
                         self.failure_policy.watchdog_degraded_followers
                     ),

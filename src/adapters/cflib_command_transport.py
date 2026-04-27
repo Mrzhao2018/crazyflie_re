@@ -290,6 +290,11 @@ class CflibCommandTransport:
         scf = self.link_manager.get(drone_id)
         scf.cf.commander.send_notify_setpoint_stop()
 
+    def stop_high_level_commander(self, drone_id: int):
+        """停止 high-level commander，避免切入 streaming setpoint 时模式残留。"""
+        scf = self.link_manager.get(drone_id)
+        scf.cf.high_level_commander.stop()
+
     def hl_define_trajectory(
         self,
         drone_id: int,

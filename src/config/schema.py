@@ -142,6 +142,9 @@ class SafetyConfig:
     lighthouse_required_method: int | None = None
     min_inter_drone_distance: float = 0.15
     inter_drone_separation_action: Literal["telemetry", "hold"] = "telemetry"
+    runtime_pose_jump_threshold: float = 0.35
+    runtime_pose_speed_threshold: float = 3.0
+    runtime_vertical_speed_threshold: float = 1.5
     min_vbat: float = 3.15
     min_vbat_abort_samples: int = 5
     min_vbat_window_s: float = 3.0
@@ -183,6 +186,8 @@ class ControlConfig:
     delay_prediction_gain: float = 1.0
     full_state_position_smoothing_alpha: float = 0.45
     full_state_max_position_step: float = 0.04
+    full_state_warmup_s: float = 1.0
+    full_state_warmup_rate_hz: float = 20.0
     # 实机排障用：只让指定 follower 起飞、切 runtime controller 并接收 follower
     # setpoint。None 表示启用全部 follower。
     active_follower_ids: list[int] | None = None

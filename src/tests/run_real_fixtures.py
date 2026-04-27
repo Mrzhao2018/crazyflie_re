@@ -203,6 +203,9 @@ class FakeTransport:
     def notify_setpoint_stop(self, drone_id):
         self.high_level_calls.append(("notify_stop", drone_id))
 
+    def stop_high_level_commander(self, drone_id):
+        self.high_level_calls.append(("stop_hl", drone_id))
+
     def last_velocity_command_time(self, drone_id):
         return self._last_velocity_command_time.get(drone_id)
 
@@ -426,6 +429,7 @@ class FakeSafety:
         follower_ref=None,
         health=None,
         health_window=None,
+        pose_window=None,
         ignored_disconnected_ids=None,
     ):
         idx = min(self.calls, len(self.decisions) - 1)

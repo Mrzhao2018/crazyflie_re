@@ -27,6 +27,9 @@ class FakeHighLevelCommander:
     def go_to(self, x, y, z, yaw, duration):
         self.calls.append(("go_to", x, y, z, yaw, duration))
 
+    def stop(self):
+        self.calls.append(("stop",))
+
     def define_trajectory(self, trajectory_id, offset, n_pieces, type=0):
         self.calls.append(("define_trajectory", trajectory_id, offset, n_pieces, type))
 
@@ -123,6 +126,9 @@ assert calls[-1][1] == 7
 transport.cmd_velocity_world(1, 0.1, 0.2, 0.3)
 assert link_manager.scfs[1].cf.commander.calls[-1] == ("velocity", 0.1, 0.2, 0.3, 0)
 assert transport.last_velocity_command_time(1) is not None
+
+transport.stop_high_level_commander(1)
+assert link_manager.scfs[1].cf.high_level_commander.calls[-1] == ("stop",)
 
 executor = LeaderExecutor(transport)
 results = executor.execute(

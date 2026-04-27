@@ -310,6 +310,13 @@ class CrazyswarmSimCommandTransport:
         with self.link_manager.pause_spin():
             self.link_manager.get(drone_id).notifySetpointsStop()
 
+    def stop_high_level_commander(self, drone_id: int):
+        with self.link_manager.pause_spin():
+            cf = self.link_manager.get(drone_id)
+            stop = getattr(cf, "stop", None)
+            if callable(stop):
+                stop()
+
     def hl_define_trajectory(
         self,
         drone_id: int,

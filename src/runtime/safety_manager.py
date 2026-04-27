@@ -67,6 +67,7 @@ class SafetyManager:
         follower_ref=None,
         health: dict | None = None,
         health_window: dict | None = None,
+        pose_window: dict[int, list[tuple[float, np.ndarray]]] | None = None,
         ignored_disconnected_ids: set[int] | None = None,
     ) -> SafetyDecision:
         """评估安全状态"""
@@ -161,7 +162,46 @@ class SafetyManager:
                         norm=norm,
                     )
 
-        # 6. 检查健康状态
+        # 6. 运行时 pose 跳变 / 垂直速度门控。Lighthouse/EKF 瞬时跳点时，
+        # 继续追随 reference 会把错误反馈放大；先 HOLD 交给上层超时落地。
+        if pose_window:
+            jump_thr = float(getattr(self.config, "runtime_pose_jump_threshold", 0.0))
+            speed_thr = float(getattr(self.config, "runtime_pose_speed_threshold", 0.0))
+            vz_thr = float(getattr(self.config, "runtime_vertical_speed_threshold", 0.0))
+            if jump_thr > 0 or speed_thr > 0 or vz_thr > 0:
+                for drone_id, samples in pose_window.items():
+                    if len(samples) < 2:
+                        continue
+                    ordered = sorted(samples, key=lambda item: item[0])
+                    t_prev, p_prev = ordered[-2]
+                    t_cur, p_cur = ordered[-1]
+                    dt = float(t_cur) - float(t_prev)
+                    if dt <= 1e-6:
+                        continue
+                    delta = np.asarray(p_cur, dtype=float) - np.asarray(p_prev, dtype=float)
+                    jump = float(np.linalg.norm(delta))
+                    speed = jump / dt
+                    vertical_speed = abs(float(delta[2])) / dt
+                    if (
+                        (jump_thr > 0 and jump > jump_thr)
+                        or (speed_thr > 0 and speed > speed_thr)
+                        or (vz_thr > 0 and vertical_speed > vz_thr)
+                    ):
+                        add_reason(
+                            "POSE_JUMP",
+                            "HOLD",
+                            f"Drone {drone_id} pose jump detected",
+                            drone_id=drone_id,
+                            jump=jump,
+                            speed=speed,
+                            vertical_speed=vertical_speed,
+                            dt=dt,
+                            jump_threshold=jump_thr,
+                            speed_threshold=speed_thr,
+                            vertical_speed_threshold=vz_thr,
+                        )
+
+        # 7. 检查健康状态
         if health is not None and self.config.min_vbat > 0:
             low_required = max(1, int(getattr(self.config, "min_vbat_abort_samples", 1)))
             critical = float(getattr(self.config, "min_vbat_critical", 0.0))
@@ -208,7 +248,7 @@ class SafetyManager:
                         sustained_low=sustained_low,
                     )
 
-        # 7. 检查 onboard EKF 置信度（kalman variance）
+        # 8. 检查 onboard EKF 置信度（kalman variance）
         if health is not None and self.config.estimator_variance_threshold > 0:
             thr = float(self.config.estimator_variance_threshold)
             for drone_id, sample in health.items():
@@ -231,7 +271,7 @@ class SafetyManager:
                         threshold=thr,
                     )
 
-        # 8. 互机距离观测。默认只进 telemetry，不主动避障或 HOLD。
+        # 9. 互机距离观测。默认只进 telemetry，不主动避障或 HOLD。
         if self.config.min_inter_drone_distance > 0:
             min_pair = None
             min_distance = None
