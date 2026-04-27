@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="900" viewBox="0 0 1100 900">
+  <defs>
+    <style>
+      .bg { fill: #fbfbf8; }
+      .grid { stroke: #e3e3dc; stroke-width: 1; }
+      .axis { stroke: #333333; stroke-width: 2; marker-end: url(#arrow); }
+      .edge { stroke: #8a8a8a; stroke-width: 2; stroke-dasharray: 6 6; }
+      .leader { fill: #1f77b4; stroke: #0e3d61; stroke-width: 3; }
+      .follower { fill: #ffb000; stroke: #8a5a00; stroke-width: 3; }
+      .origin { fill: #ffffff; stroke: #333333; stroke-width: 2; }
+      .label { font-family: Arial, Helvetica, sans-serif; font-size: 18px; fill: #111111; font-weight: 700; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 13px; fill: #222222; }
+      .tiny { font-family: Arial, Helvetica, sans-serif; font-size: 12px; fill: #444444; }
+      .title { font-family: Arial, Helvetica, sans-serif; font-size: 28px; fill: #111111; font-weight: 700; }
+      .subtitle { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #333333; }
+      .box { fill: #ffffff; stroke: #cccccc; stroke-width: 1.5; rx: 8; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#333333"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1100" height="900"/>
+
+  <text class="title" x="50" y="52">Crazyflie ground layout: tetrahedron_edges</text>
+  <text class="subtitle" x="50" y="80">XY projection for floor placement. +Y is forward, +X is right. Units are meters in Lighthouse/world frame.</text>
+
+  <!-- Plot area and grid. Origin maps to (500,520), scale = 300 px/m. -->
+  <rect class="box" x="160" y="125" width="680" height="610"/>
+  <line class="grid" x1="200" y1="520" x2="820" y2="520"/>
+  <line class="grid" x1="500" y1="150" x2="500" y2="710"/>
+  <line class="grid" x1="350" y1="150" x2="350" y2="710"/>
+  <line class="grid" x1="650" y1="150" x2="650" y2="710"/>
+  <line class="grid" x1="200" y1="370" x2="820" y2="370"/>
+  <line class="grid" x1="200" y1="670" x2="820" y2="670"/>
+
+  <!-- Axes. -->
+  <line class="axis" x1="500" y1="520" x2="790" y2="520"/>
+  <line class="axis" x1="500" y1="520" x2="500" y2="175"/>
+  <text class="label" x="795" y="526">+X</text>
+  <text class="label" x="510" y="178">+Y</text>
+  <circle class="origin" cx="500" cy="520" r="6"/>
+  <text class="tiny" x="510" y="540">origin (0,0)</text>
+
+  <!-- Tetrahedron leader edges in ground projection. -->
+  <line class="edge" x1="500" y1="205" x2="227" y2="677.5"/>
+  <line class="edge" x1="500" y1="205" x2="773" y2="677.5"/>
+  <line class="edge" x1="227" y1="677.5" x2="773" y2="677.5"/>
+  <line class="edge" x1="500" y1="205" x2="500" y2="520"/>
+  <line class="edge" x1="227" y1="677.5" x2="500" y2="520"/>
+  <line class="edge" x1="773" y1="677.5" x2="500" y2="520"/>
+
+  <!-- Leader points. -->
+  <circle class="leader" cx="500" cy="205" r="24"/>
+  <text class="label" x="500" y="211" text-anchor="middle">1</text>
+  <text class="small" x="500" y="244" text-anchor="middle">leader</text>
+  <text class="tiny" x="500" y="262" text-anchor="middle">r0 ch60 E701</text>
+  <text class="tiny" x="500" y="280" text-anchor="middle">(0.000, 1.050)</text>
+
+  <circle class="leader" cx="227" cy="677.5" r="24"/>
+  <text class="label" x="227" y="684" text-anchor="middle">4</text>
+  <text class="small" x="227" y="715" text-anchor="middle">leader</text>
+  <text class="tiny" x="227" y="733" text-anchor="middle">r1 ch110 E701</text>
+  <text class="tiny" x="227" y="751" text-anchor="middle">(-0.910, -0.525)</text>
+
+  <circle class="leader" cx="773" cy="677.5" r="24"/>
+  <text class="label" x="773" y="684" text-anchor="middle">7</text>
+  <text class="small" x="773" y="715" text-anchor="middle">leader</text>
+  <text class="tiny" x="773" y="733" text-anchor="middle">r2 ch80 E701</text>
+  <text class="tiny" x="773" y="751" text-anchor="middle">(0.910, -0.525)</text>
+
+  <circle class="leader" cx="500" cy="520" r="24"/>
+  <text class="label" x="500" y="526" text-anchor="middle">8</text>
+  <text class="small" x="500" y="555" text-anchor="middle">leader / apex</text>
+  <text class="tiny" x="500" y="573" text-anchor="middle">r2 ch80 E702</text>
+  <text class="tiny" x="500" y="591" text-anchor="middle">(0.000, 0.000)</text>
+
+  <!-- Follower points. -->
+  <circle class="follower" cx="363.5" cy="441.4" r="21"/>
+  <text class="label" x="363.5" y="447" text-anchor="middle">2</text>
+  <text class="small" x="310" y="410" text-anchor="middle">follower</text>
+  <text class="tiny" x="310" y="428" text-anchor="middle">r0 ch60 E702</text>
+  <text class="tiny" x="310" y="446" text-anchor="middle">(-0.455, 0.262)</text>
+
+  <circle class="follower" cx="636.5" cy="441.4" r="21"/>
+  <text class="label" x="636.5" y="447" text-anchor="middle">3</text>
+  <text class="small" x="690" y="410" text-anchor="middle">follower</text>
+  <text class="tiny" x="690" y="428" text-anchor="middle">r0 ch60 E703</text>
+  <text class="tiny" x="690" y="446" text-anchor="middle">(0.455, 0.262)</text>
+
+  <circle class="follower" cx="500" cy="677.5" r="21"/>
+  <text class="label" x="500" y="683" text-anchor="middle">5</text>
+  <text class="small" x="500" y="712" text-anchor="middle">follower</text>
+  <text class="tiny" x="500" y="730" text-anchor="middle">r1 ch110 E702</text>
+  <text class="tiny" x="500" y="748" text-anchor="middle">(0.000, -0.525)</text>
+
+  <circle class="follower" cx="500" cy="362.5" r="21"/>
+  <text class="label" x="500" y="368" text-anchor="middle">6</text>
+  <text class="small" x="500" y="330" text-anchor="middle">follower</text>
+  <text class="tiny" x="500" y="348" text-anchor="middle">r1 ch110 E703</text>
+  <text class="tiny" x="500" y="386" text-anchor="middle">(0.000, 0.525)</text>
+
+  <circle class="follower" cx="363.5" cy="598.6" r="21"/>
+  <text class="label" x="363.5" y="604" text-anchor="middle">9</text>
+  <text class="small" x="310" y="570" text-anchor="middle">follower</text>
+  <text class="tiny" x="310" y="588" text-anchor="middle">r2 ch80 E703</text>
+  <text class="tiny" x="310" y="626" text-anchor="middle">(-0.455, -0.262)</text>
+
+  <circle class="follower" cx="636.5" cy="598.6" r="21"/>
+  <text class="label" x="636.5" y="604" text-anchor="middle">10</text>
+  <text class="small" x="690" y="570" text-anchor="middle">follower</text>
+  <text class="tiny" x="690" y="588" text-anchor="middle">r2 ch80 E704</text>
+  <text class="tiny" x="690" y="626" text-anchor="middle">(0.455, -0.262)</text>
+
+  <!-- Legend and notes. -->
+  <rect class="box" x="865" y="125" width="200" height="230"/>
+  <text class="label" x="885" y="155">Legend</text>
+  <circle class="leader" cx="890" cy="190" r="13"/>
+  <text class="small" x="915" y="195">leader</text>
+  <circle class="follower" cx="890" cy="225" r="13"/>
+  <text class="small" x="915" y="230">follower</text>
+  <line class="edge" x1="875" y1="260" x2="930" y2="260"/>
+  <text class="small" x="940" y="265">tetra edge</text>
+  <text class="tiny" x="885" y="305">Radio label:</text>
+  <text class="tiny" x="885" y="323">rN chXX E70Y</text>
+  <text class="tiny" x="885" y="341">= radio://N/XX/...E70Y</text>
+
+  <rect class="box" x="50" y="785" width="1015" height="70"/>
+  <text class="subtitle" x="70" y="813">Placement tip: tape the origin first, then measure each XY point from it. All drones can sit on the floor; Z is the target height after takeoff.</text>
+  <text class="subtitle" x="70" y="838">Keep the Lighthouse deck visible. Leaders 1/4/7/8 are critical; do not swap their IDs.</text>
+</svg>

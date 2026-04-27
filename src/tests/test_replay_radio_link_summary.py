@@ -19,6 +19,10 @@ def _record(seq: int, link: dict | None) -> dict:
         "phase_label": "formation_run",
         "follower_command_norms": {},
         "radio_link_quality": link if link is not None else {},
+        "scheduler_diagnostics": {
+            "group_health_scores": {0: 85.0 - seq, 1: 45.0 + seq},
+            "link_quality_backoff_groups": [1] if seq % 2 == 0 else [],
+        },
     }
 
 
@@ -40,6 +44,8 @@ assert per_drone["1"]["count"] == 4
 assert per_drone["1"]["mean"] == (95.0 + 90.0 + 92.0 + 88.0) / 4
 assert per_drone["1"]["min"] == 88.0
 assert per_drone["2"]["min"] == 50.0
+assert link_summary["per_group"]["1"]["min_score"] == 45.0
+assert link_summary["per_group"]["1"]["backoff_count"] == 2
 
 # 整体 min / mean 应覆盖所有 drone 的样本
 overall = link_summary["overall"]

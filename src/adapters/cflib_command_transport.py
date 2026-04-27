@@ -6,7 +6,13 @@ import logging
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from cflib.crazyflie.mem import MemoryElement, Poly4D
+import numpy as np
+from cflib.crazyflie.mem import (
+    CompressedSegment,
+    CompressedStart,
+    MemoryElement,
+    Poly4D,
+)
 from cflib.utils.reset_estimator import reset_estimator
 
 logger = logging.getLogger(__name__)
@@ -14,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 POLY4D_RAW_PIECE_BYTES = 132
 TRAJECTORY_MEMORY_BYTES = 4096
+TRAJECTORY_MAX_PIECES = 255
+TRAJECTORY_TYPE_POLY4D = 0
+TRAJECTORY_TYPE_POLY4D_COMPRESSED = 1
 
 # cflib `send_full_state_setpoint` 内部把 pos/vel/acc 乘 1000 量化成 int16（见
 # cflib/crazyflie/commander.py ~ L203）。可表示范围 [-32.767, +32.767]，我们留
@@ -46,6 +55,94 @@ def _validate_full_state_vector(name: str, vec) -> None:
                 f"full_state {name}.{axis}={value} exceeds int16 quantization "
                 f"range (|v| <= {FULL_STATE_INT16_LIMIT})"
             )
+
+
+def _poly_coefficients(values) -> list[float]:
+    coeffs = [float(value) for value in values]
+    if len(coeffs) != 8:
+        raise ValueError(f"trajectory polynomial must have 8 coefficients, got {len(coeffs)}")
+    return coeffs
+
+
+def _effective_power_degree(coeffs: list[float], *, eps: float = 1e-9) -> int:
+    for degree in range(len(coeffs) - 1, 0, -1):
+        if abs(coeffs[degree]) > eps:
+            return degree
+    return 0
+
+
+def _bernstein_row(degree: int, u: float) -> list[float]:
+    return [
+        math.comb(degree, i) * (u ** i) * ((1.0 - u) ** (degree - i))
+        for i in range(degree + 1)
+    ]
+
+
+def _power_to_bezier_points(coeffs: list[float], duration: float, degree: int) -> list[float]:
+    if degree == 0:
+        return [coeffs[0]]
+    u_values = [i / degree for i in range(degree + 1)]
+    bernstein = np.array([_bernstein_row(degree, u) for u in u_values], dtype=float)
+    values = np.array(
+        [
+            sum(coeffs[k] * ((duration * u) ** k) for k in range(len(coeffs)))
+            for u in u_values
+        ],
+        dtype=float,
+    )
+    return [float(value) for value in np.linalg.solve(bernstein, values)]
+
+
+def _compressed_element_for_poly(values, duration: float) -> list[float]:
+    coeffs = _poly_coefficients(values)
+    power_degree = _effective_power_degree(coeffs)
+    if power_degree == 0:
+        return []
+    if power_degree == 1:
+        return [_power_to_bezier_points(coeffs, duration, 1)[1]]
+    if power_degree <= 3:
+        return _power_to_bezier_points(coeffs, duration, 3)[1:]
+    return _power_to_bezier_points(coeffs, duration, 7)[1:]
+
+
+def _compressed_trajectory_elements(pieces: list) -> list:
+    if not pieces:
+        return []
+    first = pieces[0]
+    elements = [
+        CompressedStart(
+            float(_poly_coefficients(first.x)[0]),
+            float(_poly_coefficients(first.y)[0]),
+            float(_poly_coefficients(first.z)[0]),
+            float(_poly_coefficients(first.yaw)[0]),
+        )
+    ]
+    for piece in pieces:
+        duration = float(piece.duration)
+        elements.append(
+            CompressedSegment(
+                duration,
+                _compressed_element_for_poly(piece.x, duration),
+                _compressed_element_for_poly(piece.y, duration),
+                _compressed_element_for_poly(piece.z, duration),
+                _compressed_element_for_poly(piece.yaw, duration),
+            )
+        )
+    return elements
+
+
+def estimate_trajectory_bytes(pieces: list, trajectory_type: str = "poly4d") -> int:
+    if trajectory_type == "poly4d_compressed":
+        return sum(len(element.pack()) for element in _compressed_trajectory_elements(pieces))
+    return len(pieces) * POLY4D_RAW_PIECE_BYTES
+
+
+def trajectory_define_type(trajectory_type: str) -> int:
+    if trajectory_type == "poly4d_compressed":
+        return TRAJECTORY_TYPE_POLY4D_COMPRESSED
+    if trajectory_type == "poly4d":
+        return TRAJECTORY_TYPE_POLY4D
+    raise ValueError(f"Unsupported trajectory_type: {trajectory_type}")
 
 
 class CflibCommandTransport:
@@ -152,7 +249,7 @@ class CflibCommandTransport:
     ):
         """Full-state setpoint：pos + vel + acc，onboard Mellinger/INDI 做闭环。
 
-        姿态 / 角速度 / 角加速度目前都喂零，让 onboard 自主解算。
+        姿态固定为 identity quaternion，角速度喂 0，让 onboard 自主解算。
 
         会在下发前 reject NaN/Inf 与任意分量 |v| > ``FULL_STATE_INT16_LIMIT`` 的
         输入。cflib 的 `send_full_state_setpoint` 会把三组向量量化成 int16 mm/
@@ -170,8 +267,9 @@ class CflibCommandTransport:
             list(vel),
             list(acc),
             [0.0, 0.0, 0.0, 1.0],  # quaternion (x,y,z,w) identity
-            [0.0, 0.0, 0.0],        # body rates
-            [0.0, 0.0, 0.0],        # body accelerations
+            0.0,                    # rollrate deg/s
+            0.0,                    # pitchrate deg/s
+            0.0,                    # yawrate deg/s
         )
         self._mark_velocity_command(drone_id)
 
@@ -193,11 +291,26 @@ class CflibCommandTransport:
         scf.cf.commander.send_notify_setpoint_stop()
 
     def hl_define_trajectory(
-        self, drone_id: int, trajectory_id: int, offset: int, n_pieces: int
+        self,
+        drone_id: int,
+        trajectory_id: int,
+        offset: int,
+        n_pieces: int,
+        trajectory_type: str = "poly4d",
     ):
         """定义已上传轨迹"""
+        if n_pieces > TRAJECTORY_MAX_PIECES:
+            raise RuntimeError(
+                f"Trajectory has too many pieces for drone {drone_id}: "
+                f"{n_pieces} > {TRAJECTORY_MAX_PIECES}"
+            )
         scf = self.link_manager.get(drone_id)
-        scf.cf.high_level_commander.define_trajectory(trajectory_id, offset, n_pieces)
+        scf.cf.high_level_commander.define_trajectory(
+            trajectory_id,
+            offset,
+            n_pieces,
+            type=trajectory_define_type(trajectory_type),
+        )
         logger.info("Drone %s define trajectory %s", drone_id, trajectory_id)
 
     def hl_start_trajectory(
@@ -226,7 +339,11 @@ class CflibCommandTransport:
         scf.wait_for_params()
 
     def upload_trajectory(
-        self, drone_id: int, pieces: list, start_addr: int = 0
+        self,
+        drone_id: int,
+        pieces: list,
+        start_addr: int = 0,
+        trajectory_type: str = "poly4d",
     ) -> int:
         """上传 trajectory content 到内存，返回 piece 数量"""
         scf = self.link_manager.get(drone_id)
@@ -234,7 +351,12 @@ class CflibCommandTransport:
         if not trajectory_mems:
             raise RuntimeError(f"Drone {drone_id} has no trajectory memory")
 
-        estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
+        if len(pieces) > TRAJECTORY_MAX_PIECES:
+            raise RuntimeError(
+                f"Trajectory has too many pieces for drone {drone_id}: "
+                f"{len(pieces)} > {TRAJECTORY_MAX_PIECES}"
+            )
+        estimated_bytes = estimate_trajectory_bytes(pieces, trajectory_type)
         if start_addr + estimated_bytes > TRAJECTORY_MEMORY_BYTES:
             raise RuntimeError(
                 "Trajectory too large for drone "
@@ -243,13 +365,16 @@ class CflibCommandTransport:
             )
 
         trajectory_mem = trajectory_mems[0]
-        trajectory_mem.trajectory = []
-        for piece in pieces:
-            x = Poly4D.Poly(piece.x)
-            y = Poly4D.Poly(piece.y)
-            z = Poly4D.Poly(piece.z)
-            yaw = Poly4D.Poly(piece.yaw)
-            trajectory_mem.trajectory.append(Poly4D(piece.duration, x, y, z, yaw))
+        if trajectory_type == "poly4d_compressed":
+            trajectory_mem.trajectory = _compressed_trajectory_elements(pieces)
+        else:
+            trajectory_mem.trajectory = []
+            for piece in pieces:
+                x = Poly4D.Poly(piece.x)
+                y = Poly4D.Poly(piece.y)
+                z = Poly4D.Poly(piece.z)
+                yaw = Poly4D.Poly(piece.yaw)
+                trajectory_mem.trajectory.append(Poly4D(piece.duration, x, y, z, yaw))
 
         success = trajectory_mem.write_data_sync(start_addr=start_addr)
         if not success:
@@ -258,9 +383,9 @@ class CflibCommandTransport:
         logger.info(
             "Drone %s uploaded trajectory with %d pieces",
             drone_id,
-            len(trajectory_mem.trajectory),
+            len(pieces),
         )
-        return len(trajectory_mem.trajectory)
+        return len(pieces)
 
     def upload_trajectories_by_group(
         self,
@@ -281,16 +406,26 @@ class CflibCommandTransport:
                 pieces = grouped_spec.get("pieces", [])
                 start_addr = int(grouped_spec.get("start_addr", 0))
                 trajectory_id = int(grouped_spec.get("trajectory_id", 1))
+                trajectory_type = str(grouped_spec.get("trajectory_type", "poly4d"))
                 piece_count = self.upload_trajectory(
-                    grouped_drone_id, pieces, start_addr=start_addr
+                    grouped_drone_id,
+                    pieces,
+                    start_addr=start_addr,
+                    trajectory_type=trajectory_type,
                 )
                 self.hl_define_trajectory(
-                    grouped_drone_id, trajectory_id, start_addr, piece_count
+                    grouped_drone_id,
+                    trajectory_id,
+                    start_addr,
+                    piece_count,
+                    trajectory_type=trajectory_type,
                 )
                 results[grouped_drone_id] = {
                     "piece_count": piece_count,
                     "trajectory_id": trajectory_id,
                     "start_addr": start_addr,
+                    "trajectory_type": trajectory_type,
+                    "estimated_bytes": estimate_trajectory_bytes(pieces, trajectory_type),
                 }
             return results
 

@@ -51,6 +51,9 @@ class CommandScheduler:
         self._link_quality_deadband_scale = float(
             getattr(config, "link_quality_deadband_scale", 1.0)
         )
+        self._min_stream_keepalive_hz = float(
+            getattr(config, "min_stream_keepalive_hz", 0.0)
+        )
         self.last_pose_seq_by_group: dict[int, int] = {}
         self.last_follower_tx_time: dict[int, float] = {}
         self.last_leader_update_time = 0.0
@@ -91,9 +94,14 @@ class CommandScheduler:
         ):
             return None
         try:
-            return self._link_quality_provider(group_id)
+            value = self._link_quality_provider(group_id)
         except Exception:
             return None
+        if isinstance(value, dict):
+            value = value.get("score")
+        if value is None:
+            return None
+        return float(value)
 
     def _group_is_degraded(self, group_id: int) -> bool:
         quality = self._link_quality_for_group(group_id)
@@ -103,7 +111,10 @@ class CommandScheduler:
 
     def _follower_tx_interval_for_group(self, group_id: int) -> float:
         if self._group_is_degraded(group_id):
-            return self.follower_tx_interval * self._link_quality_backoff_scale
+            interval = self.follower_tx_interval * self._link_quality_backoff_scale
+            if self._min_stream_keepalive_hz > 0:
+                interval = min(interval, 1.0 / self._min_stream_keepalive_hz)
+            return interval
         return self.follower_tx_interval
 
     def _deadband_for_drone(self, drone_id: int) -> float:
@@ -307,7 +318,9 @@ class CommandScheduler:
         sent_group_counts = {}
         blocked_group_counts = {}
         backoff_groups = []
+        group_health_scores = {}
         for group_id, group_commands in grouped_commands.items():
+            group_health_scores[group_id] = self._link_quality_for_group(group_id)
             if snapshot.seq <= self.last_pose_seq_by_group.get(group_id, -1):
                 stale_groups.append(group_id)
                 continue
@@ -360,6 +373,7 @@ class CommandScheduler:
         diagnostics["follower_tx_group_counts"] = sent_group_counts
         diagnostics["follower_tx_blocked_group_counts"] = blocked_group_counts
         diagnostics["link_quality_backoff_groups"] = sorted(set(backoff_groups))
+        diagnostics["group_health_scores"] = group_health_scores
 
         reason = "execute"
         if not actions and hold_actions:

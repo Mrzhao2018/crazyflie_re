@@ -166,4 +166,39 @@ plan_db = scheduler_db.plan(
 passed = sorted(a.drone_id for a in plan_db.follower_actions)
 assert passed == [6], f"坏链路的 drone 5 应被放大后的 deadband 拦截，实得 {passed}"
 
+# ---- group health score provider ---------------------------------------
+
+health_by_group = {
+    0: {"score": 35.0, "reason": "congestion"},
+    1: {"score": 90.0, "reason": "healthy"},
+}
+
+
+def health_provider(group_id: int):
+    return health_by_group.get(group_id)
+
+
+comm_health = CommConfig(
+    pose_log_freq=10.0,
+    follower_tx_freq=8.0,
+    leader_update_freq=1.0,
+    parked_hold_freq=0.5,
+    follower_cmd_deadband=0.0,
+    link_quality_soft_floor=60.0,
+    link_quality_backoff_scale=2.0,
+    link_quality_deadband_scale=3.0,
+    min_stream_keepalive_hz=2.0,
+)
+scheduler_health = CommandScheduler(
+    comm_health, fsm, fleet, link_quality_provider=health_provider
+)
+scheduler_health.last_follower_tx_time = {0: now - 0.15, 1: now - 0.15}
+scheduler_health.last_pose_seq_by_group = {0: -1, 1: -1}
+plan_health = scheduler_health.plan(
+    snapshot, MissionState.RUN, None, commands, safety
+)
+assert [action.drone_id for action in plan_health.follower_actions] == [6]
+assert plan_health.diagnostics["group_health_scores"][0] == 35.0
+assert 0 in plan_health.diagnostics["link_quality_backoff_groups"]
+
 print("[OK] CommandScheduler link_quality backoff + deadband scale verified")

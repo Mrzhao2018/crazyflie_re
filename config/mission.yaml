@@ -1,5 +1,5 @@
 duration: 40.0
-formation_type: "pyramid"
+formation_type: "tetrahedron_edges"
 leader_motion:
   mode: "affine_rotation"
   angular_rate: 0.15
@@ -10,10 +10,10 @@ leader_motion:
   trajectory_relative_position: false
   trajectory_relative_yaw: false
   trajectory_reversed: false
-  trajectory_type: "poly4d"
+  trajectory_type: "poly4d_compressed"  # poly4d 或 poly4d_compressed；compressed 不支持 reversed
   trajectory_start_addr: 0
   trajectory_pieces: []
-  trajectory_sample_dt: 1.2
+  trajectory_sample_dt: 0.1334
   condition_penalty_enabled: false
   condition_soft_limit: 100.0
   condition_penalty_scale: 0.0
@@ -31,13 +31,13 @@ phases:
     t_end: 40.0
     mode: "formation_run"
 nominal_positions:
-  - [ 1.05,  0.00, 0.35]   # leader 1
-  - [ 0.22, -0.20, 1.10]   # follower 2
-  - [ 0.48,  0.32, 0.95]   # follower 3
-  - [ 0.00,  1.05, 0.35]   # leader 4
-  - [ 0.00,  0.72, 0.82]   # follower 5
-  - [ 0.38, -0.24, 0.72]   # follower 6
-  - [-1.05,  0.00, 0.35]   # leader 7
-  - [ 0.00,  0.00, 1.60]   # leader 8
-  - [-0.48,  0.32, 0.95]   # follower 9
-  - [-0.38, -0.24, 0.72]   # follower 10
+  - [ 0.000,  1.050, 0.45]   # leader 1: tetrahedron base vertex
+  - [-0.455,  0.262, 0.45]   # follower 2: edge midpoint 1-4
+  - [ 0.455,  0.262, 0.45]   # follower 3: edge midpoint 1-7
+  - [-0.910, -0.525, 0.45]   # leader 4: tetrahedron base vertex
+  - [ 0.000, -0.525, 0.45]   # follower 5: edge midpoint 4-7
+  - [ 0.000,  0.525, 1.00]   # follower 6: edge midpoint 1-8
+  - [ 0.910, -0.525, 0.45]   # leader 7: tetrahedron base vertex
+  - [ 0.000,  0.000, 1.55]   # leader 8: tetrahedron apex
+  - [-0.455, -0.262, 1.00]   # follower 9: edge midpoint 4-8
+  - [ 0.455, -0.262, 1.00]   # follower 10: edge midpoint 7-8

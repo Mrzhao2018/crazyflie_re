@@ -9,6 +9,7 @@ from typing import Callable
 from . import (
     offline_reference_viz,
     replay_analysis,
+    run_ros2_sim,
     run_sim,
     trajectory_compare_runs,
     trajectory_comparison,
@@ -89,6 +90,12 @@ def _web_command(args: argparse.Namespace) -> int:
     return web_cli_entry.run(args)
 
 
+def _probe_full_state_command(args: argparse.Namespace) -> int:
+    from . import full_state_probe
+
+    return full_state_probe.run(args)
+
+
 def _command_handlers() -> dict[str, CommandHandler]:
     return {
         "run": _run_command,
@@ -98,6 +105,8 @@ def _command_handlers() -> dict[str, CommandHandler]:
         "compare": trajectory_comparison.run,
         "compare-runs": trajectory_compare_runs.run,
         "sim": run_sim.run,
+        "ros2-sim": run_ros2_sim.run,
+        "probe-full-state": _probe_full_state_command,
         "web": _web_command,
     }
 
@@ -188,6 +197,35 @@ def build_parser() -> argparse.ArgumentParser:
         "sim",
         help="运行最小离线控制链 smoke test",
         parents=[sim_parent],
+    )
+
+    ros2_sim_parser = subparsers.add_parser(
+        "ros2-sim",
+        help="运行 WSL Crazyswarm2/crazyflie_sim 后端任务",
+        parents=[run_parent],
+    )
+    run_ros2_sim.add_arguments(ros2_sim_parser)
+
+    probe_parser = subparsers.add_parser(
+        "probe-full-state",
+        help="单机 full-state/Mellinger 实机探针，不运行 AFC mission",
+        parents=[config_parent],
+    )
+    probe_parser.add_argument("--drone-id", type=int, default=5)
+    probe_parser.add_argument("--height", type=float, default=0.5)
+    probe_parser.add_argument("--takeoff-duration", type=float, default=2.0)
+    probe_parser.add_argument("--settle-s", type=float, default=1.0)
+    probe_parser.add_argument("--hold-s", type=float, default=5.0)
+    probe_parser.add_argument("--rate-hz", type=float, default=20.0)
+    probe_parser.add_argument("--abort-radius", type=float, default=0.35)
+    probe_parser.add_argument("--min-takeoff-z", type=float, default=0.3)
+    probe_parser.add_argument("--pose-timeout", type=float, default=3.0)
+    probe_parser.add_argument("--land-duration", type=float, default=3.0)
+    probe_parser.add_argument(
+        "--controller",
+        choices=["mellinger", "indi"],
+        default="mellinger",
+        help="起飞后切换的 onboard controller",
     )
 
     web_parser = subparsers.add_parser(

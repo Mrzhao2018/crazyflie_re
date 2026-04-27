@@ -232,15 +232,57 @@ components["config"].control.onboard_controller = "mellinger"
 
 def fail_on_second_controller_write(drone_id, controller):
     components["transport"].controller_calls.append((drone_id, controller))
-    if controller == "mellinger" and drone_id == 2:
+    if controller == "mellinger" and drone_id == 6:
         raise RuntimeError("partial write failed")
 
 
 components["transport"].set_onboard_controller = fail_on_second_controller_write
 app = RealMissionApp(components)
 assert app.start() is False
-assert (1, "mellinger") in components["transport"].controller_calls
-assert (1, "pid") in components["transport"].controller_calls
+assert components["transport"].controller_calls[:6] == [
+    (drone_id, "pid") for drone_id in components["fleet"].all_ids()
+]
+assert (5, "mellinger") in components["transport"].controller_calls
+assert (5, "pid") in components["transport"].controller_calls
+
+components = build_startup_components()
+components["config"].control.output_mode = "full_state"
+components["config"].control.onboard_controller = "mellinger"
+app = RealMissionApp(components)
+assert app.start() is True
+assert components["transport"].controller_calls == [
+    (drone_id, "pid") for drone_id in components["fleet"].all_ids()
+] + [(drone_id, "mellinger") for drone_id in components["fleet"].follower_ids()]
+assert any(
+    event["event"] == "set_runtime_onboard_controller"
+    and event["details"]["controller"] == "mellinger"
+    for event in components["telemetry"].events
+)
+
+components = build_startup_components()
+components["config"].control.output_mode = "full_state"
+components["config"].control.onboard_controller = "mellinger"
+components["config"].control.active_follower_ids = [5]
+inactive_ground_snapshot = make_snapshot(1)
+inactive_ground_snapshot.positions[components["fleet"].id_to_index(6)][2] = 0.1
+components["pose_bus"] = FakePoseBus([inactive_ground_snapshot] * 3)
+app = RealMissionApp(components)
+assert app.start() is True
+assert components["follower_executor"].takeoff_calls == [([5], 0.5, 2.0)]
+assert (5, "mellinger") in components["transport"].controller_calls
+assert (6, "mellinger") not in components["transport"].controller_calls
+
+components = build_startup_components()
+components["config"].control.output_mode = "full_state"
+components["config"].control.onboard_controller = "mellinger"
+components["config"].control.active_follower_ids = [5]
+active_failed_snapshot = make_snapshot(1)
+active_failed_snapshot.positions[components["fleet"].id_to_index(5)][2] = 0.1
+components["pose_bus"] = FakePoseBus([active_failed_snapshot] * 3)
+app = RealMissionApp(components)
+assert app.start() is False
+assert components["follower_executor"].land_calls == [([5], 4.0)]
+assert all(6 not in call[0] for call in components["follower_executor"].land_calls)
 
 components = build_startup_components()
 app = RealMissionApp(components)

@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 
 @dataclass
 class PreflightCheck:
@@ -46,6 +48,7 @@ class PreflightRunner:
         health_bus = self.comp["health_bus"]
         config = self.comp["config"]
         readiness = self.comp.get("readiness_report", {})
+        is_crazyswarm_sim = self.comp.get("runtime_backend") == "crazyswarm2_sim"
 
         add_check(
             "LEADER_COUNT",
@@ -105,6 +108,77 @@ class PreflightRunner:
                 "No disconnected drones",
                 disconnected_ids=snapshot.disconnected_ids,
             )
+            pose_window = {}
+            recent_pose_fn = getattr(pose_bus, "recent_samples", None)
+            if callable(recent_pose_fn):
+                pose_window = recent_pose_fn(config.safety.estimator_variance_window_s)
+            if pose_window:
+                sample_counts = {
+                    int(drone_id): len(samples)
+                    for drone_id, samples in pose_window.items()
+                }
+                add_check(
+                    "POSE_WINDOW_SAMPLES",
+                    all(
+                        sample_counts.get(drone_id, 0) >= 2
+                        for drone_id in fleet.all_ids()
+                    ),
+                    "Pose window has enough samples for jitter check",
+                    window_s=config.safety.estimator_variance_window_s,
+                    sample_counts=sample_counts,
+                )
+                if is_crazyswarm_sim and config.safety.pose_jitter_threshold > 0:
+                    add_check(
+                        "POSE_JITTER_SIM_SKIPPED",
+                        True,
+                        "Crazyswarm2 sim skips Lighthouse pose jitter preflight",
+                        threshold=config.safety.pose_jitter_threshold,
+                    )
+                elif config.safety.pose_jitter_threshold > 0:
+                    for drone_id in fleet.all_ids():
+                        samples = pose_window.get(drone_id, [])
+                        if len(samples) < 2:
+                            continue
+                        positions = np.array([pos for _t, pos in samples], dtype=float)
+                        center = np.mean(positions, axis=0)
+                        jitter = float(np.max(np.linalg.norm(positions - center, axis=1)))
+                        add_check(
+                            f"POSE_JITTER_DRONE_{drone_id}",
+                            jitter <= config.safety.pose_jitter_threshold,
+                            f"Drone {drone_id} pose jitter too high",
+                            drone_id=drone_id,
+                            jitter=jitter,
+                            threshold=config.safety.pose_jitter_threshold,
+                            sample_count=len(samples),
+                        )
+            if is_crazyswarm_sim and config.safety.min_inter_drone_distance > 0:
+                add_check(
+                    "FORMATION_SPACING_SIM_SKIPPED",
+                    True,
+                    "Crazyswarm2 sim skips ground-spawn spacing preflight",
+                    threshold=config.safety.min_inter_drone_distance,
+                )
+            elif config.safety.min_inter_drone_distance > 0:
+                min_pair = None
+                min_distance = None
+                ids = fleet.all_ids()
+                for i, left_id in enumerate(ids):
+                    left_pos = snapshot.positions[fleet.id_to_index(left_id)]
+                    for right_id in ids[i + 1:]:
+                        right_pos = snapshot.positions[fleet.id_to_index(right_id)]
+                        distance = float(np.linalg.norm(left_pos - right_pos))
+                        if min_distance is None or distance < min_distance:
+                            min_distance = distance
+                            min_pair = [left_id, right_id]
+                add_check(
+                    "FORMATION_SPACING",
+                    min_distance is None
+                    or min_distance >= config.safety.min_inter_drone_distance,
+                    "Formation inter-drone spacing below safety margin",
+                    min_distance=min_distance,
+                    pair=min_pair,
+                    threshold=config.safety.min_inter_drone_distance,
+                )
 
             for drone_id in fleet.all_ids():
                 idx = fleet.id_to_index(drone_id)
@@ -181,6 +255,41 @@ class PreflightRunner:
                                 variance=variance_max,
                                 threshold=config.safety.estimator_variance_threshold,
                             )
+                    required_method = config.safety.lighthouse_required_method
+                    if required_method is not None:
+                        method = sample.values.get("lighthouse.method")
+                        add_check(
+                            f"LIGHTHOUSE_METHOD_DRONE_{drone_id}",
+                            method == required_method,
+                            f"Drone {drone_id} Lighthouse method mismatch",
+                            drone_id=drone_id,
+                            method=method,
+                            required_method=required_method,
+                        )
+
+            recent_health_fn = getattr(health_bus, "recent_samples", None)
+            if callable(recent_health_fn) and config.safety.estimator_variance_threshold > 0:
+                health_window = recent_health_fn(config.safety.estimator_variance_window_s)
+                for drone_id in fleet.all_ids():
+                    samples = health_window.get(drone_id, [])
+                    variance_values = []
+                    for sample in samples:
+                        for key in ("kalman.varPX", "kalman.varPY", "kalman.varPZ"):
+                            value = sample.values.get(key)
+                            if value is not None:
+                                variance_values.append(float(value))
+                    if variance_values:
+                        variance_max = max(variance_values)
+                        add_check(
+                            f"ESTIMATOR_VARIANCE_WINDOW_DRONE_{drone_id}",
+                            variance_max <= config.safety.estimator_variance_threshold,
+                            f"Drone {drone_id} estimator variance window too high",
+                            drone_id=drone_id,
+                            variance=variance_max,
+                            threshold=config.safety.estimator_variance_threshold,
+                            sample_count=len(samples),
+                            window_s=config.safety.estimator_variance_window_s,
+                        )
 
         reasons = [check.message for check in checks if not check.passed]
         return PreflightReport(

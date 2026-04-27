@@ -131,6 +131,7 @@ assert Path(components["telemetry"].opened).suffix == ".jsonl"
 assert components["telemetry_path"] == components["telemetry"].opened
 assert components["telemetry"].header is not None
 assert components["telemetry"].header["config_fingerprint"]["startup_mode"] == "auto"
+assert "lighthouse_config_sha256" in components["telemetry"].header["config_fingerprint"]
 assert components["telemetry"].header["config_fingerprint"]["leader_count"] == 4
 assert components["telemetry"].header["fleet"]["drone_count"] == 6
 assert components["telemetry"].header["fleet"]["leader_ids"] == [1, 2, 3, 4]

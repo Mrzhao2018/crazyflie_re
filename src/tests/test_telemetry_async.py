@@ -68,4 +68,22 @@ assert summary["record_count"] == 1
 assert summary["event_counts"]["in_memory_only"] == 1
 rec2.close()
 
+with tempfile.TemporaryDirectory() as tmp:
+    path = Path(tmp) / "late_open.jsonl"
+    rec3 = TelemetryRecorder()
+    rec3.write_header(config_fingerprint={"late": True})
+    rec3.record_event("before_open", ok=True)
+    rec3.open(str(path))
+    rec3.record_event("after_open", ok=True)
+    rec3.flush()
+    rec3.close()
+
+    entries = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert entries[0]["kind"] == "header"
+    assert entries[0]["config_fingerprint"] == {"late": True}
+    assert [entry["event"] for entry in entries if entry["kind"] == "event"] == [
+        "before_open",
+        "after_open",
+    ]
+
 print("[OK] TelemetryRecorder async drain & in-memory modes verified")

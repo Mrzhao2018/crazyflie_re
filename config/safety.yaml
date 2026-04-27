@@ -4,7 +4,15 @@ pose_timeout: 1.0
 max_condition_number: 100.0
 max_command_norm: 2.5
 estimator_variance_threshold: 0.001
+pose_jitter_threshold: 0.05
+estimator_variance_window_s: 1.0
+lighthouse_required_method: null
+min_inter_drone_distance: 0.15
+inter_drone_separation_action: telemetry
 hold_auto_land_timeout: 3.0
 velocity_stream_watchdog_action: degrade
-min_vbat: 3.15
+min_vbat: 0.0
+min_vbat_abort_samples: 5
+min_vbat_window_s: 3.0
+min_vbat_critical: 0.0
 fast_gate_group_degrade_enabled: true

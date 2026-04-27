@@ -16,9 +16,9 @@ from ..runtime.failure_policy import FailurePolicy
 from ..runtime.landing_flow import LandingFlow
 from .mission_errors import MissionErrorDefinition, MissionErrors
 from .startup_progress import NullProgressReporter, StartupProgressReporter
-from ..adapters.cflib_command_transport import (
-    POLY4D_RAW_PIECE_BYTES,
+from ..adapters.trajectory_common import (
     TRAJECTORY_MEMORY_BYTES,
+    estimate_trajectory_bytes,
 )
 from ..runtime.offline_swarm_sampler import _evaluate_trajectory_spec
 
@@ -106,6 +106,13 @@ class RealMissionApp:
         fsm = self.fsm
         return fsm.state().value if fsm is not None else None
 
+    def _active_follower_ids(self) -> list[int]:
+        configured = getattr(self.comp["config"].control, "active_follower_ids", None)
+        if configured is None:
+            return list(self.comp["fleet"].follower_ids())
+        follower_set = set(self.comp["fleet"].follower_ids())
+        return [int(drone_id) for drone_id in configured if int(drone_id) in follower_set]
+
     def _record_error_event(
         self,
         *,
@@ -137,6 +144,22 @@ class RealMissionApp:
         self, follower_velocity_result: dict
     ) -> None:
         self.failure_policy.apply_follower_failure_policy(follower_velocity_result)
+
+    def _record_streaming_setpoint_active(self, actions, result: dict) -> None:
+        if self.telemetry is None:
+            return
+        drone_ids = [int(action.drone_id) for action in actions]
+        kinds = list(dict.fromkeys(getattr(action, "kind", "velocity") for action in actions))
+        self.telemetry.record_event(
+            "streaming_setpoint_active",
+            code="STREAMING_SETPOINT_ACTIVE",
+            action_count=len(actions),
+            drone_ids=drone_ids,
+            kinds=kinds,
+            ok=not bool(result.get("failures")),
+            successes=list(result.get("successes", [])),
+            failure_count=len(result.get("failures", [])),
+        )
 
     @staticmethod
     def _split_degraded_commands(
@@ -192,6 +215,9 @@ class RealMissionApp:
     def _start_impl(self):
         comm = self.comp["config"].comm
         startup_mode = self.comp.get("startup_mode", "auto")
+        output_mode = self.comp["config"].control.output_mode
+        onboard_ctrl = self.comp["config"].control.onboard_controller
+        active_follower_ids = self._active_follower_ids()
         leader_ref_gen = self.comp["leader_ref_gen"]
         first_leader_ref = leader_ref_gen.reference_at(0.0)
         trajectory_enabled = (
@@ -205,6 +231,8 @@ class RealMissionApp:
         if comm.readiness_reset_estimator:
             total_phases += 1
         if trajectory_enabled:
+            total_phases += 1
+        if output_mode == "full_state" and onboard_ctrl != "pid":
             total_phases += 1
         self._progress.set_total_phases(total_phases)
 
@@ -226,6 +254,7 @@ class RealMissionApp:
             ok=True,
             fingerprint=self._config_fingerprint,
         )
+        self.comp["telemetry"].flush()
 
         # 连接 (phase 1)
         if not self._safe_transition(MissionState.CONNECT):
@@ -368,8 +397,7 @@ class RealMissionApp:
                         drone_id=drone_id,
                     )
 
-        output_mode = self.comp["config"].control.output_mode
-        onboard_ctrl = self.comp["config"].control.onboard_controller
+        startup_onboard_ctrl = "pid" if output_mode == "full_state" else onboard_ctrl
         oc_total = len(self.comp["fleet"].all_ids())
         with self._phase(
             "onboard_controller", "设置 onboard controller", total=oc_total
@@ -379,12 +407,15 @@ class RealMissionApp:
             oc_done = 0
             try:
                 for drone_id in self.comp["fleet"].all_ids():
-                    self.comp["transport"].set_onboard_controller(drone_id, onboard_ctrl)
+                    self.comp["transport"].set_onboard_controller(
+                        drone_id, startup_onboard_ctrl
+                    )
                     controller_switched.append(drone_id)
                     self.comp["telemetry"].record_event(
                         "set_onboard_controller",
                         drone_id=drone_id,
-                        controller=onboard_ctrl,
+                        controller=startup_onboard_ctrl,
+                        requested_runtime_controller=onboard_ctrl,
                         ok=True,
                     )
                     oc_done += 1
@@ -395,7 +426,8 @@ class RealMissionApp:
                 self.comp["telemetry"].record_event(
                     "set_onboard_controller",
                     drone_id=drone_id,
-                    controller=onboard_ctrl,
+                    controller=startup_onboard_ctrl,
+                    requested_runtime_controller=onboard_ctrl,
                     ok=False,
                     error=str(exc),
                 )
@@ -408,7 +440,7 @@ class RealMissionApp:
                             self.comp["telemetry"].record_event(
                                 "rollback_onboard_controller",
                                 drone_id=rollback_drone_id,
-                                from_controller=onboard_ctrl,
+                                from_controller=startup_onboard_ctrl,
                                 controller="pid",
                                 ok=True,
                             )
@@ -416,7 +448,7 @@ class RealMissionApp:
                             self.comp["telemetry"].record_event(
                                 "rollback_onboard_controller",
                                 drone_id=rollback_drone_id,
-                                from_controller=onboard_ctrl,
+                                from_controller=startup_onboard_ctrl,
                                 controller="pid",
                                 ok=False,
                                 error=str(rollback_exc),
@@ -429,11 +461,11 @@ class RealMissionApp:
                         output_mode=output_mode,
                     )
                 self._progress.warn(
-                    f"onboard controller {onboard_ctrl} 设置失败 (drone={drone_id}): {exc}"
+                    f"onboard controller {startup_onboard_ctrl} 设置失败 (drone={drone_id}): {exc}"
                 )
                 logger.warning(
                     "onboard controller %s 设置失败 (drone=%s): %s —— 继续启动，但沿用机载当前 controller 状态",
-                    onboard_ctrl,
+                    startup_onboard_ctrl,
                     drone_id,
                     exc,
                 )
@@ -515,7 +547,10 @@ class RealMissionApp:
                         pieces = spec.get("pieces", [])
                         start_addr = spec.get("start_addr", 0)
                         trajectory_id = spec.get("trajectory_id", 1)
-                        estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
+                        trajectory_type = spec.get("trajectory_type", "poly4d")
+                        estimated_bytes = estimate_trajectory_bytes(
+                            pieces, trajectory_type
+                        )
                         fits_memory = (
                             start_addr + estimated_bytes <= TRAJECTORY_MEMORY_BYTES
                         )
@@ -527,11 +562,13 @@ class RealMissionApp:
                             start_addr=start_addr,
                             capacity=TRAJECTORY_MEMORY_BYTES,
                             fits_memory=fits_memory,
+                            trajectory_type=trajectory_type,
                         )
                         trajectory_upload_specs[drone_id] = {
                             "pieces": pieces,
                             "start_addr": start_addr,
                             "trajectory_id": trajectory_id,
+                            "trajectory_type": trajectory_type,
                         }
 
                     upload_results = self.comp["transport"].upload_trajectories_by_group(
@@ -545,7 +582,10 @@ class RealMissionApp:
                         pieces = spec.get("pieces", [])
                         start_addr = spec.get("start_addr", 0)
                         trajectory_id = spec.get("trajectory_id", 1)
-                        estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
+                        trajectory_type = spec.get("trajectory_type", "poly4d")
+                        estimated_bytes = estimate_trajectory_bytes(
+                            pieces, trajectory_type
+                        )
                         fits_memory = (
                             start_addr + estimated_bytes <= TRAJECTORY_MEMORY_BYTES
                         )
@@ -557,6 +597,7 @@ class RealMissionApp:
                             "estimated_bytes": estimated_bytes,
                             "fits_memory": fits_memory,
                             "trajectory_id": trajectory_id,
+                            "trajectory_type": trajectory_type,
                             "nominal_position": spec.get("nominal_position"),
                         }
                         self.comp["telemetry"].record_event(
@@ -568,6 +609,7 @@ class RealMissionApp:
                             estimated_bytes=estimated_bytes,
                             fits_memory=fits_memory,
                             trajectory_id=trajectory_id,
+                            trajectory_type=trajectory_type,
                             nominal_position=spec.get("nominal_position"),
                         )
                         tu_done += 1
@@ -651,7 +693,7 @@ class RealMissionApp:
                 [self._leader_takeoff_action(self.comp["fleet"].leader_ids())]
             )
             follower_takeoff_result = self.comp["follower_executor"].takeoff(
-                self.comp["fleet"].follower_ids(), height=0.5, duration=2.0
+                active_follower_ids, height=0.5, duration=2.0
             )
             self.telemetry_reporter.record_executor_summary("follower_takeoff_execution", [follower_takeoff_result])
 
@@ -728,22 +770,132 @@ class RealMissionApp:
 
             snapshot = self.comp["pose_bus"].latest()
             if snapshot:
-                for drone_id in self.comp["fleet"].all_ids():
+                flying_ids = list(self.comp["fleet"].leader_ids()) + list(
+                    active_follower_ids
+                )
+                for drone_id in flying_ids:
                     idx = self.comp["fleet"].id_to_index(drone_id)
                     if snapshot.positions[idx][2] < 0.3:
+                        flying_altitudes = {
+                            int(did): float(
+                                snapshot.positions[
+                                    self.comp["fleet"].id_to_index(did)
+                                ][2]
+                            )
+                            for did in flying_ids
+                        }
+                        flying_fresh = {
+                            int(did): bool(
+                                snapshot.fresh_mask[
+                                    self.comp["fleet"].id_to_index(did)
+                                ]
+                            )
+                            for did in flying_ids
+                        }
+                        logger.error(
+                            "Takeoff validation failed: drone=%s altitude=%.3f "
+                            "flying_altitudes=%s fresh=%s snapshot_seq=%s",
+                            drone_id,
+                            float(snapshot.positions[idx][2]),
+                            flying_altitudes,
+                            flying_fresh,
+                            snapshot.seq,
+                        )
                         self.comp["telemetry"].record_event(
-                            "takeoff_validation", ok=False, drone_id=drone_id
+                            "takeoff_validation",
+                            ok=False,
+                            drone_id=drone_id,
+                            altitude=float(snapshot.positions[idx][2]),
+                            flying_altitudes=flying_altitudes,
+                            flying_fresh=flying_fresh,
+                            snapshot_seq=snapshot.seq,
                         )
                         self._record_error_event(
                             definition=MissionErrors.Readiness.TAKEOFF_VALIDATION_FAILED,
                             message="起飞后高度验证失败",
                             drone_id=drone_id,
                             altitude=float(snapshot.positions[idx][2]),
+                            flying_altitudes=flying_altitudes,
+                            flying_fresh=flying_fresh,
+                            snapshot_seq=snapshot.seq,
                         )
                         self._emergency_land(
                             trigger_error=MissionErrors.Readiness.TAKEOFF_VALIDATION_FAILED,
                         )
                         raise _StartupAborted("takeoff validation failed")
+
+            if output_mode == "full_state" and onboard_ctrl != startup_onboard_ctrl:
+                follower_ids = active_follower_ids
+                with self._phase(
+                    "runtime_onboard_controller",
+                    "切换 follower runtime controller",
+                    total=len(follower_ids),
+                ):
+                    switched_followers: list[int] = []
+                    switch_done = 0
+                    drone_id = None
+                    try:
+                        for drone_id in follower_ids:
+                            self.comp["transport"].set_onboard_controller(
+                                drone_id, onboard_ctrl
+                            )
+                            switched_followers.append(drone_id)
+                            self.comp["telemetry"].record_event(
+                                "set_runtime_onboard_controller",
+                                drone_id=drone_id,
+                                controller=onboard_ctrl,
+                                startup_controller=startup_onboard_ctrl,
+                                ok=True,
+                            )
+                            switch_done += 1
+                            self._progress.step(
+                                switch_done,
+                                len(follower_ids),
+                                detail=f"drone={drone_id}",
+                            )
+                    except Exception as exc:
+                        self.comp["telemetry"].record_event(
+                            "set_runtime_onboard_controller",
+                            drone_id=drone_id,
+                            controller=onboard_ctrl,
+                            startup_controller=startup_onboard_ctrl,
+                            ok=False,
+                            error=str(exc),
+                        )
+                        for rollback_drone_id in reversed(switched_followers):
+                            try:
+                                self.comp["transport"].set_onboard_controller(
+                                    rollback_drone_id, startup_onboard_ctrl
+                                )
+                                self.comp["telemetry"].record_event(
+                                    "rollback_runtime_onboard_controller",
+                                    drone_id=rollback_drone_id,
+                                    from_controller=onboard_ctrl,
+                                    controller=startup_onboard_ctrl,
+                                    ok=True,
+                                )
+                            except Exception as rollback_exc:
+                                self.comp["telemetry"].record_event(
+                                    "rollback_runtime_onboard_controller",
+                                    drone_id=rollback_drone_id,
+                                    from_controller=onboard_ctrl,
+                                    controller=startup_onboard_ctrl,
+                                    ok=False,
+                                    error=str(rollback_exc),
+                                )
+                        self._record_error_event(
+                            definition=MissionErrors.Readiness.STARTUP_FAILED,
+                            message="full_state runtime controller 切换失败",
+                            exception=exc,
+                            drone_id=drone_id,
+                            controller=onboard_ctrl,
+                            output_mode=output_mode,
+                            affected_role="follower",
+                        )
+                        self._emergency_land(
+                            trigger_error=MissionErrors.Readiness.STARTUP_FAILED,
+                        )
+                        raise _StartupAborted("runtime onboard controller switch failed")
 
             if startup_mode == "manual_leader":
                 self._initialize_manual_mode(snapshot)
@@ -917,17 +1069,26 @@ class RealMissionApp:
                         commands = follower_controller.compute(
                             snapshot,
                             follower_ref,
-                            fleet.follower_ids(),
+                            self._active_follower_ids(),
                             fleet,
                         )
 
                 # 7. Full-safety检查（包含frame、commands和follower_ref）
+                health_window_fn = getattr(self.comp["health_bus"], "recent_samples", None)
+                health_window = (
+                    health_window_fn(
+                        self.comp["config"].safety.min_vbat_window_s
+                    )
+                    if callable(health_window_fn)
+                    else None
+                )
                 safety_decision = safety.evaluate(
                     snapshot,
                     frame,
                     commands,
                     follower_ref,
                     health=health_latest,
+                    health_window=health_window,
                     ignored_disconnected_ids=set(
                         self.failure_policy.watchdog_degraded_followers
                     ),
@@ -1005,6 +1166,9 @@ class RealMissionApp:
                 if plan.follower_actions:
                     follower_velocity_result = follower_executor.execute_velocity(
                         plan.follower_actions
+                    )
+                    self._record_streaming_setpoint_active(
+                        plan.follower_actions, follower_velocity_result
                     )
                     self.telemetry_reporter.record_executor_summary(
                         "follower_velocity_execution",
@@ -1329,6 +1493,14 @@ class RealMissionApp:
             for path in sorted(config_dir.glob("*.yaml")):
                 raw_files[path.name] = path.read_text(encoding="utf-8")
         config_blob = json.dumps(raw_files, ensure_ascii=False, sort_keys=True)
+        lighthouse_blob = json.dumps(
+            {
+                name: raw_files.get(name, "")
+                for name in ("comm.yaml", "fleet.yaml", "safety.yaml")
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         mission = app_config.mission if app_config is not None else None
         fleet = self.comp.get("fleet")
         return {
@@ -1336,6 +1508,9 @@ class RealMissionApp:
             "repo_root": self.comp.get("repo_root"),
             "startup_mode": self.comp.get("startup_mode"),
             "config_sha256": hashlib.sha256(config_blob.encode("utf-8")).hexdigest(),
+            "lighthouse_config_sha256": hashlib.sha256(
+                lighthouse_blob.encode("utf-8")
+            ).hexdigest(),
             "config_files": sorted(raw_files.keys()),
             "drone_count": len(fleet.all_ids()) if fleet is not None else None,
             "leader_count": len(fleet.leader_ids()) if fleet is not None else None,
@@ -1475,5 +1650,5 @@ class RealMissionApp:
         return LeaderAction(
             kind="land",
             drone_ids=leader_ids,
-            payload={"duration": 2.0},
+            payload={"duration": 4.0},
         )

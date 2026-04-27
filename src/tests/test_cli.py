@@ -37,6 +37,22 @@ assert args.verbose is False
 args = build_parser().parse_args(["--verbose"])
 assert args.verbose is True
 
+args = build_parser().parse_args(
+    [
+        "ros2-sim",
+        "--config-dir",
+        "config",
+        "--skip-confirm",
+        "--no-launch-server",
+        "--all-followers",
+    ]
+)
+assert args.command == "ros2-sim"
+assert args.config_dir == "config"
+assert args.skip_confirm is True
+assert args.launch_server is False
+assert args.all_followers is True
+
 
 result = subprocess.run(
     [sys.executable, "-m", "src.app.cli", "budget", "--config-dir", "config"],

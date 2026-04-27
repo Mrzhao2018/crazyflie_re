@@ -63,3 +63,8 @@ control:
   time_delay_compensation_enabled: false
   estimated_total_delay_ms: 0.0
   delay_prediction_gain: 1.0
+  full_state_position_smoothing_alpha: 0.45
+  full_state_max_position_step: 0.04
+  active_follower_ids: [5]
+  output_mode: full_state
+  onboard_controller: mellinger

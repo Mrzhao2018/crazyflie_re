@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 
 from .bootstrap import build_core_app
-from ..adapters.cflib_command_transport import (
-    POLY4D_RAW_PIECE_BYTES,
+from ..adapters.trajectory_common import (
+    TRAJECTORY_MAX_PIECES,
     TRAJECTORY_MEMORY_BYTES,
+    estimate_trajectory_bytes,
 )
 
 
@@ -46,13 +47,17 @@ def build_trajectory_budget_summary(config_dir: str = "config") -> dict:
     for drone_id, spec in per_leader.items():
         pieces = spec.get("pieces", [])
         start_addr = spec.get("start_addr", 0)
-        estimated_bytes = len(pieces) * POLY4D_RAW_PIECE_BYTES
+        trajectory_type = spec.get("trajectory_type", "poly4d")
+        estimated_bytes = estimate_trajectory_bytes(pieces, trajectory_type)
         leaders[int(drone_id)] = {
             "trajectory_id": spec.get("trajectory_id", 1),
+            "trajectory_type": trajectory_type,
             "pieces": len(pieces),
             "estimated_bytes": estimated_bytes,
             "start_addr": start_addr,
             "fits_memory": start_addr + estimated_bytes <= TRAJECTORY_MEMORY_BYTES,
+            "fits_piece_count": len(pieces) <= TRAJECTORY_MAX_PIECES,
+            "max_pieces": TRAJECTORY_MAX_PIECES,
             "memory_capacity": TRAJECTORY_MEMORY_BYTES,
             "nominal_position": spec.get("nominal_position"),
         }

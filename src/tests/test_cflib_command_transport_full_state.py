@@ -26,8 +26,21 @@ class _FakeCommander:
     def __init__(self):
         self.calls = []
 
-    def send_full_state_setpoint(self, pos, vel, acc, orientation, rates, accs):
-        self.calls.append(("full_state", tuple(pos), tuple(vel), tuple(acc)))
+    def send_full_state_setpoint(
+        self, pos, vel, acc, orientation, rollrate, pitchrate, yawrate
+    ):
+        self.calls.append(
+            (
+                "full_state",
+                tuple(pos),
+                tuple(vel),
+                tuple(acc),
+                tuple(orientation),
+                rollrate,
+                pitchrate,
+                yawrate,
+            )
+        )
 
 
 class _FakeCF:
@@ -101,6 +114,8 @@ transport.cmd_full_state(
     acc=(0.0, 0.0, 0.0),
 )
 assert link_manager._scf.cf.commander.calls[-1][0] == "full_state"
+assert link_manager._scf.cf.commander.calls[-1][4] == (0.0, 0.0, 0.0, 1.0)
+assert link_manager._scf.cf.commander.calls[-1][5:] == (0.0, 0.0, 0.0)
 assert transport.last_velocity_command_time(1) is not None
 
 # NaN 应该直接抛 ValueError 且不会触达 cflib

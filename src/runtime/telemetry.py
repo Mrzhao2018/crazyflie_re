@@ -84,13 +84,18 @@ class TelemetryRecorder:
         )
         self._writer_thread: threading.Thread | None = None
         self._records_dropped = 0
+        self._cached_header: dict | None = None
+        self._event_write_index = 0
 
     # ---- lifecycle -------------------------------------------------------
 
     def open(self, path: str) -> None:
         self._fh = open(path, "w", encoding="utf-8")
-        self._header_written = False
         self._start_writer()
+        if self._cached_header is not None and not self._header_written:
+            self._queue.put(("header", self._cached_header))
+            self._header_written = True
+        self._flush_pending_events()
 
     def _start_writer(self) -> None:
         if self._writer_thread is not None and self._writer_thread.is_alive():
@@ -101,6 +106,7 @@ class TelemetryRecorder:
         self._writer_thread.start()
 
     def close(self) -> None:
+        self.flush()
         if self._writer_thread is not None:
             self._queue.put(None)  # sentinel
             self._writer_thread.join(timeout=5.0)
@@ -109,6 +115,12 @@ class TelemetryRecorder:
             self._fh.flush()
             self._fh.close()
             self._fh = None
+
+    def flush(self) -> None:
+        if self._fh is not None:
+            self._flush_pending_events()
+            self._queue.join()
+            self._fh.flush()
 
     # ---- producer-side API ----------------------------------------------
 
@@ -119,9 +131,6 @@ class TelemetryRecorder:
         readiness: dict | None = None,
         fleet_meta: dict | None = None,
     ) -> None:
-        if self._fh is None:
-            self._header_written = True
-            return
         if self._header_written:
             return
         header = {
@@ -132,8 +141,10 @@ class TelemetryRecorder:
             "readiness": self._json_safe(readiness or {}),
             "fleet": self._json_safe(fleet_meta or {}),
         }
-        self._queue.put(("header", header))
-        self._header_written = True
+        self._cached_header = header
+        if self._fh is not None:
+            self._queue.put(("header", header))
+            self._header_written = True
 
     def log(self, record: TelemetryRecord) -> None:
         self._record_count += 1
@@ -161,9 +172,17 @@ class TelemetryRecorder:
         self._phase_events.append(event_payload)
         if self._fh is None:
             return
-        line_payload = {"kind": "event", **event_payload}
-        # event 不能丢 —— 使用阻塞 put（主循环可容忍毫秒级阻塞）
-        self._queue.put(("event", line_payload))
+        self._flush_pending_events()
+
+    def _flush_pending_events(self) -> None:
+        if self._fh is None:
+            return
+        while self._event_write_index < len(self._phase_events):
+            event_payload = self._phase_events[self._event_write_index]
+            line_payload = {"kind": "event", **event_payload}
+            # event 不能丢 —— 使用阻塞 put（主循环可容忍毫秒级阻塞）
+            self._queue.put(("event", line_payload))
+            self._event_write_index += 1
 
     # ---- writer-side -----------------------------------------------------
 
@@ -177,6 +196,7 @@ class TelemetryRecorder:
                 return
             kind, payload = item
             if self._fh is None:
+                self._queue.task_done()
                 continue
             if kind == "record":
                 safe_payload = {"kind": "record", **self._json_safe_record(
@@ -190,6 +210,7 @@ class TelemetryRecorder:
             if kind in ("event", "header") or pending_since_flush >= self._flush_every_n:
                 self._fh.flush()
                 pending_since_flush = 0
+            self._queue.task_done()
 
     # ---- observation -----------------------------------------------------
 

@@ -18,6 +18,15 @@ class FakePoseBus:
         return self._snapshot
 
 
+class WindowPoseBus(FakePoseBus):
+    def __init__(self, snapshot, samples):
+        super().__init__(snapshot)
+        self._samples = samples
+
+    def recent_samples(self, window_s):
+        return self._samples
+
+
 config = ConfigLoader.load("config")
 fleet = FleetModel(config.fleet)
 nominal = np.array(config.mission.nominal_positions, dtype=float)
@@ -190,6 +199,40 @@ bad_traj_report = bad_traj_runner.run()
 assert bad_traj_report.ok is False
 assert "TRAJECTORY_READY" in bad_traj_report.failed_codes
 
+spacing_config = ConfigLoader.load("config")
+spacing_config.safety.min_inter_drone_distance = 0.2
+spacing_fleet = FleetModel(spacing_config.fleet)
+spacing_nominal = np.array(spacing_config.mission.nominal_positions, dtype=float)
+spacing_nominal[1] = spacing_nominal[0] + np.array([0.05, 0.0, 0.0])
+spacing_formation = FormationModel(spacing_nominal, spacing_fleet.leader_ids(), spacing_fleet)
+spacing_snapshot = PoseSnapshot(
+    seq=5,
+    t_meas=0.0,
+    positions=spacing_nominal,
+    fresh_mask=np.ones(len(spacing_nominal), dtype=bool),
+    disconnected_ids=[],
+)
+spacing_runner = PreflightRunner(
+    {
+        "fleet": spacing_fleet,
+        "formation": spacing_formation,
+        "pose_bus": FakePoseBus(spacing_snapshot),
+        "health_bus": HealthBus(),
+        "config": spacing_config,
+        "readiness_report": {
+            "trajectory_prepare": {
+                drone_id: {"uploaded": True, "defined": True, "fits_memory": True}
+                for drone_id in spacing_fleet.leader_ids()
+            }
+        },
+    }
+)
+for drone_id in spacing_fleet.all_ids():
+    spacing_runner.comp["health_bus"].update(drone_id, healthy_values(), 0.0)
+spacing_report = spacing_runner.run()
+assert spacing_report.ok is False
+assert "FORMATION_SPACING" in spacing_report.failed_codes
+
 high_var_runner = PreflightRunner(
     {
         "fleet": fleet,
@@ -216,5 +259,72 @@ high_var_report = high_var_runner.run()
 assert high_var_report.ok is False
 assert f"ESTIMATOR_VARIANCE_DRONE_{fleet.all_ids()[0]}" in high_var_report.failed_codes
 assert any("variance" in reason for reason in high_var_report.reasons)
+
+window_config = ConfigLoader.load("config")
+window_config.safety.pose_jitter_threshold = 0.01
+window_config.safety.estimator_variance_window_s = 2.0
+window_config.safety.lighthouse_required_method = 8
+window_fleet = FleetModel(window_config.fleet)
+window_nominal = np.array(window_config.mission.nominal_positions, dtype=float)
+window_formation = FormationModel(window_nominal, window_fleet.leader_ids(), window_fleet)
+window_snapshot = PoseSnapshot(
+    seq=4,
+    t_meas=1.0,
+    positions=window_nominal,
+    fresh_mask=np.ones(len(window_nominal), dtype=bool),
+    disconnected_ids=[],
+)
+window_health = HealthBus()
+for drone_id in window_fleet.all_ids():
+    window_health.update(
+        drone_id,
+        {**healthy_values(variance=0.0002), "lighthouse.method": 8},
+        0.0,
+    )
+window_health.update(
+    window_fleet.all_ids()[0],
+    healthy_values(variance=window_config.safety.estimator_variance_threshold * 2.0),
+    0.5,
+)
+window_health.update(
+    window_fleet.all_ids()[0],
+    {**healthy_values(variance=0.0002), "lighthouse.method": 8},
+    1.0,
+)
+pose_samples = {
+    drone_id: [
+        (0.0, window_nominal[window_fleet.id_to_index(drone_id)]),
+        (0.5, window_nominal[window_fleet.id_to_index(drone_id)]),
+        (1.0, window_nominal[window_fleet.id_to_index(drone_id)]),
+    ]
+    for drone_id in window_fleet.all_ids()
+}
+pose_samples[window_fleet.all_ids()[0]][1] = (
+    0.5,
+    window_nominal[window_fleet.id_to_index(window_fleet.all_ids()[0])]
+    + np.array([0.03, 0.0, 0.0]),
+)
+window_report = PreflightRunner(
+    {
+        "fleet": window_fleet,
+        "formation": window_formation,
+        "pose_bus": WindowPoseBus(window_snapshot, pose_samples),
+        "health_bus": window_health,
+        "config": window_config,
+        "readiness_report": {
+            "trajectory_prepare": {
+                drone_id: {"uploaded": True, "defined": True, "fits_memory": True}
+                for drone_id in window_fleet.leader_ids()
+            }
+        },
+    }
+).run()
+assert window_report.ok is False
+assert f"POSE_JITTER_DRONE_{window_fleet.all_ids()[0]}" in window_report.failed_codes
+assert (
+    f"ESTIMATOR_VARIANCE_WINDOW_DRONE_{window_fleet.all_ids()[0]}"
+    in window_report.failed_codes
+)
+assert not any(code.startswith("LIGHTHOUSE_METHOD_DRONE_") for code in window_report.failed_codes)
 
 print("[OK] Preflight structured report contracts verified")

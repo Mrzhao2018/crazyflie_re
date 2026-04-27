@@ -106,6 +106,8 @@ def _executor_failure_summary(events: list[dict]) -> dict:
 
 def _radio_link_summary(records: list[dict]) -> dict:
     per_drone: dict[str, list[float]] = {}
+    per_group_score: dict[str, list[float]] = {}
+    per_group_backoff_count: Counter = Counter()
     overall: list[float] = []
     for record in records:
         link_field = record.get("radio_link_quality", {}) or {}
@@ -119,6 +121,16 @@ def _radio_link_summary(records: list[dict]) -> dict:
                 continue
             per_drone.setdefault(str(drone_id), []).append(float(value))
             overall.append(float(value))
+        diagnostics = record.get("scheduler_diagnostics", {}) or {}
+        if isinstance(diagnostics, dict):
+            group_scores = diagnostics.get("group_health_scores", {}) or {}
+            if isinstance(group_scores, dict):
+                for group_id, score in group_scores.items():
+                    if score is None:
+                        continue
+                    per_group_score.setdefault(str(group_id), []).append(float(score))
+            for group_id in diagnostics.get("link_quality_backoff_groups", []) or []:
+                per_group_backoff_count[str(group_id)] += 1
 
     def _stats(values: list[float]) -> dict:
         if not values:
@@ -137,6 +149,15 @@ def _radio_link_summary(records: list[dict]) -> dict:
         "overall": _stats(overall),
         "per_drone": {
             drone_id: _stats(values) for drone_id, values in per_drone.items()
+        },
+        "per_group": {
+            group_id: {
+                "count": len(values),
+                "min_score": min(values) if values else None,
+                "mean_score": sum(values) / len(values) if values else None,
+                "backoff_count": per_group_backoff_count.get(group_id, 0),
+            }
+            for group_id, values in per_group_score.items()
         },
     }
 

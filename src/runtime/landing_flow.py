@@ -11,6 +11,7 @@ import logging
 import time
 
 from ..app.mission_errors import MissionErrorDefinition
+from .command_plan import HoldAction
 from .mission_fsm import MissionState
 from .telemetry import TelemetryRecord
 
@@ -23,6 +24,90 @@ class LandingFlow:
 
     def __init__(self, app):
         self.app = app
+
+    def _active_follower_ids(self) -> list[int]:
+        active_fn = getattr(self.app, "_active_follower_ids", None)
+        if callable(active_fn):
+            return list(active_fn())
+        return list(self.app.fleet.follower_ids())
+
+    def _notify_streaming_setpoint_stop(self, *, reason: str) -> dict:
+        """Stop low-level streaming before returning control to high-level commander."""
+        app = self.app
+        follower_ids = self._active_follower_ids()
+        app.telemetry.record_event(
+            "commander_mode_switch",
+            code="COMMANDER_MODE_SWITCH",
+            from_mode="streaming_setpoint",
+            to_mode="high_level_commander",
+            reason=reason,
+            drone_ids=follower_ids,
+        )
+        try:
+            stop_result = app.comp["follower_executor"].stop_velocity_mode(follower_ids)
+        except Exception as exc:
+            logger.exception("Failed to notify setpoint stop before high-level command")
+            stop_result = {
+                "kind": "notify_stop",
+                "successes": [],
+                "failures": [
+                    {
+                        "drone_ids": follower_ids,
+                        "failure_category": "notify_setpoint_stop",
+                        "reason": str(exc),
+                    }
+                ],
+            }
+        app.telemetry.record_event(
+            "setpoint_stop_notify",
+            code="SETPOINT_STOP_NOTIFY",
+            ok=not bool(stop_result.get("failures")),
+            reason=reason,
+            drone_ids=follower_ids,
+            result=stop_result,
+        )
+        app.telemetry_reporter.record_executor_summary(
+            "follower_stop_velocity_execution", [stop_result]
+        )
+        return stop_result
+
+    def _brake_streaming_followers(
+        self, *, reason: str, repeats: int = 3, interval_s: float = 0.05
+    ) -> None:
+        """Send a short zero-velocity burst before handing followers to HLC land."""
+        app = self.app
+        follower_ids = self._active_follower_ids()
+        if not follower_ids:
+            return
+
+        actions = [HoldAction(drone_id=drone_id) for drone_id in follower_ids]
+        for attempt in range(max(1, int(repeats))):
+            try:
+                result = app.comp["follower_executor"].execute_hold(actions)
+                app.telemetry_reporter.record_executor_summary(
+                    "follower_brake_execution", [result]
+                )
+                app.telemetry.record_event(
+                    "follower_brake",
+                    code="FOLLOWER_BRAKE",
+                    ok=not bool(result.get("failures")),
+                    reason=reason,
+                    attempt=attempt + 1,
+                    drone_ids=follower_ids,
+                    result=result,
+                )
+            except Exception as exc:
+                logger.exception("Failed to brake followers before landing")
+                app.telemetry.record_event(
+                    "follower_brake",
+                    code="FOLLOWER_BRAKE",
+                    ok=False,
+                    reason=reason,
+                    attempt=attempt + 1,
+                    drone_ids=follower_ids,
+                    error=str(exc),
+                )
+            time.sleep(max(0.0, float(interval_s)))
 
     # ---- graceful shutdown / orderly land --------------------------------
 
@@ -73,13 +158,9 @@ class LandingFlow:
 
         try:
             app.telemetry.record_event(reason_event, ok=True)
-            stop_result = app.comp["follower_executor"].stop_velocity_mode(
-                app.fleet.follower_ids()
-            )
-            app.telemetry_reporter.record_executor_summary(
-                "follower_stop_velocity_execution", [stop_result]
-            )
-            time.sleep(0.1)
+            self._brake_streaming_followers(reason=reason_event)
+            self._notify_streaming_setpoint_stop(reason=reason_event)
+            time.sleep(0.2)
             leader_land_results = app.comp["leader_executor"].execute(
                 [app._leader_land_action(app.fleet.leader_ids())]
             )
@@ -87,7 +168,7 @@ class LandingFlow:
                 "leader_land_execution", leader_land_results
             )
             follower_land_result = app.comp["follower_executor"].land(
-                app.fleet.follower_ids(), duration=2.0
+                self._active_follower_ids(), duration=4.0
             )
             app.telemetry_reporter.record_executor_summary(
                 "follower_land_execution", [follower_land_result]
@@ -126,15 +207,16 @@ class LandingFlow:
         app.fsm.force_abort()
         app._set_trajectory_state("terminated", "abort")
 
-        app.comp["follower_executor"].stop_velocity_mode(app.fleet.follower_ids())
-        time.sleep(0.1)
+        self._brake_streaming_followers(reason="emergency_land")
+        self._notify_streaming_setpoint_stop(reason="emergency_land")
+        time.sleep(0.2)
 
         try:
             app.comp["leader_executor"].execute(
                 [app._leader_land_action(app.fleet.leader_ids())]
             )
             app.comp["follower_executor"].land(
-                app.fleet.follower_ids(), duration=2.0
+                self._active_follower_ids(), duration=4.0
             )
             app._terminal_land_executed = True
         except Exception as exc:

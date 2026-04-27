@@ -34,6 +34,13 @@ class FollowerControllerV2(FollowerControllerBase):
         self.acceleration_feedforward_gain = config.acceleration_feedforward_gain
         self.damping_coeff = config.damping_coeff
         self._state_estimates: dict[int, _FollowerStateEstimate] = {}
+        self.full_state_position_smoothing_alpha = float(
+            getattr(config, "full_state_position_smoothing_alpha", 1.0)
+        )
+        self.full_state_max_position_step = float(
+            getattr(config, "full_state_max_position_step", float("inf"))
+        )
+        self._last_full_state_targets: dict[int, np.ndarray] = {}
 
     def _estimate_current_velocity(
         self,
@@ -85,35 +92,53 @@ class FollowerControllerV2(FollowerControllerBase):
         target_accelerations: dict[int, np.ndarray] = {}
         skipped_stale: list[int] = []
         missing_reference: list[int] = []
-        feedforward_applied: list[int] = []
-        acceleration_feedforward_applied: list[int] = []
+        feedforward_suppressed: list[int] = []
+        acceleration_feedforward_suppressed: list[int] = []
 
         for fid in active_follower_ids:
             if fid not in references.target_positions:
                 missing_reference.append(fid)
+                self._last_full_state_targets.pop(fid, None)
                 continue
             idx = fleet_model.id_to_index(fid)
             if not snapshot.fresh_mask[idx]:
                 skipped_stale.append(fid)
+                self._last_full_state_targets.pop(fid, None)
                 continue
 
-            p_target = np.array(references.target_positions[fid], dtype=float)
-            v_target = np.zeros(3, dtype=float)
+            p_current = np.array(snapshot.positions[idx], dtype=float)
+            p_target_raw = np.array(references.target_positions[fid], dtype=float)
+            p_target = self._smooth_full_state_position(
+                fid, p_target_raw, current_position=p_current
+            )
             if references.target_velocities is not None:
                 raw_v = references.target_velocities.get(fid)
                 if raw_v is not None:
-                    v_target = np.array(raw_v, dtype=float)
-                    feedforward_applied.append(fid)
-            a_target = np.zeros(3, dtype=float)
+                    feedforward_suppressed.append(fid)
             if references.target_accelerations is not None:
                 raw_a = references.target_accelerations.get(fid)
                 if raw_a is not None:
-                    a_target = np.array(raw_a, dtype=float)
-                    acceleration_feedforward_applied.append(fid)
+                    acceleration_feedforward_suppressed.append(fid)
+
+            # In full-state mode Mellinger expects a self-consistent
+            # position/velocity/acceleration tuple. The AFC velocity and
+            # acceleration estimates are derived from raw target jumps, while
+            # the position reference above is intentionally smoothed/limited for
+            # real flight. Sending the raw feedforward together with a smoothed
+            # position can command aggressive thrust in the wrong direction, so
+            # keep feedforward at zero until it is generated from the same
+            # smoothed trajectory.
+            v_target = np.zeros(3, dtype=float)
+            a_target = np.zeros(3, dtype=float)
 
             target_positions[fid] = p_target
             target_accelerations[fid] = a_target
             commands[fid] = v_target
+
+        active_set = set(active_follower_ids)
+        for fid in list(self._last_full_state_targets):
+            if fid not in active_set:
+                self._last_full_state_targets.pop(fid, None)
 
         command_norms = {
             fid: float(np.linalg.norm(v)) for fid, v in commands.items()
@@ -124,8 +149,10 @@ class FollowerControllerV2(FollowerControllerBase):
                 "output_mode": "full_state",
                 "skipped_stale_followers": skipped_stale,
                 "missing_reference_followers": missing_reference,
-                "feedforward_followers": feedforward_applied,
-                "acceleration_feedforward_followers": acceleration_feedforward_applied,
+                "feedforward_followers": [],
+                "acceleration_feedforward_followers": [],
+                "feedforward_suppressed_followers": feedforward_suppressed,
+                "acceleration_feedforward_suppressed_followers": acceleration_feedforward_suppressed,
                 "radial_scaled_followers": [],
                 "commanded_accelerations": {},
                 "command_norms": command_norms,
@@ -134,6 +161,38 @@ class FollowerControllerV2(FollowerControllerBase):
             target_positions=target_positions,
             target_accelerations=target_accelerations,
         )
+
+    def _smooth_full_state_position(
+        self,
+        fid: int,
+        target: np.ndarray,
+        *,
+        current_position: np.ndarray | None = None,
+    ) -> np.ndarray:
+        previous = self._last_full_state_targets.get(fid)
+        if previous is None:
+            if current_position is None:
+                previous = np.array(target, dtype=float)
+            else:
+                previous = np.array(current_position, dtype=float)
+            smoothed = previous + (target - previous)
+        else:
+            alpha = min(max(self.full_state_position_smoothing_alpha, 1e-6), 1.0)
+            smoothed = previous + alpha * (target - previous)
+        delta = smoothed - previous
+        norm = float(np.linalg.norm(delta))
+        if norm > self.full_state_max_position_step:
+            smoothed = previous + delta / norm * self.full_state_max_position_step
+        self._last_full_state_targets[fid] = smoothed.copy()
+        return smoothed
+
+    @staticmethod
+    def _clip_vector_norm(value, limit: float) -> np.ndarray:
+        vector = np.array(value, dtype=float)
+        norm = float(np.linalg.norm(vector))
+        if limit > 0 and norm > limit:
+            return vector / norm * limit
+        return vector
 
     def _compute_velocity(
         self,

@@ -34,7 +34,10 @@ class ConfigLoader:
         if config.comm.leader_update_freq > config.comm.follower_tx_freq:
             raise ValueError("leader_update_freq 不能高于 follower_tx_freq")
 
-        if config.mission.leader_motion.trajectory_enabled:
+        if (
+            config.mission.leader_motion.trajectory_enabled
+            and config.mission.leader_motion.trajectory_type != "poly4d_compressed"
+        ):
             sample_dt = config.mission.leader_motion.trajectory_sample_dt
             if sample_dt < pose_period:
                 raise ValueError(
@@ -109,6 +112,16 @@ class ConfigLoader:
 
         if config.mission.leader_motion.trajectory_sample_dt <= 0:
             raise ValueError("trajectory_sample_dt 必须大于 0")
+        if config.mission.leader_motion.trajectory_type not in {
+            "poly4d",
+            "poly4d_compressed",
+        }:
+            raise ValueError("trajectory_type 必须是 poly4d 或 poly4d_compressed")
+        if (
+            config.mission.leader_motion.trajectory_type == "poly4d_compressed"
+            and config.mission.leader_motion.trajectory_reversed
+        ):
+            raise ValueError("poly4d_compressed 不支持 trajectory_reversed=true")
         if config.mission.leader_motion.condition_soft_limit <= 0:
             raise ValueError("condition_soft_limit 必须大于 0")
         if config.mission.leader_motion.condition_penalty_scale < 0:
@@ -120,6 +133,20 @@ class ConfigLoader:
 
         if config.safety.min_vbat < 0:
             raise ValueError("min_vbat 不能小于 0；设为 0 可关闭电量检查")
+        if config.safety.min_vbat_abort_samples <= 0:
+            raise ValueError("min_vbat_abort_samples 必须大于 0")
+        if config.safety.min_vbat_window_s <= 0:
+            raise ValueError("min_vbat_window_s 必须大于 0")
+        if config.safety.min_vbat_critical < 0:
+            raise ValueError("min_vbat_critical 不能小于 0")
+        if config.safety.pose_jitter_threshold < 0:
+            raise ValueError("pose_jitter_threshold 不能小于 0；设为 0 可关闭 jitter 检查")
+        if config.safety.estimator_variance_window_s <= 0:
+            raise ValueError("estimator_variance_window_s 必须大于 0")
+        if config.safety.min_inter_drone_distance < 0:
+            raise ValueError("min_inter_drone_distance 不能小于 0")
+        if config.safety.inter_drone_separation_action not in {"telemetry", "hold"}:
+            raise ValueError("inter_drone_separation_action 必须是 telemetry 或 hold")
 
         if config.safety.hold_auto_land_timeout <= 0:
             raise ValueError("hold_auto_land_timeout 必须大于 0")
@@ -151,6 +178,14 @@ class ConfigLoader:
             raise ValueError("telemetry_queue_max 必须大于 0")
         if config.comm.telemetry_flush_every_n <= 0:
             raise ValueError("telemetry_flush_every_n 必须大于 0")
+        if config.comm.radio_health_window_s <= 0:
+            raise ValueError("radio_health_window_s 必须大于 0")
+        if config.comm.congestion_soft_floor < 0:
+            raise ValueError("congestion_soft_floor 不能小于 0")
+        if config.comm.latency_p95_soft_limit_ms <= 0:
+            raise ValueError("latency_p95_soft_limit_ms 必须大于 0")
+        if config.comm.min_stream_keepalive_hz <= 0:
+            raise ValueError("min_stream_keepalive_hz 必须大于 0")
 
         if config.control.feedforward_gain < 0:
             raise ValueError("feedforward_gain 不能小于 0")
@@ -187,6 +222,24 @@ class ConfigLoader:
             raise ValueError("estimated_total_delay_ms 不能小于 0")
         if config.control.delay_prediction_gain < 0:
             raise ValueError("delay_prediction_gain 不能小于 0")
+        if not (0.0 < config.control.full_state_position_smoothing_alpha <= 1.0):
+            raise ValueError("full_state_position_smoothing_alpha 必须在 (0, 1] 范围内")
+        if config.control.full_state_max_position_step <= 0:
+            raise ValueError("full_state_max_position_step 必须大于 0")
+        if config.control.active_follower_ids is not None:
+            fleet_follower_ids = {
+                drone.id for drone in config.fleet.drones if drone.role == "follower"
+            }
+            active_follower_ids = list(config.control.active_follower_ids)
+            if not active_follower_ids:
+                raise ValueError("active_follower_ids 不能为空；如需全部 follower 请设为 null")
+            if len(set(active_follower_ids)) != len(active_follower_ids):
+                raise ValueError("active_follower_ids 不能包含重复 drone id")
+            unknown_active = sorted(set(active_follower_ids) - fleet_follower_ids)
+            if unknown_active:
+                raise ValueError(
+                    f"active_follower_ids 只能包含 follower id，未知/非 follower: {unknown_active}"
+                )
         for attr in (
             "gain_xy",
             "gain_z",

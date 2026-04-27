@@ -28,6 +28,8 @@ class HealthBus:
     def __init__(self):
         self._lock = threading.Lock()
         self._latest: dict[int, HealthSample] = {}
+        self._history: dict[int, list[HealthSample]] = {}
+        self._history_window_s = 10.0
 
     def update(self, drone_id: int, values: dict, t_meas: float):
         """Merge 语义：多个 log block（pm.vbat / kalman.var* / motor.* / attitude）
@@ -48,7 +50,37 @@ class HealthBus:
                 values=merged,
                 safety_t_meas=safety_t_meas,
             )
+            sample = self._latest[drone_id]
+            history = self._history.setdefault(drone_id, [])
+            history.append(
+                HealthSample(
+                    t_meas=sample.t_meas,
+                    values=dict(sample.values),
+                    safety_t_meas=sample.safety_t_meas,
+                )
+            )
+            cutoff = t_meas - self._history_window_s
+            self._history[drone_id] = [item for item in history if item.t_meas >= cutoff]
 
     def latest(self) -> dict[int, HealthSample]:
         with self._lock:
             return dict(self._latest)
+
+    def recent_samples(self, window_s: float) -> dict[int, list[HealthSample]]:
+        with self._lock:
+            latest_t = max((sample.t_meas for sample in self._latest.values()), default=None)
+            if latest_t is None:
+                return {}
+            cutoff = latest_t - max(0.0, float(window_s))
+            return {
+                drone_id: [
+                    HealthSample(
+                        t_meas=sample.t_meas,
+                        values=dict(sample.values),
+                        safety_t_meas=sample.safety_t_meas,
+                    )
+                    for sample in samples
+                    if sample.t_meas >= cutoff
+                ]
+                for drone_id, samples in self._history.items()
+            }

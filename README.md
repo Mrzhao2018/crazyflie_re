@@ -186,6 +186,7 @@ python -m src.app.cli web --help
 | `compare`       | 单次 run 理想轨迹对比               |
 | `compare-runs`  | 多次 run 汇总与回归检查             |
 | `sim`           | 最小离线 smoke test                 |
+| `ros2-sim`      | WSL Crazyswarm2/crazyflie_sim 后端任务 |
 | `web`           | 本地离线 telemetry / artifacts 浏览界面 |
 
 > `main.py` 保留旧入口兼容行为；`python main.py`、`python main.py --startup-mode ...`、`python main.py --trajectory-budget` 仍可使用。
@@ -211,6 +212,22 @@ python -m src.app.cli run --skip-confirm
 
 行为：读取 `config/` → 组装 `build_app("config")` → 等待 Enter → 启动。需要真实 Crazyflie、radio 与 Lighthouse 环境就绪。
 
+### WSL Crazyswarm2 仿真入口
+
+这个入口必须在 **WSL shell** 里运行，不能直接在 Windows PowerShell 里运行；`ros2`、`rclpy`、`crazyflie_py` 和 `cffirmware` 都来自 WSL 的 ROS2 workspace。
+
+```bash
+wsl
+source /opt/ros/jazzy/setup.bash
+source ~/ros2_ws/install/setup.bash
+cd /mnt/e/code/crazyflie_re
+python -m src.app.cli ros2-sim --config-dir config --skip-confirm
+```
+
+行为：先从 `config/fleet.yaml` 和 `config/mission.yaml` 生成 `artifacts/crazyswarm2/generated_crazyflies.yaml`，再默认启动 `ros2 launch crazyflie launch.py backend:=sim ...`，最后复用 `RealMissionApp` 主流程，只把 link/transport/pose 层替换为 Crazyswarm2 sim adapter。若你已经手动启动了 `crazyflie_sim`，可加 `--no-launch-server`。
+
+注意：当前默认配置仍是 `active_follower_ids: [5]`，所以完整项目仿真首跑只会让 follower 5 接收 follower setpoint；这是配置行为，不是仿真入口限制。
+
 **启动状态显示：**
 
 - 默认使用 rich TUI 展示启动阶段（连接 / 等参数 / 重置估计器 / onboard controller / 定位 / 健康 / 轨迹上传 / preflight / takeoff+settle+align；条件阶段按 config 启用）。
@@ -224,7 +241,9 @@ python -m src.app.cli run --skip-confirm
 python -m src.app.cli budget --config-dir config
 ```
 
-输出每个 leader 的 piece 数、预计字节数、起始地址与是否 fit memory；摘要带出 `config_dir` 与 `startup_mode`。
+输出每个 leader 的 piece 数、trajectory type、预计字节数、起始地址与是否 fit memory；摘要带出 `config_dir` 与 `startup_mode`。
+
+`config/mission.yaml` 的 `leader_motion.trajectory_type` 可在 `poly4d` 与 `poly4d_compressed` 之间切换。`poly4d_compressed` 使用 Crazyflie 官方 compressed trajectory 格式，通常能让同样 4KB trajectory memory 容纳更多短段；该格式不支持 `trajectory_reversed=true`。
 
 ### telemetry replay summary
 

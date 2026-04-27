@@ -26,38 +26,28 @@ from ..runtime.link_state_bus import LinkStateBus
 from ..runtime.manual_leader_state import ManualLeaderState
 from ..runtime.manual_leader_reference import ManualLeaderReferenceSource
 from .preflight import PreflightRunner
-from ..adapters.cflib_link_manager import CflibLinkManager
-from ..adapters.cflib_command_transport import CflibCommandTransport
 from ..adapters.group_executor_pool import GroupExecutorPool
 from ..adapters.leader_executor import LeaderExecutor
 from ..adapters.follower_executor import FollowerExecutor
-from ..adapters.lighthouse_pose_source import LighthousePoseSource
 from ..adapters.manual_input_keyboard import KeyboardManualInputSource
-from ..adapters.cflib_console_tap import ConsoleTap
 
 
-def _build_link_quality_provider(fleet, link_quality_bus):
-    """Return ``callable(group_id) -> float|None`` giving worst-case link_quality
-    per radio_group, or ``None`` when the bus is not wired.
-    """
+def _build_link_quality_provider(fleet, link_quality_bus, comm_config=None):
+    """Return ``callable(group_id) -> dict|None`` with per-radio health score."""
 
     if link_quality_bus is None:
         return None
 
-    def provider(group_id: int) -> float | None:
-        latest = link_quality_bus.latest()
-        if not latest:
-            return None
-        worst: float | None = None
-        for drone_id, sample in latest.items():
-            if fleet.get_radio_group(drone_id) != group_id:
-                continue
-            quality = sample.link_quality
-            if quality is None:
-                continue
-            if worst is None or quality < worst:
-                worst = float(quality)
-        return worst
+    def provider(group_id: int) -> dict | None:
+        summary = link_quality_bus.group_health_summary(
+            fleet,
+            window_s=getattr(comm_config, "radio_health_window_s", 2.0),
+            congestion_soft_floor=getattr(comm_config, "congestion_soft_floor", 60.0),
+            latency_p95_soft_limit_ms=getattr(
+                comm_config, "latency_p95_soft_limit_ms", 50.0
+            ),
+        )
+        return summary.get(group_id)
 
     return provider
 
@@ -118,7 +108,7 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
     )
     health_bus = HealthBus()
     link_quality_bus = LinkQualityBus() if config.comm.link_quality_enabled else None
-    link_quality_provider = _build_link_quality_provider(fleet, link_quality_bus)
+    link_quality_provider = _build_link_quality_provider(fleet, link_quality_bus, config.comm)
     scheduler = CommandScheduler(
         config.comm,
         fsm,
@@ -172,6 +162,11 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
 
 def build_real_app(config_dir: str, startup_mode_override: str | None = None):
     """构建包含真机适配层的完整应用对象"""
+    from ..adapters.cflib_command_transport import CflibCommandTransport
+    from ..adapters.cflib_console_tap import ConsoleTap
+    from ..adapters.cflib_link_manager import CflibLinkManager
+    from ..adapters.lighthouse_pose_source import LighthousePoseSource
+
     components = build_core_app(config_dir, startup_mode_override=startup_mode_override)
 
     link_manager = CflibLinkManager(
@@ -213,6 +208,75 @@ def build_real_app(config_dir: str, startup_mode_override: str | None = None):
             "follower_executor": follower_executor,
             "pose_source": pose_source,
             "console_tap": ConsoleTap(link_manager),
+        }
+    )
+
+    if components["startup_mode"] == "manual_leader":
+        manual_cfg = components["config"].startup.manual
+        if manual_cfg is None:
+            raise ValueError("manual_leader 模式缺少 startup.manual 配置")
+        components["manual_input"] = KeyboardManualInputSource(
+            translation_step=manual_cfg.translation_step,
+            vertical_step=manual_cfg.vertical_step,
+            scale_step=manual_cfg.scale_step,
+            rotation_step_deg=manual_cfg.rotation_step_deg,
+        )
+
+    pose_source.register_health_callback(
+        lambda drone_id, health, timestamp: components["health_bus"].update(
+            drone_id, health, timestamp
+        )
+    )
+
+    return components
+
+
+def build_crazyswarm_sim_app(
+    config_dir: str,
+    startup_mode_override: str | None = None,
+    *,
+    swarm_factory=None,
+):
+    """构建 Crazyswarm2/crazyflie_sim 后端应用对象。"""
+    from ..adapters.crazyswarm_sim import (
+        CrazyswarmSimCommandTransport,
+        CrazyswarmSimLinkManager,
+        CrazyswarmSimPoseSource,
+    )
+
+    components = build_core_app(config_dir, startup_mode_override=startup_mode_override)
+
+    link_manager = CrazyswarmSimLinkManager(
+        components["fleet"],
+        swarm_factory=swarm_factory,
+        link_state_bus=components.get("link_state_bus"),
+    )
+    transport = CrazyswarmSimCommandTransport(link_manager)
+    group_executor_pool = None
+    leader_executor = LeaderExecutor(
+        transport, group_executor_pool=group_executor_pool
+    )
+    follower_executor = FollowerExecutor(
+        transport, group_executor_pool=group_executor_pool
+    )
+    pose_source = CrazyswarmSimPoseSource(
+        link_manager,
+        components["fleet"],
+        components["config"].comm.pose_log_freq,
+        attitude_log_enabled=components["config"].comm.attitude_log_enabled,
+        motor_log_enabled=components["config"].comm.motor_log_enabled,
+    )
+
+    components.update(
+        {
+            "link_manager": link_manager,
+            "transport": transport,
+            "group_executor_pool": group_executor_pool,
+            "leader_executor": leader_executor,
+            "follower_executor": follower_executor,
+            "pose_source": pose_source,
+            "console_tap": None,
+            "runtime_backend": "crazyswarm2_sim",
         }
     )
 

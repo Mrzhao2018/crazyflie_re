@@ -362,6 +362,9 @@ def simulate_offline_closed_loop(
     applied_accelerations = {
         drone_id: np.zeros(3, dtype=float) for drone_id in follower_ids
     }
+    applied_positions: dict[int, np.ndarray | None] = {
+        drone_id: None for drone_id in follower_ids
+    }
     last_sent_commands: dict[int, np.ndarray] = {}
     phase_labels: list[str] = []
     leader_modes: list[str] = []
@@ -429,21 +432,34 @@ def simulate_offline_closed_loop(
                         latest_commands.diagnostics.get("commanded_accelerations") or {}
                     ).items()
                 }
+                target_positions = latest_commands.target_positions or {}
+                target_accelerations = latest_commands.target_accelerations or {}
                 for drone_id, velocity in latest_commands.commands.items():
                     previous = last_sent_commands.get(drone_id)
-                    if previous is not None:
+                    is_full_state = drone_id in target_positions
+                    if previous is not None and not is_full_state:
                         delta = float(np.linalg.norm(np.array(velocity) - previous))
                         if delta < config.comm.follower_cmd_deadband:
                             continue
                     applied_commands[drone_id] = np.array(velocity, dtype=float)
                     last_sent_commands[drone_id] = np.array(velocity, dtype=float)
-                    applied_accelerations[drone_id] = acceleration_commands.get(
-                        drone_id, np.zeros(3, dtype=float)
+                    applied_accelerations[drone_id] = np.array(
+                        target_accelerations.get(
+                            drone_id,
+                            acceleration_commands.get(drone_id, np.zeros(3, dtype=float)),
+                        ),
+                        dtype=float,
+                    )
+                    applied_positions[drone_id] = (
+                        np.array(target_positions[drone_id], dtype=float)
+                        if is_full_state
+                        else None
                     )
             elif latest_safety is not None and latest_safety.action != "EXECUTE":
                 for drone_id in follower_ids:
                     applied_commands[drone_id] = np.zeros(3, dtype=float)
                     applied_accelerations[drone_id] = np.zeros(3, dtype=float)
+                    applied_positions[drone_id] = None
                     last_sent_commands[drone_id] = np.zeros(3, dtype=float)
             next_tx_time += tx_period
 
@@ -505,7 +521,23 @@ def simulate_offline_closed_loop(
 
         for drone_id in follower_ids:
             idx = fleet.id_to_index(drone_id)
-            if config.control.dynamics_model_order == 2:
+            target_position = applied_positions.get(drone_id)
+            if target_position is not None:
+                # Approximate onboard Mellinger tracking of full-state references.
+                # The real plant still lives on the Crazyflie; this keeps offline
+                # smoke tests aligned with the command semantics.
+                correction_tau = max(tx_period, internal_dt)
+                desired_velocity = (
+                    applied_commands[drone_id]
+                    + (target_position - positions[idx]) / correction_tau
+                    + applied_accelerations[drone_id] * internal_dt
+                )
+                speed = np.linalg.norm(desired_velocity)
+                if speed > config.control.max_velocity:
+                    desired_velocity = desired_velocity / speed * config.control.max_velocity
+                follower_velocities[drone_id] = desired_velocity
+                positions[idx] = positions[idx] + follower_velocities[drone_id] * internal_dt
+            elif config.control.dynamics_model_order == 2:
                 follower_velocities[drone_id] = (
                     follower_velocities[drone_id]
                     + applied_accelerations[drone_id] * internal_dt

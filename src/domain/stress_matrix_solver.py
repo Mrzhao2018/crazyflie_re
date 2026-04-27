@@ -1,9 +1,9 @@
 """应力矩阵求解器 - 从archive迁移"""
 
-import importlib
 import numpy as np
+import importlib
 from scipy.linalg import null_space
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -17,6 +17,7 @@ class StressMatrixResult:
     condition_number: float | None
     null_dim: int
     n_edges: int
+    metadata: dict = field(default_factory=dict)
 
 
 class StressMatrixSolver:
@@ -25,30 +26,79 @@ class StressMatrixSolver:
     def __init__(self, formation_model):
         self.formation = formation_model
 
+    def solve(self, leader_ids: list[int], mode: str = "dense_current") -> StressMatrixResult:
+        if mode == "dense_current":
+            result = self.solve_dense(leader_ids)
+            result.metadata["mode"] = mode
+            return result
+        if mode == "sparse_convex":
+            return self.solve_sparse_convex(leader_ids)
+        if mode == "clustered":
+            raise NotImplementedError("clustered stress solver mode is reserved")
+        raise ValueError(f"unknown stress solver mode: {mode}")
+
     def solve_dense(self, leader_ids: list[int]) -> StressMatrixResult:
         """求解dense应力矩阵"""
-        # 获取位置
+        n = len(self.formation.nominal_positions)
+        adj = np.ones((n, n)) - np.eye(n)
+        result = self._solve_from_adjacency(adj, leader_ids)
+        result.metadata["mode"] = result.metadata.get("mode", "dense_current")
+        return result
+
+    def solve_sparse_convex(self, leader_ids: list[int]) -> StressMatrixResult:
+        """Sparse candidate mode using progressively denser k-nearest graphs.
+
+        The mainline dense solver remains the default. This mode is intentionally
+        conservative: it tries sparse graphs first and falls back to dense when a
+        positive follower block cannot be certified.
+        """
+        n = len(self.formation.nominal_positions)
+        dense_result = self.solve_dense(leader_ids)
+        dense_edges = dense_result.n_edges
+        for k in range(min(4, n - 1), n):
+            adj = self._knn_adjacency(k)
+            try:
+                result = self._solve_from_adjacency(adj, leader_ids)
+            except ValueError:
+                continue
+            if result.min_eig_ff > 0:
+                result.metadata["mode"] = "sparse_convex"
+                result.metadata["dense_edge_count"] = dense_edges
+                return result
+        dense_result.metadata["mode"] = "sparse_convex"
+        dense_result.metadata["fallback"] = "dense_current"
+        dense_result.metadata["dense_edge_count"] = dense_edges
+        return dense_result
+
+    def _solve_from_adjacency(
+        self, adj: np.ndarray, leader_ids: list[int]
+    ) -> StressMatrixResult:
         n = len(self.formation.nominal_positions)
         positions = self.formation.nominal_positions
-
-        # 构建全连接邻接矩阵
-        adj = np.ones((n, n)) - np.eye(n)
-
-        # 提取边
         edges = self._get_edges(adj)
-
-        # 构建约束矩阵
         C = self._build_constraint_matrix(positions, edges)
-
-        # 求零空间
         N = null_space(C)
         null_dim = N.shape[1]
 
         if null_dim == 0:
             raise ValueError("不存在可行的应力矩阵")
 
-        # 优化求解
         return self._solve_sdp(N, edges, n, leader_ids, null_dim)
+
+    def _knn_adjacency(self, k: int) -> np.ndarray:
+        positions = self.formation.nominal_positions
+        n = len(positions)
+        adj = np.zeros((n, n), dtype=float)
+        for i in range(n):
+            distances = [
+                (float(np.linalg.norm(positions[i] - positions[j])), j)
+                for j in range(n)
+                if j != i
+            ]
+            for _dist, j in sorted(distances)[:k]:
+                adj[i, j] = 1.0
+                adj[j, i] = 1.0
+        return adj
 
     def _get_edges(self, adj_matrix):
         """提取无向边列表"""
@@ -172,6 +222,7 @@ class StressMatrixSolver:
         eigs = np.linalg.eigvalsh(Omega_ff)
         cond = np.linalg.cond(Omega_ff)
 
+        possible_edges = n * (n - 1) / 2
         return StressMatrixResult(
             omega=Omega,
             omega_ff=Omega_ff,
@@ -180,4 +231,10 @@ class StressMatrixSolver:
             condition_number=cond,
             null_dim=null_dim,
             n_edges=n_edges,
+            metadata={
+                "edge_count": n_edges,
+                "min_eig_ff": float(eigs[0]),
+                "condition_number": float(cond),
+                "sparsity": 1.0 - (float(n_edges) / possible_edges),
+            },
         )

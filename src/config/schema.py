@@ -34,7 +34,7 @@ class LeaderMotionConfig:
     trajectory_relative_position: bool = False
     trajectory_relative_yaw: bool = False
     trajectory_reversed: bool = False
-    trajectory_type: Literal["poly4d"] = "poly4d"
+    trajectory_type: Literal["poly4d", "poly4d_compressed"] = "poly4d"
     trajectory_start_addr: int = 0
     trajectory_pieces: list[dict] | None = None
     trajectory_sample_dt: float = 5.0
@@ -92,6 +92,10 @@ class CommConfig:
     link_quality_soft_floor: float = 0.0
     link_quality_backoff_scale: float = 1.5
     link_quality_deadband_scale: float = 2.0
+    radio_health_window_s: float = 2.0
+    congestion_soft_floor: float = 60.0
+    latency_p95_soft_limit_ms: float = 50.0
+    min_stream_keepalive_hz: float = 2.0
     reconnect_enabled: bool = False
     reconnect_attempts: int = 2
     reconnect_backoff_s: float = 0.5
@@ -133,7 +137,15 @@ class SafetyConfig:
     max_condition_number: float
     max_command_norm: float = 2.0
     estimator_variance_threshold: float = 0.001
+    pose_jitter_threshold: float = 0.05
+    estimator_variance_window_s: float = 1.0
+    lighthouse_required_method: int | None = None
+    min_inter_drone_distance: float = 0.15
+    inter_drone_separation_action: Literal["telemetry", "hold"] = "telemetry"
     min_vbat: float = 3.15
+    min_vbat_abort_samples: int = 5
+    min_vbat_window_s: float = 3.0
+    min_vbat_critical: float = 2.8
     hold_auto_land_timeout: float = 3.0
     velocity_stream_watchdog_action: Literal[
         "telemetry", "hold", "degrade"
@@ -169,11 +181,16 @@ class ControlConfig:
     time_delay_compensation_enabled: bool = False
     estimated_total_delay_ms: float = 0.0
     delay_prediction_gain: float = 1.0
+    full_state_position_smoothing_alpha: float = 0.45
+    full_state_max_position_step: float = 0.04
+    # 实机排障用：只让指定 follower 起飞、切 runtime controller 并接收 follower
+    # setpoint。None 表示启用全部 follower。
+    active_follower_ids: list[int] | None = None
     # follower setpoint 发送模式：
     #   "velocity"    —— 默认；host 内部积分成速度，调 send_velocity_world_setpoint
     #   "full_state"  —— host 只出 (pos, vel, acc) reference，调 send_full_state_setpoint，
-    #                    onboard Mellinger（stabilizer.controller=2）闭环。要求 bootstrap
-    #                    启动时为每架 drone 写 stabilizer.controller=2。
+    #                    follower 在起飞/align 后切到 onboard Mellinger
+    #                    （stabilizer.controller=2）闭环。
     output_mode: Literal["velocity", "full_state"] = "velocity"
     onboard_controller: Literal["pid", "mellinger", "indi"] = "pid"
 

@@ -2,13 +2,19 @@
 
 import numpy as np
 
-from src.adapters.cflib_command_transport import CflibCommandTransport
+from src.adapters.cflib_command_transport import (
+    CflibCommandTransport,
+    TRAJECTORY_MAX_PIECES,
+)
 from src.adapters.follower_executor import FollowerExecutor
 from src.adapters.leader_executor import LeaderExecutor
 from src.runtime.command_plan import FollowerAction, HoldAction, LeaderAction
 
 
 class FakeHighLevelCommander:
+    TRAJECTORY_TYPE_POLY4D = 0
+    TRAJECTORY_TYPE_POLY4D_COMPRESSED = 1
+
     def __init__(self):
         self.calls = []
 
@@ -21,8 +27,8 @@ class FakeHighLevelCommander:
     def go_to(self, x, y, z, yaw, duration):
         self.calls.append(("go_to", x, y, z, yaw, duration))
 
-    def define_trajectory(self, trajectory_id, offset, n_pieces):
-        self.calls.append(("define_trajectory", trajectory_id, offset, n_pieces))
+    def define_trajectory(self, trajectory_id, offset, n_pieces, type=0):
+        self.calls.append(("define_trajectory", trajectory_id, offset, n_pieces, type))
 
     def start_trajectory(
         self,
@@ -59,20 +65,22 @@ class FakeCF:
     def __init__(self):
         self.high_level_commander = FakeHighLevelCommander()
         self.commander = FakeCommander()
+        self.trajectory_mem = type(
+            "FakeTrajectoryMem",
+            (),
+            {
+                "trajectory": [],
+                "write_calls": [],
+                "write_data_sync": lambda self, start_addr=0: (
+                    self.write_calls.append(start_addr) or True
+                ),
+            },
+        )()
         self.mem = type(
             "FakeMem",
             (),
             {
-                "get_mems": lambda self, mem_type: [
-                    type(
-                        "FakeTrajectoryMem",
-                        (),
-                        {
-                            "trajectory": [],
-                            "write_data_sync": lambda self, start_addr=0: True,
-                        },
-                    )()
-                ]
+                "get_mems": lambda _self, mem_type: [self.trajectory_mem]
             },
         )()
 
@@ -164,6 +172,53 @@ uploads = transport.upload_trajectories_by_group(
 )
 assert uploads[1]["piece_count"] == 0
 assert link_manager.scfs[1].cf.high_level_commander.calls[-1][0] == "define_trajectory"
+assert link_manager.scfs[1].cf.high_level_commander.calls[-1][-1] == 0
+
+piece = type(
+    "Piece",
+    (),
+    {
+        "duration": 1.0,
+        "x": [0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "y": [0.0] * 8,
+        "z": [0.5] + [0.0] * 7,
+        "yaw": [0.0] * 8,
+    },
+)()
+compressed_uploads = transport.upload_trajectories_by_group(
+    {
+        1: {
+            "pieces": [piece],
+            "start_addr": 0,
+            "trajectory_id": 2,
+            "trajectory_type": "poly4d_compressed",
+        },
+    }
+)
+trajectory = link_manager.scfs[1].cf.trajectory_mem.trajectory
+assert compressed_uploads[1]["piece_count"] == 1
+assert compressed_uploads[1]["trajectory_type"] == "poly4d_compressed"
+assert [type(element).__name__ for element in trajectory] == [
+    "CompressedStart",
+    "CompressedSegment",
+]
+assert link_manager.scfs[1].cf.high_level_commander.calls[-1] == (
+    "define_trajectory",
+    2,
+    0,
+    1,
+    1,
+)
+
+try:
+    transport.upload_trajectory(
+        1,
+        [piece] * (TRAJECTORY_MAX_PIECES + 1),
+        trajectory_type="poly4d_compressed",
+    )
+    raise AssertionError("Expected too many trajectory pieces to fail")
+except RuntimeError as exc:
+    assert "too many pieces" in str(exc)
 
 
 class BrokenTransport:

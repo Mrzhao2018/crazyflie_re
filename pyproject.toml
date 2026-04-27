@@ -11,6 +11,6 @@ markers = [
     "slow: long-running offline/CLI/trajectory tests; skip in daily loops with -m 'not slow'",
 ]
 filterwarnings = [
-    # cflib 0.1.31 在旧协议版本下对 commander 发 DeprecationWarning；测试里我们不实际走 radio
+    # cflib 0.1.x 在旧协议版本下对 commander 发 DeprecationWarning；测试里我们不实际走 radio
     "ignore:Using legacy TYPE_VELOCITY_WORLD_LEGACY:DeprecationWarning",
 ]

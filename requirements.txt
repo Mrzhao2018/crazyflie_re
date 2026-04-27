@@ -1,6 +1,7 @@
 # 主依赖 (运行时)
-# cflib 0.1.x API 在小版本间稳定；0.2 之前锁定以避免 link_statistics Caller 接口变动。
-cflib>=0.1.30,<0.2
+# cflib 0.1.32 matches the 2026.04 firmware generation and includes supervisor
+# port support plus CRTP protocol v11 param MISC compatibility.
+cflib>=0.1.32,<0.2
 numpy>=1.24,<3
 scipy>=1.10
 matplotlib>=3.7

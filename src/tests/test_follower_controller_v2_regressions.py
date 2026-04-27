@@ -76,3 +76,95 @@ def test_v2_clears_stale_follower_state_before_reentry():
     )
 
     assert np.linalg.norm(reentry_commands.commands[5]) < 1e-9
+
+
+def test_full_state_reference_smoothing_and_limits():
+    config = ConfigLoader.load("config")
+    config.control.output_mode = "full_state"
+    config.control.full_state_position_smoothing_alpha = 0.45
+    config.control.full_state_max_position_step = 0.04
+    config.control.max_velocity = 0.65
+    config.control.max_acceleration = 2.0
+
+    fleet = FleetModel(config.fleet)
+    controller = FollowerControllerV2(config.control)
+    nominal = np.array(config.mission.nominal_positions, dtype=float)
+    follower_ids = fleet.follower_ids()
+    first_targets = {
+        fid: nominal[fleet.id_to_index(fid)].copy() for fid in follower_ids
+    }
+    snapshot = PoseSnapshot(
+        seq=1,
+        t_meas=0.0,
+        positions=nominal.copy(),
+        fresh_mask=np.ones(len(nominal), dtype=bool),
+        disconnected_ids=[],
+    )
+    first_ref = FollowerReferenceSet(
+        follower_ids=list(follower_ids),
+        target_positions=first_targets,
+        target_velocities=None,
+        target_accelerations=None,
+        frame_condition_number=float("nan"),
+        valid=True,
+    )
+    controller.compute(snapshot, first_ref, follower_ids, fleet)
+
+    fid = follower_ids[0]
+    jumped_targets = {key: value.copy() for key, value in first_targets.items()}
+    jumped_targets[fid] = jumped_targets[fid] + np.array([10.0, 0.0, 0.0])
+    jumped_ref = FollowerReferenceSet(
+        follower_ids=list(follower_ids),
+        target_positions=jumped_targets,
+        target_velocities={fid: np.array([10.0, 0.0, 0.0])},
+        target_accelerations={fid: np.array([0.0, 0.0, 10.0])},
+        frame_condition_number=float("nan"),
+        valid=True,
+    )
+    result = controller.compute(snapshot, jumped_ref, follower_ids, fleet)
+
+    delta = result.target_positions[fid] - first_targets[fid]
+    assert np.isclose(np.linalg.norm(delta), 0.04)
+    assert np.isclose(np.linalg.norm(result.commands[fid]), 0.0)
+    assert np.isclose(np.linalg.norm(result.target_accelerations[fid]), 0.0)
+    assert result.diagnostics["feedforward_suppressed_followers"] == [fid]
+    assert result.diagnostics["acceleration_feedforward_suppressed_followers"] == [fid]
+
+
+def test_full_state_first_reference_is_limited_from_current_position():
+    config = ConfigLoader.load("config")
+    config.control.output_mode = "full_state"
+    config.control.full_state_position_smoothing_alpha = 0.45
+    config.control.full_state_max_position_step = 0.04
+
+    fleet = FleetModel(config.fleet)
+    controller = FollowerControllerV2(config.control)
+    nominal = np.array(config.mission.nominal_positions, dtype=float)
+    follower_ids = fleet.follower_ids()
+    fid = follower_ids[0]
+
+    current_positions = nominal.copy()
+    current_positions[fleet.id_to_index(fid)] = np.array([0.0, 0.0, 0.5])
+    target = np.array([0.0, 0.0, 1.5])
+    ref = FollowerReferenceSet(
+        follower_ids=list(follower_ids),
+        target_positions={fid: target},
+        target_velocities=None,
+        target_accelerations=None,
+        frame_condition_number=float("nan"),
+        valid=True,
+    )
+    snapshot = PoseSnapshot(
+        seq=1,
+        t_meas=0.0,
+        positions=current_positions,
+        fresh_mask=np.ones(len(nominal), dtype=bool),
+        disconnected_ids=[],
+    )
+
+    result = controller.compute(snapshot, ref, [fid], fleet)
+
+    initial_delta = (
+        result.target_positions[fid] - current_positions[fleet.id_to_index(fid)]
+    )
+    assert np.isclose(np.linalg.norm(initial_delta), 0.04)

@@ -41,10 +41,14 @@ assert bus.latest()[1].last_update_t == 1002.0
 
 # 多机互不干扰
 bus.update(2, "link_quality", 60.0, 1002.5)
+bus.update(2, "uplink_congestion", 85.0, 1002.6)
+bus.update(2, "latency_ms", 90.0, 1002.7)
+bus.update(2, "uplink_congestion", 10.0, 1015.0)
 latest = bus.latest()
 assert latest[1].link_quality == 78.0, "drone 1 应不受 drone 2 更新影响"
 assert latest[2].link_quality == 60.0
 assert latest[2].uplink_rssi is None
+assert latest[2].latency_ms == 90.0
 
 # latest() 返回快照，外部修改不影响内部
 snap = bus.latest()
@@ -72,5 +76,29 @@ latest = bus.latest()
 for d in (10, 11, 12):
     assert d in latest, f"并发写入后 drone {d} 丢失"
     assert latest[d].link_quality == 199.0, f"drone {d} 最终 link_quality 应为最后写入值"
+
+
+class FakeFleet:
+    def get_radio_group(self, drone_id):
+        return {1: 0, 2: 0, 10: 1, 11: 1, 12: 1}[drone_id]
+
+
+summary = bus.group_health_summary(
+    FakeFleet(),
+    window_s=2000.0,
+    congestion_soft_floor=60.0,
+    latency_p95_soft_limit_ms=50.0,
+)
+assert 0 in summary
+assert summary[0]["drone_count"] == 2
+
+fresh_summary = bus.group_health_summary(
+    type("FreshFleet", (), {"get_radio_group": lambda self, drone_id: 2 if drone_id == 2 else 0})(),
+    window_s=1000.0,
+    congestion_soft_floor=60.0,
+    latency_p95_soft_limit_ms=50.0,
+)
+assert fresh_summary[2]["min_link_quality"] is None
+assert fresh_summary[2]["max_congestion"] == 10.0
 
 print("[OK] LinkQualityBus contracts verified")

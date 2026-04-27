@@ -148,17 +148,23 @@ class FakeTransport:
                 spec.get("trajectory_id", 1),
                 spec.get("start_addr", 0),
                 piece_count,
+                trajectory_type=spec.get("trajectory_type", "poly4d"),
             )
             results[drone_id] = {
                 "piece_count": piece_count,
                 "trajectory_id": spec.get("trajectory_id", 1),
                 "start_addr": spec.get("start_addr", 0),
                 "parallel_groups": parallel_groups,
+                "trajectory_type": spec.get("trajectory_type", "poly4d"),
             }
         return results
 
-    def hl_define_trajectory(self, drone_id, trajectory_id, offset, n_pieces):
-        self.define_calls.append((drone_id, trajectory_id, offset, n_pieces))
+    def hl_define_trajectory(
+        self, drone_id, trajectory_id, offset, n_pieces, trajectory_type="poly4d"
+    ):
+        self.define_calls.append(
+            (drone_id, trajectory_id, offset, n_pieces, trajectory_type)
+        )
 
     def hl_takeoff(self, drone_id, height, duration):
         self.high_level_calls.append(("takeoff", drone_id, height, duration))
@@ -283,6 +289,9 @@ class FakeTelemetry:
 
     def summary(self):
         return {"event_counts": {event["event"]: 1 for event in self.events}}
+
+    def flush(self):
+        pass
 
     def close(self):
         self.closed = True
@@ -416,6 +425,7 @@ class FakeSafety:
         commands=None,
         follower_ref=None,
         health=None,
+        health_window=None,
         ignored_disconnected_ids=None,
     ):
         idx = min(self.calls, len(self.decisions) - 1)

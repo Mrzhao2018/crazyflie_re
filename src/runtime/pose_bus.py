@@ -11,6 +11,8 @@ class PoseBus:
         self.fleet = fleet_model
         self.pose_timeout = pose_timeout
         self._agent_poses = {}  # {drone_id: (pos, vel, timestamp)}; vel 可能为 None
+        self._history: dict[int, list[tuple[float, np.ndarray]]] = {}
+        self._history_window_s = 10.0
         self._seq_counter = 0
         self._lock = threading.Lock()
 
@@ -35,6 +37,14 @@ class PoseBus:
         """单个agent的pose更新 - 只有这里才递增seq"""
         with self._lock:
             self._agent_poses[drone_id] = (pos, velocity, t_meas)
+            history = self._history.setdefault(drone_id, [])
+            history.append((float(t_meas), np.array(pos, dtype=float).copy()))
+            cutoff = float(t_meas) - self._history_window_s
+            self._history[drone_id] = [
+                (sample_t, sample_pos)
+                for sample_t, sample_pos in history
+                if sample_t >= cutoff
+            ]
             self._seq_counter += 1
 
     def latest(self) -> PoseSnapshot | None:
@@ -91,3 +101,18 @@ class PoseBus:
     def has_newer_than(self, seq: int) -> bool:
         with self._lock:
             return self._seq_counter > seq
+
+    def recent_samples(self, window_s: float) -> dict[int, list[tuple[float, np.ndarray]]]:
+        with self._lock:
+            latest_t = max((entry[2] for entry in self._agent_poses.values()), default=None)
+            if latest_t is None:
+                return {}
+            cutoff = latest_t - max(0.0, float(window_s))
+            return {
+                drone_id: [
+                    (sample_t, sample_pos.copy())
+                    for sample_t, sample_pos in samples
+                    if sample_t >= cutoff
+                ]
+                for drone_id, samples in self._history.items()
+            }

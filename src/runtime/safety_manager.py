@@ -11,7 +11,7 @@ from .follower_controller import FollowerCommandSet
 @dataclass
 class SafetyReason:
     code: str
-    severity: Literal["HOLD", "ABORT"]
+    severity: Literal["TELEMETRY", "HOLD", "ABORT"]
     message: str
     details: dict = field(default_factory=dict)
 
@@ -66,6 +66,7 @@ class SafetyManager:
         commands: FollowerCommandSet | None = None,
         follower_ref=None,
         health: dict | None = None,
+        health_window: dict | None = None,
         ignored_disconnected_ids: set[int] | None = None,
     ) -> SafetyDecision:
         """评估安全状态"""
@@ -73,7 +74,7 @@ class SafetyManager:
         ignored_disconnects = set(ignored_disconnected_ids or ())
 
         def add_reason(
-            code: str, severity: Literal["HOLD", "ABORT"], message: str, **details
+            code: str, severity: Literal["TELEMETRY", "HOLD", "ABORT"], message: str, **details
         ):
             structured_reasons.append(
                 SafetyReason(
@@ -162,16 +163,49 @@ class SafetyManager:
 
         # 6. 检查健康状态
         if health is not None and self.config.min_vbat > 0:
+            low_required = max(1, int(getattr(self.config, "min_vbat_abort_samples", 1)))
+            critical = float(getattr(self.config, "min_vbat_critical", 0.0))
             for drone_id, sample in health.items():
                 vbat = sample.values.get("pm.vbat")
-                if vbat is not None and float(vbat) < self.config.min_vbat:
+                if vbat is None:
+                    continue
+                vbat_value = float(vbat)
+                immediate_critical = critical > 0 and vbat_value <= critical
+                window_samples = (health_window or {}).get(drone_id, [])
+                window_values = [
+                    float(window_sample.values["pm.vbat"])
+                    for window_sample in window_samples
+                    if "pm.vbat" in window_sample.values
+                ]
+                if vbat_value not in window_values:
+                    window_values.append(vbat_value)
+                window_count = len(window_values)
+                window_min = min(window_values) if window_values else vbat_value
+                window_median = (
+                    float(np.median(np.array(window_values, dtype=float)))
+                    if window_values
+                    else vbat_value
+                )
+                sustained_low = (
+                    window_count >= low_required
+                    and window_median < self.config.min_vbat
+                )
+                if immediate_critical or sustained_low:
                     add_reason(
                         "LOW_BATTERY",
                         "ABORT",
-                        f"Drone {drone_id} battery low: {float(vbat):.2f}V",
+                        f"Drone {drone_id} battery low: {vbat_value:.2f}V",
                         drone_id=drone_id,
-                        vbat=float(vbat),
+                        vbat=vbat_value,
                         threshold=self.config.min_vbat,
+                        window_min=window_min,
+                        window_median=window_median,
+                        window_sample_count=window_count,
+                        required_samples=low_required,
+                        window_s=float(getattr(self.config, "min_vbat_window_s", 0.0)),
+                        critical_threshold=critical,
+                        immediate_critical=immediate_critical,
+                        sustained_low=sustained_low,
                     )
 
         # 7. 检查 onboard EKF 置信度（kalman variance）
@@ -197,6 +231,42 @@ class SafetyManager:
                         threshold=thr,
                     )
 
+        # 8. 互机距离观测。默认只进 telemetry，不主动避障或 HOLD。
+        if self.config.min_inter_drone_distance > 0:
+            min_pair = None
+            min_distance = None
+            fresh_all = snapshot.fresh_mask[self._all_idx]
+            active_ids = [
+                self._all_ids_cache[i]
+                for i, ok in enumerate(fresh_all)
+                if ok
+            ]
+            for i, left_id in enumerate(active_ids):
+                left_pos = snapshot.positions[self.fleet.id_to_index(left_id)]
+                for right_id in active_ids[i + 1:]:
+                    right_pos = snapshot.positions[self.fleet.id_to_index(right_id)]
+                    distance = float(np.linalg.norm(left_pos - right_pos))
+                    if min_distance is None or distance < min_distance:
+                        min_distance = distance
+                        min_pair = [left_id, right_id]
+            if (
+                min_distance is not None
+                and min_distance < self.config.min_inter_drone_distance
+            ):
+                severity = (
+                    "HOLD"
+                    if self.config.inter_drone_separation_action == "hold"
+                    else "TELEMETRY"
+                )
+                add_reason(
+                    "INTER_DRONE_SEPARATION",
+                    severity,
+                    f"Inter-drone separation low: {min_distance:.3f}m",
+                    pair=min_pair,
+                    distance=min_distance,
+                    threshold=self.config.min_inter_drone_distance,
+                )
+
         reasons = [reason.message for reason in structured_reasons]
         reason_codes = [reason.code for reason in structured_reasons]
 
@@ -208,7 +278,7 @@ class SafetyManager:
                 reason_codes=reason_codes,
                 structured_reasons=structured_reasons,
             )
-        elif structured_reasons:
+        elif any(reason.severity == "HOLD" for reason in structured_reasons):
             return SafetyDecision(
                 action="HOLD",
                 reasons=reasons,
@@ -217,7 +287,10 @@ class SafetyManager:
             )
         else:
             return SafetyDecision(
-                action="EXECUTE", reasons=[], reason_codes=[], structured_reasons=[]
+                action="EXECUTE",
+                reasons=reasons,
+                reason_codes=reason_codes,
+                structured_reasons=structured_reasons,
             )
 
     def fast_gate(self, snapshot: PoseSnapshot) -> tuple[bool, list[str]]:
