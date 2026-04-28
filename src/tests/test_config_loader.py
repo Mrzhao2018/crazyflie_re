@@ -9,9 +9,9 @@ assert config.comm.connect_groups_in_parallel is True
 assert config.comm.trajectory_upload_groups_in_parallel is True
 assert config.control.time_delay_compensation_enabled is False
 assert config.control.estimated_total_delay_ms == 0.0
-assert config.control.dynamics_model_order == 2
-assert config.control.output_mode == "full_state"
-assert config.control.onboard_controller == "mellinger"
+assert config.control.dynamics_model_order == 1
+assert config.control.output_mode == "velocity"
+assert config.control.onboard_controller == "pid"
 assert config.control.velocity_feedback_gain == 1.2
 assert config.control.acceleration_feedforward_gain == 0.5
 assert config.control.mass_kg == 0.033

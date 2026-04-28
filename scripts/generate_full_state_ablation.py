@@ -11,7 +11,7 @@ CONTROL_PROFILES = {
     "velocity_pid_safe": {
         "output_mode": "velocity",
         "onboard_controller": "pid",
-        "dynamics_model_order": 2,
+        "dynamics_model_order": 1,
         "acceleration_feedforward_gain": 0.5,
     },
     "full_state_mellinger": {

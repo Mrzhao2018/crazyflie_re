@@ -18,6 +18,7 @@ full_state = next(
 
 assert velocity["control_overrides"]["output_mode"] == "velocity"
 assert velocity["control_overrides"]["onboard_controller"] == "pid"
+assert velocity["control_overrides"]["dynamics_model_order"] == 1
 assert full_state["control_overrides"]["output_mode"] == "full_state"
 assert full_state["control_overrides"]["onboard_controller"] == "mellinger"
 assert full_state["control_overrides"]["dynamics_model_order"] == 2

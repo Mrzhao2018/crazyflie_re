@@ -640,7 +640,7 @@ def build_components(
                 {
                     "output_mode": "velocity",
                     "onboard_controller": "pid",
-                    "dynamics_model_order": 2,
+                    "dynamics_model_order": 1,
                     "max_velocity": 0.65,
                     "max_acceleration": 1.5,
                 },

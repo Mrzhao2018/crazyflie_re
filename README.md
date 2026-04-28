@@ -35,7 +35,7 @@
 | trajectory_enabled      | `true`                                     |
 | trajectory_time_scale   | `0.95`                                     |
 | startup.mode            | `auto`                                     |
-| control model           | `dynamics_model_order = 2`                 |
+| control model           | `dynamics_model_order = 1`                 |
 | pose_log_freq           | `10 Hz`                                    |
 | follower_tx_freq        | `8 Hz`                                     |
 | leader_update_freq      | `1 Hz`                                     |
