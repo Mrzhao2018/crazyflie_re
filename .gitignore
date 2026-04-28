@@ -13,7 +13,11 @@ archive/
 
 docs/
 
-doc/
+doc/*
+!doc/communication_hardening.md
+!doc/hot_path_hardening.md
+!doc/offline_tuning_findings.md
+!doc/runtime_optimization.md
 
 .superpowers/
 
