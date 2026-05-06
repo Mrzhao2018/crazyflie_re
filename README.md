@@ -1,6 +1,6 @@
 # Crazyflie AFC Swarm
 
-> 2026-04-26 状态更新。
+> 2026-05-06 状态更新。
 >
 > 面向 **Crazyflie + Lighthouse + cflib** 的仿射编队控制实验基线，重点在 **真实平台集成、leader 轨迹执行、follower 在线闭环、结构化 telemetry、离线复盘**。
 
@@ -33,22 +33,29 @@
 | 阶段                    | `settle 0~4` → `trajectory_entry 4~6` → `formation_run 6~40` |
 | leader motion           | `affine_rotation`                          |
 | trajectory_enabled      | `true`                                     |
-| trajectory_time_scale   | `0.95`                                     |
+| trajectory_time_scale   | `1.75`（配置值；当前 HLC start 下发临时固定 `1.0`，见 leader 启动验动说明） |
 | startup.mode            | `auto`                                     |
-| control model           | `dynamics_model_order = 1`                 |
-| pose_log_freq           | `10 Hz`                                    |
+| control model           | `dynamics_model_order = 2`                 |
+| output mode             | `full_state` + onboard `mellinger`         |
+| active_follower_ids     | `null`（全部 follower 参与；可设 `[]` 做 leader-only probe） |
+| pose_log_freq           | `8 Hz`                                     |
 | follower_tx_freq        | `8 Hz`                                     |
 | leader_update_freq      | `1 Hz`                                     |
 | parked_hold_freq        | `0.5 Hz`                                   |
+| follower_cmd_deadband   | `0.0`（full-state 默认不再用 deadband 吞掉小参考变化） |
 | attitude / motor log    | `false / false`（默认关闭诊断日志流）        |
 | link_quality telemetry  | `true`                                     |
 | link_quality adaptive   | `off`（`link_quality_soft_floor = 0.0`）    |
 | reconnect               | `false`（实验性，默认关闭）                  |
 | boundary                | `[-1.6, -1.6, -0.1] ~ [1.7, 1.7, 1.8]`    |
-| min_vbat                | `3.15`（默认开启电量阈值拦截）              |
-| estimator variance      | `0.001`                                    |
-| watchdog action         | `degrade`                                  |
+| min_vbat                | `0.0`（本轮实飞排障暂不启用电量阈值拦截）    |
+| estimator variance      | `0.0`（本轮实飞排障暂不启用方差阈值拦截）    |
+| watchdog action         | `telemetry`                                |
+| watchdog factor / streak | `12.0 / 5`                                |
 | fast_gate group degrade | `true`                                     |
+| fast_gate degrade streak | `4`                                       |
+| follower entry align    | `2.0s go_to + 0.5s settle + 0.25m tolerance` |
+| start stabilize         | `1.0s`                                     |
 
 ---
 
@@ -57,7 +64,7 @@
 ### 1. 分层应用骨架
 
 - `src/domain/` — 编队模型、stress matrix、AFC、mission profile、leader/follower reference
-- `src/runtime/` — pose bus、affine frame estimator、follower controller（v1 向量化、v2 二阶前馈）、scheduler、safety manager、telemetry、health、failure policy、landing flow、mission FSM、offline swarm sampler、telemetry replay、link quality / link state bus
+- `src/runtime/` — pose bus、affine frame estimator、follower controller（v1 向量化、v2 full-state reference smoothing）、scheduler、safety manager、telemetry、health、failure policy、landing flow、mission FSM、offline swarm sampler、telemetry replay、link quality / link state bus
 - `src/adapters/` — cflib link/transport、Lighthouse pose source、leader/follower executor、group executor pool、radio driver select、键盘手动输入
 - `src/app/` — bootstrap、真机主循环、preflight、replay/visualization/comparison CLI
 
@@ -81,6 +88,14 @@
 - `auto`：leader 按任务参考运行；启用 trajectory 时在启动阶段 upload/define，运行阶段启动。
 - `manual_leader`：键盘实时改变 leader 共时结构参考；follower 仍保留在线闭环。键盘输入适配器基于 Windows `msvcrt`。
 
+当前 `auto` 启动里额外有几段真实平台保护：
+
+- `active_drone_ids = leaders + active_follower_ids`，当 `active_follower_ids` 为 `null` 时启用全部 follower；当它是 `[]` 时只连接/等待/重置 leader，方便 leader-only 排障。
+- `wait_for_params` 与 `reset_estimator_and_wait` 都可按 `radio_group` 并行，组内仍串行，启动进度会逐机显示 Kalman variance 摘要。
+- leader 被移动到 trajectory entry 起点后，follower 会用当前 leader entry reference 计算目标位置，并通过 high-level `go_to` 做 follower 起始对齐；验证失败会记录 `follower_entry_align` 并直接走 readiness 失败落地。
+- `full_state` 模式下 follower 启动阶段先保持 PID，runtime controller 切换前后会各发一次当前 pose 的 full-state handoff setpoint，再切到 Mellinger / INDI 并 warmup，避免 setpoint ownership 突变。
+- `start_stabilize_s` 在进入主循环前给 leader/follower 起始点一个短缓冲；`run_entered` telemetry 记录 `elapsed_start_offset`，auto 模式会把任务时间偏移到 trajectory start 附近。
+
 ### 4. 运行时约束
 
 核心约束：
@@ -93,17 +108,21 @@
 - safety 动作为 `EXECUTE / HOLD / ABORT`
 - 主循环每帧只做一次 `safety.evaluate`；ABORT 级前置拦截由 `SafetyManager.fast_gate_decision(snapshot)` / `fast_gate(snapshot)` 承担（只扫 `disconnected_ids` 与 `boundary`）
 - HOLD 只能被 full-safety `EXECUTE` 清除；`hold_auto_land_timeout` 超时后自动降落
-- follower velocity stream 带 watchdog；动作可选 `telemetry / hold / degrade`
-- 部分 radio group 掉线默认降级为 parked hold；所有 group 掉线或越界仍走 ABORT / emergency land
+- follower streaming 带 watchdog；动作可选 `telemetry / hold / degrade`，触发时间由 `velocity_stream_watchdog_factor` 决定，真正 hold/degrade 还要满足 `velocity_stream_watchdog_degrade_streak`
+- runtime pose jump / speed / vertical speed 先按 `runtime_pose_jump_hold_streak` 累积，未达 streak 时只以 `TELEMETRY` 严重度记录，达阈值后才 HOLD
+- 部分 radio group 掉线默认先进入 pending，连续 `fast_gate_group_degrade_streak` 次观察到后才降级为 parked hold；所有 group 掉线或越界仍走 ABORT / emergency land
 - `comm.reconnect_enabled=true` 时，纯 disconnect ABORT 前会尝试有限次 reconnect；成功后会重新挂 `ConsoleTap` 与 `LighthousePoseSource` 的 log callbacks
+- leader trajectory start 会记录 per-drone 下发耗时与 send skew，并在 `leader_trajectory_start_verify_delay_s` 后检查预期运动 leader 的位移；未运动会重试，超过 `leader_trajectory_start_max_retries` 后 orderly land
+- full-state HOLD 不再调用 high-level hold，而是按当前 pose 发零速度/零加速度 full-state setpoint；HOLD 恢复或进入 HOLD 时会 reset controller 内部 full-state smoothing state
+- safety / emergency land 对 follower 先走 direct descent streaming，非紧急 orderly land 才切回 PID 后使用 high-level land
 
 **`velocity_stream_watchdog_action` 行为：**
 
 | 取值         | 行为                                                                |
 | ------------ | ------------------------------------------------------------------- |
 | `telemetry`  | 只记录事件，不改变调度。                                             |
-| `hold`       | 记录事件后立即把超时 follower 切到 HOLD。                             |
-| `degrade`    | 记录事件后把超时 follower 降级为 parked hold，其余 follower 不受影响。 |
+| `hold`       | 记录事件；同一 follower stale streak 达阈值后切到 HOLD。               |
+| `degrade`    | 记录事件；同一 follower stale streak 达阈值后降级为 parked hold，其余 follower 不受影响。 |
 
 ### 5. Telemetry 与离线分析
 
@@ -122,7 +141,7 @@
 - thesis-style trajectory comparison — `trajectory_comparison.py`
 - multi-run comparison — `trajectory_compare_runs.py`
 
-事件码表（`CONNECT_*` / `RUNTIME_WATCHDOG_*` / `RUNTIME_EXECUTOR_*` / `RUNTIME_LINK_RECONNECT_*`）与离线摘要新增字段见 [doc/communication_hardening.md](doc/communication_hardening.md#稳定事件码表)。
+事件码表（`CONNECT_*` / `RUNTIME_WATCHDOG_*` / `RUNTIME_EXECUTOR_*` / `RUNTIME_LINK_RECONNECT_*`）与运行期补充事件（`follower_entry_align`、`full_state_handoff_setpoint`、`leader_trajectory_motion_*`、`fast_gate_group_degrade_pending`、`follower_direct_descent_execution` 等）见 [doc/communication_hardening.md](doc/communication_hardening.md#稳定事件码表)。
 
 ### 6. mission_error 三类
 
@@ -138,7 +157,8 @@
 
 - **PR1 – PR9 运行时优化**：主循环 fast_gate、Affine SVD 合并、follower controller 向量化、PoseBus 预分配、telemetry 后台写线程、FleetModel 只读 tuple、AFCModel ndarray 变体。详见 [doc/runtime_optimization.md](doc/runtime_optimization.md)。
 - **PR10 – PR11 通信稳定性**：`LinkQualityBus` + `LinkStateBus` + `GroupExecutorPool`、跨 radio group 并行、基于 link_quality 的可选 tx 降频、部分组掉线降级、disconnect 前可选有限次自动重连。link-quality 自适应与 reconnect 默认关闭，部分组掉线降级默认开启。详见 [doc/communication_hardening.md](doc/communication_hardening.md)。
-- **近期 cflib 对齐优化**：reconnect 成功后重挂 Lighthouse log configs、preflight 检查 Kalman variance、关闭默认诊断日志流（attitude / motor）以降低 log 带宽、测试集增加 `slow` marker 以缩短日常回归。
+- **Host-side hot path hardening**：删除同步 debug 文件写、单调时钟 watchdog、config 化 telemetry queue / executor streak、异步 Lighthouse callback、full-state setpoint 防御、link-state 观测。详见 [doc/hot_path_hardening.md](doc/hot_path_hardening.md)。
+- **2026-05-06 实飞排障补充**：full-state/Mellinger 默认链路、follower entry align、leader trajectory 启动验动、single-drone probes、full-state HOLD/direct descent、active drone scope、watchdog/fast-gate streak 化。
 
 ---
 
@@ -187,6 +207,11 @@ python -m src.app.cli web --help
 | `compare-runs`  | 多次 run 汇总与回归检查             |
 | `sim`           | 最小离线 smoke test                 |
 | `ros2-sim`      | WSL Crazyswarm2/crazyflie_sim 后端任务 |
+| `probe-velocity` | 单机 world velocity 方向探针，用于确认 URI/pose 映射和低层速度方向 |
+| `probe-full-state` | 单机 full-state setpoint 探针 |
+| `probe-full-state-circle` | 单机 full-state/Mellinger 圆轨迹探针，可临时覆盖 firmware 参数并输出跟踪误差 |
+| `probe-hlc-trajectory` | 单机 HLC trajectory 上传/define/start 探针，可估算相位滞后 |
+| `probe-params` | 单机 firmware 参数 dump，默认筛 controller / estimator / Lighthouse 相关参数 |
 | `web`           | 本地离线 telemetry / artifacts 浏览界面 |
 
 > `main.py` 保留旧入口兼容行为；`python main.py`、`python main.py --startup-mode ...`、`python main.py --trajectory-budget` 仍可使用。
@@ -212,6 +237,8 @@ python -m src.app.cli run --skip-confirm
 
 行为：读取 `config/` → 组装 `build_app("config")` → 等待 Enter → 启动。需要真实 Crazyflie、radio 与 Lighthouse 环境就绪。
 
+当前默认配置是 full-state/Mellinger 实飞排障配置：所有 follower 都参与，host 侧 P/PD/feedforward gain 置零，只保留 full-state position smoothing、max step、derived velocity/acceleration 限幅与 onboard Mellinger 闭环。若要回到 velocity/PID 路径，需要同时检查 `config/fleet.yaml` 的 `output_mode`、`onboard_controller`、`dynamics_model_order`、gain/feedforward、deadband 和 safety watchdog 动作。
+
 ### WSL Crazyswarm2 仿真入口
 
 这个入口必须在 **WSL shell** 里运行，不能直接在 Windows PowerShell 里运行；`ros2`、`rclpy`、`crazyflie_py` 和 `cffirmware` 都来自 WSL 的 ROS2 workspace。
@@ -226,7 +253,7 @@ python -m src.app.cli ros2-sim --config-dir config --skip-confirm
 
 行为：先从 `config/fleet.yaml` 和 `config/mission.yaml` 生成 `artifacts/crazyswarm2/generated_crazyflies.yaml`，再默认启动 `ros2 launch crazyflie launch.py backend:=sim ...`，最后复用 `RealMissionApp` 主流程，只把 link/transport/pose 层替换为 Crazyswarm2 sim adapter。若你已经手动启动了 `crazyflie_sim`，可加 `--no-launch-server`。
 
-注意：当前默认配置仍是 `active_follower_ids: [5]`，所以完整项目仿真首跑只会让 follower 5 接收 follower setpoint；这是配置行为，不是仿真入口限制。
+注意：当前默认配置是 `active_follower_ids: null`，所以完整项目仿真/实飞入口会让全部 follower 接收 follower setpoint。若只想做 leader-only 或单 follower 排障，请先在 `config/fleet.yaml` 里显式改为 `[]` 或指定 follower id 列表。
 
 **启动状态显示：**
 
@@ -244,6 +271,25 @@ python -m src.app.cli budget --config-dir config
 输出每个 leader 的 piece 数、trajectory type、预计字节数、起始地址与是否 fit memory；摘要带出 `config_dir` 与 `startup_mode`。
 
 `config/mission.yaml` 的 `leader_motion.trajectory_type` 可在 `poly4d` 与 `poly4d_compressed` 之间切换。`poly4d_compressed` 使用 Crazyflie 官方 compressed trajectory 格式，通常能让同样 4KB trajectory memory 容纳更多短段；该格式不支持 `trajectory_reversed=true`。
+
+### 单机实飞探针
+
+这些入口都只连接单机，不运行 AFC mission，适合先把“硬件/firmware/坐标/控制器”问题排除掉：
+
+```bash
+python -m src.app.cli probe-params --drone-id 5 --filter stabilizer --filter mel
+python -m src.app.cli probe-velocity --drone-id 6 --speed 0.12 --segment-s 0.8 --output artifacts/probe_velocity_6.json
+python -m src.app.cli probe-full-state --drone-id 5
+python -m src.app.cli probe-full-state-circle --drone-id 5 --radius 0.12 --period-s 8 --cycles 1.5 --z-bias-compensation --set-param ctrlMel.ki_z=0
+python -m src.app.cli probe-hlc-trajectory --drone-id 7 --output artifacts/hlc_probe_7.json
+```
+
+建议排障顺序：
+
+1. `probe-params` 先确认目标 firmware 上 controller / Mellinger / estimator 参数名和默认值是否存在。
+2. `probe-velocity` 用 PID 起飞后停 HLC，再发世界系速度，确认 Lighthouse 坐标、URI 映射和速度方向。
+3. `probe-full-state-circle` 单独验证 full-state + Mellinger 是否能跟踪平滑参考；`--diagnostic-log` 会额外打印 thrust / vbat / motor 值，但会增加 log 带宽。
+4. `probe-hlc-trajectory` 单独验证 leader HLC trajectory 的上传、define、start 和相位滞后，避免把 leader 不动误判成 AFC/follower 问题。
 
 ### telemetry replay summary
 
@@ -361,27 +407,27 @@ python -m src.tests.test_cli
 
 ### `config/fleet.yaml`
 
-`drones[]`（id / uri / role / radio_group）+ 共享 `control` 参数（gain、max_velocity、feedforward、damping、时滞补偿等）。
+`drones[]`（id / uri / role / radio_group）+ 共享 `control` 参数（gain、max_velocity、feedforward、damping、时滞补偿、full-state smoothing、active follower scope、onboard 参数覆盖等）。当前默认 `output_mode=full_state`、`onboard_controller=mellinger`、`active_follower_ids=null`、`onboard_param_overrides.ctrlMel.massThrust=95000`。
 
 ### `config/mission.yaml`
 
-`duration / formation_type / nominal_positions / leader_motion / phases / trajectory 配置（sample dt、time scale、id、start addr 等）`。
+`duration / formation_type / nominal_positions / leader_motion / phases / trajectory 配置（sample dt、time scale、id、start addr 等）`。当前 `trajectory_time_scale=1.75` 会进入离线/预算/trajectory piece 生成逻辑；真实 HLC start 下发阶段目前在 `LeaderExecutor` 里临时固定 `effective_time_scale=1.0`，同时 telemetry 保留 requested/effective 两个值用于复盘。
 
 ### `config/comm.yaml`
 
-pose / leader / follower 更新频率、follower deadband、readiness 开关、连接分组并行、trajectory upload 分组并行、telemetry 队列参数（`telemetry_queue_max / telemetry_flush_every_n`）、Lighthouse 诊断日志开关（`attitude_log_enabled / motor_log_enabled`）、PR10/PR11 连接与链路质量字段（`connect_pace_s / connect_timeout_s / link_quality_enabled / radio_driver / link_quality_soft_floor / reconnect_*` 等）。当前频率是**全局阈值**，但 scheduler 内部按 `radio_group` 维护独立发送状态，不再共享全局发送时间戳。
+pose / leader / follower 更新频率、follower deadband、readiness 开关、连接分组并行、trajectory upload 分组并行、telemetry 队列参数（`telemetry_queue_max / telemetry_flush_every_n`）、Lighthouse 诊断日志开关（`attitude_log_enabled / motor_log_enabled`）、PR10/PR11 连接与链路质量字段（`connect_pace_s / connect_timeout_s / link_quality_enabled / radio_driver / link_quality_soft_floor / reconnect_*` 等）。当前频率是**全局阈值**，但 scheduler 内部按 `radio_group` 维护独立发送状态，不再共享全局发送时间戳；`pose_log_freq=8Hz` 是当前实飞排障默认值。
 
 ### `config/safety.yaml`
 
-`boundary / pose_timeout / max_condition_number / max_command_norm / estimator_variance_threshold / hold_auto_land_timeout / velocity_stream_watchdog_action / min_vbat / fast_gate_group_degrade_enabled`。
+`boundary / pose_timeout / max_condition_number / max_command_norm / estimator_variance_threshold / runtime pose jump thresholds / hold_auto_land_timeout / velocity_stream_watchdog_action / watchdog factor+streak / leader trajectory start verification / min_vbat / fast_gate_group_degrade_enabled+streak`。
 
 ### `config/startup.yaml`
 
-`startup.mode` 与 `manual_leader` 下的平移、缩放、旋转步长与限制。
+`startup.mode`、follower entry align、start stabilize，以及 `manual_leader` 下的平移、缩放、旋转步长与限制。
 
 ### `ConfigLoader` 校验项
 
-drone id 唯一、leader 数 ≥ 4、`nominal_positions` 与 drone 数一致、phase 连续按时间排序且从 `t=0` 起、各类频率为正、boundary 合法、trajectory 参数合法、`manual_leader` 配置合法、`velocity_stream_watchdog_action ∈ {telemetry, hold, degrade}`、telemetry 队列参数合法、PR10/PR11 comm 字段合法、`full_state` 模式要求二阶控制并建议 onboard controller 使用 Mellinger / INDI。
+drone id 唯一、leader 数 ≥ 4、`nominal_positions` 与 drone 数一致、phase 连续按时间排序且从 `t=0` 起、各类频率为正、boundary 合法、trajectory 参数合法、`manual_leader` 配置合法、`velocity_stream_watchdog_action ∈ {telemetry, hold, degrade}`、watchdog / pose jump / fast-gate streak 参数合法、leader trajectory start verification 参数合法、telemetry 队列参数合法、PR10/PR11 comm 字段合法、`onboard_param_overrides` 参数名形如 `group.name`、`full_state` 模式要求二阶控制并建议 onboard controller 使用 Mellinger / INDI。`active_follower_ids=[]` 合法，表示 leader-only 排障。
 
 ---
 
@@ -400,7 +446,7 @@ drone id 唯一、leader 数 ≥ 4、`nominal_positions` 与 drone 数一致、p
 可选：
 
 - `cflinkcpp`（`comm.radio_driver=cpp` 时）
-- `Sphinx` / `sphinx-rtd-theme`（构建 `docs/` 时）
+- `Sphinx` / `sphinx-rtd-theme` / `myst-parser` / `sphinxcontrib-mermaid`（构建 `docs/` 时）
 - `rich`（真机 `run` 启动阶段 TUI；未安装时自动降级为滚动文本）
 
 ---
@@ -423,12 +469,15 @@ drone id 唯一、leader 数 ≥ 4、`nominal_positions` 与 drone 数一致、p
 - `main.py` / `src/app/cli.py run` 都是真机入口，会等待用户确认并连接硬件
 - `src/app/run_sim.py` 是最小离线 smoke 入口，不是成熟仿真器
 - 自动 reconnect 默认关闭；开启前建议先单独做 ablation，确认 Lighthouse log 重挂、pose freshness 与 recovery telemetry 符合预期
-- 默认 `min_vbat = 3.15`，电池阈值保护默认开启
+- 当前默认 `min_vbat = 0.0`、`estimator_variance_threshold = 0.0`，是为了先排除电池/方差阈值对 full-state/Mellinger 排障的干扰；恢复保守实飞默认时应重新打开
 - `config/fleet.yaml` 的 control 默认值**不等于** Phase 1A Baseline 最佳参数
+- 当前默认 full-state/Mellinger 配置把 host 侧 position/velocity/acceleration feedforward gain 置零，并通过 `ctrlMel.massThrust=95000` 做 onboard 参数覆盖；不同 firmware 或机体质量需要用 `probe-params` / `probe-full-state-circle` 重新确认
+- `LeaderExecutor` 当前把 HLC `start_trajectory` 的下发 `time_scale` 临时固定为 `1.0`，但 telemetry 会记录配置请求值和实际下发值；这是为复现“传 1.25/1.75 后不动”的实飞问题保留的回滚点
+- watchdog/streak 参数现在偏向“先观测再干预”：watchdog action 默认 `telemetry`，fast-gate group degrade 需要 4 次连续观察，pose jump HOLD 需要 2 次连续观察；这降低误触发，但也意味着真实危险依赖 boundary / ABORT / 人工监控兜底
 - 历史文档和旧产物中可能保留旧编队规模或旧说法
-- PR1 – PR11 与近期 cflib 对齐优化主要靠 contract tests 覆盖；**尚未在真机上做基线 vs 优化版 benchmark 对比**，声称的 CPU / IO 节省是基于代码路径推断
+- PR1 – PR11 与近期 cflib/full-state 对齐优化主要靠 contract tests 和单机 probes 覆盖；**尚未在真机上做基线 vs 优化版 benchmark 对比**，声称的 CPU / IO 节省是基于代码路径推断
 - Telemetry 后台 writer 队列上限默认 4096（`comm.telemetry_queue_max`），默认每 50 条 record flush 一次（`comm.telemetry_flush_every_n`）；超出后 `record` 会被丢弃计入 `records_dropped`，`event` 始终阻塞 put 保证不丢
-- Executor 连续失败阈值默认 2（`safety.executor_group_failure_streak`）
+- Executor 连续失败阈值默认 2（`safety.executor_group_failure_streak`）；watchdog / fast-gate / pose jump 也有各自 streak 参数
 - `attitude_log_enabled=false`、`motor_log_enabled=false` 是默认保守带宽配置；需要姿态 / 电机诊断时可在 `comm.yaml` 显式开启
 
 ---
@@ -446,6 +495,10 @@ drone id 唯一、leader 数 ≥ 4、`nominal_positions` 与 drone 数一致、p
 - [src/app/bootstrap.py](src/app/bootstrap.py) — `build_app`
 - [src/app/run_real.py](src/app/run_real.py) — 真机主循环
 - [src/app/preflight.py](src/app/preflight.py) — preflight 检查
+- [src/app/velocity_probe.py](src/app/velocity_probe.py) — 单机 world velocity 方向探针
+- [src/app/full_state_circle_probe.py](src/app/full_state_circle_probe.py) — 单机 full-state/Mellinger 圆轨迹探针
+- [src/app/hlc_trajectory_probe.py](src/app/hlc_trajectory_probe.py) — 单机 HLC trajectory 探针
+- [src/app/param_probe.py](src/app/param_probe.py) — firmware 参数 dump
 - [src/app/trajectory_budget_summary.py](src/app/trajectory_budget_summary.py)
 - [src/app/offline_reference_viz.py](src/app/offline_reference_viz.py)
 - [src/app/trajectory_comparison.py](src/app/trajectory_comparison.py)

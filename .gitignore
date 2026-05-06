@@ -11,12 +11,15 @@ artifacts/
 
 archive/
 
-docs/
+docs/_build/
+docs/superpowers/
 
 doc/*
 !doc/communication_hardening.md
 !doc/hot_path_hardening.md
 !doc/offline_tuning_findings.md
+!doc/project_map.md
+!doc/project_slimming_candidates.md
 !doc/runtime_optimization.md
 
 .superpowers/

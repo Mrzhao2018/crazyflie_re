@@ -8,3 +8,5 @@ httpx  # FastAPI TestClient 依赖
 # 文档
 sphinx
 sphinx-rtd-theme
+myst-parser
+sphinxcontrib-mermaid
