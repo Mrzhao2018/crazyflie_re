@@ -51,6 +51,11 @@ class RecordingTransport:
         with self._lock:
             self.order.append((time.time(), self._radio_groups[drone_id], drone_id, "land"))
 
+    def hl_go_to(self, drone_id, x, y, z, duration):
+        time.sleep(self._per_send_s)
+        with self._lock:
+            self.order.append((time.time(), self._radio_groups[drone_id], drone_id, "go_to"))
+
     def notify_setpoint_stop(self, drone_id):
         time.sleep(self._per_send_s)
         with self._lock:
@@ -176,6 +181,28 @@ for method_name, call_kind in (
     assert elapsed < 0.07, f"{method_name} 应跨组并行（实测 {elapsed:.3f}s）"
     assert {kind for _, _, _, kind in transport_terminal.order} == {call_kind}
     pool_terminal.shutdown(wait=True)
+
+# ---- follower entry go_to positions 等价并行化 ------------------------------
+
+transport_goto = RecordingTransport({1: 0, 3: 1, 5: 2})
+pool_goto = GroupExecutorPool(group_ids=[0, 1, 2])
+exec_goto = FollowerExecutor(transport_goto, group_executor_pool=pool_goto)
+t0 = time.time()
+result = exec_goto.go_to_positions(
+    [1, 3, 5],
+    {
+        1: np.array([0.1, 0.0, 0.5]),
+        3: np.array([0.0, 0.2, 0.7]),
+        5: np.array([-0.1, 0.0, 1.0]),
+    },
+    duration=2.0,
+)
+elapsed = time.time() - t0
+assert set(result["successes"]) == {1, 3, 5}
+assert result["failures"] == []
+assert elapsed < 0.07, f"go_to_positions 应跨组并行（实测 {elapsed:.3f}s）"
+assert {kind for _, _, _, kind in transport_goto.order} == {"go_to"}
+pool_goto.shutdown(wait=True)
 
 pool.shutdown(wait=True)
 pool2.shutdown(wait=True)

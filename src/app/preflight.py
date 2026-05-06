@@ -49,6 +49,7 @@ class PreflightRunner:
         config = self.comp["config"]
         readiness = self.comp.get("readiness_report", {})
         is_crazyswarm_sim = self.comp.get("runtime_backend") == "crazyswarm2_sim"
+        active_drone_ids = list(self.comp.get("active_drone_ids") or fleet.all_ids())
 
         add_check(
             "LEADER_COUNT",
@@ -98,15 +99,17 @@ class PreflightRunner:
             )
             add_check(
                 "POSE_FRESH",
-                bool(all(snapshot.fresh_mask)),
-                "All drone poses are fresh",
+                bool(all(snapshot.fresh_mask[fleet.id_to_index(drone_id)] for drone_id in active_drone_ids)),
+                "All active drone poses are fresh",
                 fresh_mask=snapshot.fresh_mask.tolist(),
+                active_drone_ids=active_drone_ids,
             )
             add_check(
                 "DISCONNECTED",
-                not bool(snapshot.disconnected_ids),
-                "No disconnected drones",
+                not bool(set(snapshot.disconnected_ids) & set(active_drone_ids)),
+                "No active disconnected drones",
                 disconnected_ids=snapshot.disconnected_ids,
+                active_drone_ids=active_drone_ids,
             )
             pose_window = {}
             recent_pose_fn = getattr(pose_bus, "recent_samples", None)
@@ -121,7 +124,7 @@ class PreflightRunner:
                     "POSE_WINDOW_SAMPLES",
                     all(
                         sample_counts.get(drone_id, 0) >= 2
-                        for drone_id in fleet.all_ids()
+                        for drone_id in active_drone_ids
                     ),
                     "Pose window has enough samples for jitter check",
                     window_s=config.safety.estimator_variance_window_s,
@@ -135,7 +138,7 @@ class PreflightRunner:
                         threshold=config.safety.pose_jitter_threshold,
                     )
                 elif config.safety.pose_jitter_threshold > 0:
-                    for drone_id in fleet.all_ids():
+                    for drone_id in active_drone_ids:
                         samples = pose_window.get(drone_id, [])
                         if len(samples) < 2:
                             continue
@@ -161,7 +164,7 @@ class PreflightRunner:
             elif config.safety.min_inter_drone_distance > 0:
                 min_pair = None
                 min_distance = None
-                ids = fleet.all_ids()
+                ids = active_drone_ids
                 for i, left_id in enumerate(ids):
                     left_pos = snapshot.positions[fleet.id_to_index(left_id)]
                     for right_id in ids[i + 1:]:
@@ -180,7 +183,7 @@ class PreflightRunner:
                     threshold=config.safety.min_inter_drone_distance,
                 )
 
-            for drone_id in fleet.all_ids():
+            for drone_id in active_drone_ids:
                 idx = fleet.id_to_index(drone_id)
                 pos = snapshot.positions[idx]
                 in_bounds = not any(

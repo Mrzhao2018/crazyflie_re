@@ -12,6 +12,8 @@ from src.tests.run_real_fixtures import build_components, make_snapshot
 
 def test_orderly_land_records_streaming_to_high_level_stop_contract():
     components = build_components([make_snapshot(1)], [SafetyDecision("EXECUTE", [])])
+    components["config"].control.output_mode = "full_state"
+    components["config"].control.onboard_controller = "mellinger"
     app = RealMissionApp(components)
     components["fsm"]._state = MissionState.RUN
 
@@ -55,6 +57,12 @@ def test_orderly_land_records_streaming_to_high_level_stop_contract():
     assert land_event_names.index("setpoint_stop_notify") < land_event_names.index(
         "leader_land_execution"
     )
+    assert [
+        call for call in components["transport"].controller_calls if call[1] == "pid"
+    ] == [(drone_id, "pid") for drone_id in components["fleet"].follower_ids()]
+    assert land_event_names.index("landing_onboard_controller") < land_event_names.index(
+        "follower_land_execution"
+    )
 
 
 def test_stop_notify_failure_does_not_block_emergency_land():
@@ -81,7 +89,83 @@ def test_stop_notify_failure_does_not_block_emergency_land():
     )
     assert notify_event["details"]["ok"] is False
     assert components["leader_executor"].actions
-    assert components["follower_executor"].land_calls
+    assert components["follower_executor"].velocity_calls
+
+
+def test_emergency_land_goes_directly_to_land_without_zero_velocity_brake():
+    components = build_components([make_snapshot(1)], [SafetyDecision("EXECUTE", [])])
+    app = RealMissionApp(components)
+    components["fsm"]._state = MissionState.RUN
+
+    original_sleep = landing_flow_module.time.sleep
+    try:
+        landing_flow_module.time.sleep = lambda _seconds: None
+        app._emergency_land()
+    finally:
+        landing_flow_module.time.sleep = original_sleep
+
+    event_names = [event["event"] for event in components["telemetry"].events]
+    assert "follower_brake" not in event_names
+    assert not components["follower_executor"].hold_calls
+    assert components["follower_executor"].stop_calls == [
+        components["fleet"].follower_ids()
+    ]
+    assert components["follower_executor"].land_calls == []
+    descent_actions = [
+        action
+        for batch in components["follower_executor"].velocity_calls
+        for action in batch
+    ]
+    assert descent_actions
+    assert {action.drone_id for action in descent_actions} == set(
+        components["fleet"].follower_ids()
+    )
+    assert all(action.velocity[2] < 0.0 for action in descent_actions)
+    assert any(
+        event["event"] == "follower_direct_descent_execution"
+        for event in components["telemetry"].events
+    )
+    assert "setpoint_stop_notify" in event_names
+    assert components["leader_executor"].actions
+
+
+def test_hold_timeout_land_goes_directly_to_land_without_zero_velocity_brake():
+    components = build_components([make_snapshot(1)], [SafetyDecision("EXECUTE", [])])
+    app = RealMissionApp(components)
+    components["fsm"]._state = MissionState.HOLD
+
+    original_sleep = landing_flow_module.time.sleep
+    try:
+        landing_flow_module.time.sleep = lambda _seconds: None
+        app._orderly_land(
+            reason_event="hold_timeout_land",
+            safety_action="HOLD_TIMEOUT",
+            safety_reasons=["hold_timeout"],
+            safety_reason_codes=["HOLD_TIMEOUT"],
+            scheduler_reason="hold_timeout",
+            scheduler_diagnostics={"hold_timeout": True},
+            trajectory_terminal_reason="hold_timeout",
+        )
+    finally:
+        landing_flow_module.time.sleep = original_sleep
+
+    event_names = [event["event"] for event in components["telemetry"].events]
+    assert "follower_brake" not in event_names
+    assert not components["follower_executor"].hold_calls
+    assert components["follower_executor"].stop_calls == [
+        components["fleet"].follower_ids()
+    ]
+    assert components["follower_executor"].land_calls == []
+    descent_actions = [
+        action
+        for batch in components["follower_executor"].velocity_calls
+        for action in batch
+    ]
+    assert descent_actions
+    assert {action.drone_id for action in descent_actions} == set(
+        components["fleet"].follower_ids()
+    )
+    assert all(action.velocity[2] < 0.0 for action in descent_actions)
 
 
 def test_runtime_records_streaming_setpoint_activity():

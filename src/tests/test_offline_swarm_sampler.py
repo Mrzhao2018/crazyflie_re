@@ -1,7 +1,12 @@
 """Offline swarm sampler contracts."""
 
+import numpy as np
+
 from src.app.bootstrap import build_core_app
-from src.runtime.offline_swarm_sampler import sample_offline_swarm
+from src.runtime.offline_swarm_sampler import (
+    evaluate_offline_swarm_at_time,
+    sample_offline_swarm,
+)
 
 
 components = build_core_app("config")
@@ -26,10 +31,25 @@ assert replay.roles[7] == "leader"
 assert replay.roles[8] == "leader"
 assert replay.roles[2] == "follower"
 assert replay.roles[10] == "follower"
-assert replay.leader_positions[1][0] == [1.05, 0.0, 0.35]
-assert replay.positions[1][0] == [1.05, 0.0, 0.35]
+assert replay.leader_positions[1][0] == [0.0, 1.05, 0.45]
+assert replay.positions[1][0] == [0.0, 1.05, 0.45]
 assert replay.follower_positions[5][0] is not None
 assert replay.positions[5][0] == replay.follower_positions[5][0]
 assert all(value > 0 for value in replay.frame_condition_numbers)
+
+
+scaled_components = build_core_app("config")
+scaled_components["mission_profile"].config.leader_motion.trajectory_time_scale = 2.0
+t0 = scaled_components["mission_profile"].trajectory_start_time()
+scaled_sample = evaluate_offline_swarm_at_time(scaled_components, t0 + 2.0)
+
+unscaled_components = build_core_app("config")
+unscaled_components["mission_profile"].config.leader_motion.trajectory_time_scale = 1.0
+unscaled_sample = evaluate_offline_swarm_at_time(unscaled_components, t0 + 1.0)
+
+np.testing.assert_allclose(
+    scaled_sample["leader_reference_positions"][1],
+    unscaled_sample["leader_reference_positions"][1],
+)
 
 print("[OK] Offline swarm sampler verified")

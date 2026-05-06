@@ -1,6 +1,7 @@
 """Leader执行器 - 只执行leader命令"""
 
 import logging
+import time
 from concurrent.futures import Future
 from ..runtime.command_plan import LeaderAction
 from .group_executor_pool import GroupExecutorPool
@@ -189,18 +190,57 @@ class LeaderExecutor:
 
     def _execute_start_trajectory(self, action: LeaderAction):
         trajectory_id = action.payload.get("trajectory_id", 1)
-        time_scale = action.payload.get("time_scale", 1.0)
+        requested_time_scale = action.payload.get("time_scale", 1.0)
+        # Temporary rollback to the last known-good real-flight path. Firmware HLC
+        # start became non-moving when the configured 1.25 scale was forwarded.
+        time_scale = 1.0
         relative_position = action.payload.get("relative_position", False)
         relative_yaw = action.payload.get("relative_yaw", False)
         reversed_mode = action.payload.get("reversed", False)
-        return self._execute_grouped(
+
+        send_timings: dict[int, dict[str, float]] = {}
+
+        def _send_start(drone_id: int) -> None:
+            started = time.monotonic()
+            try:
+                self.transport.hl_start_trajectory(
+                    drone_id,
+                    trajectory_id,
+                    time_scale=time_scale,
+                    relative_position=relative_position,
+                    relative_yaw=relative_yaw,
+                    reversed=reversed_mode,
+                )
+            finally:
+                done = time.monotonic()
+                send_timings[int(drone_id)] = {
+                    "start_monotonic_s": started,
+                    "done_monotonic_s": done,
+                    "duration_ms": (done - started) * 1000.0,
+                }
+
+        result = self._execute_grouped(
             action,
-            lambda drone_id: self.transport.hl_start_trajectory(
-                drone_id,
-                trajectory_id,
-                time_scale=time_scale,
-                relative_position=relative_position,
-                relative_yaw=relative_yaw,
-                reversed=reversed_mode,
-            ),
+            _send_start,
         )
+        if send_timings:
+            starts = [item["start_monotonic_s"] for item in send_timings.values()]
+            dones = [item["done_monotonic_s"] for item in send_timings.values()]
+            first_start = min(starts)
+            result["send_timings"] = {
+                str(drone_id): {
+                    **timing,
+                    "start_offset_ms": (timing["start_monotonic_s"] - first_start) * 1000.0,
+                }
+                for drone_id, timing in sorted(send_timings.items())
+            }
+            result["send_skew_ms"] = (max(dones) - first_start) * 1000.0
+        result["parameters"] = {
+            "trajectory_id": trajectory_id,
+            "time_scale": time_scale,
+            "requested_time_scale": requested_time_scale,
+            "relative_position": relative_position,
+            "relative_yaw": relative_yaw,
+            "reversed": reversed_mode,
+        }
+        return result

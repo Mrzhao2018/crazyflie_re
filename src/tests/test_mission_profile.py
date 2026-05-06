@@ -5,6 +5,7 @@ import numpy as np
 from src.config.loader import ConfigLoader
 from src.domain.mission_profile import MissionProfile
 from src.config.schema import MissionConfig, MissionPhaseConfig
+from src.runtime.offline_swarm_sampler import _evaluate_trajectory_spec
 
 
 config = ConfigLoader.load("config")
@@ -78,6 +79,32 @@ assert any(
 )
 assert any(
     any(abs(coeff) > 0 for coeff in piece.x[2:4]) for piece in leader_a["pieces"]
+)
+
+scaled_generation_config = ConfigLoader.load("config")
+scaled_generation_config.mission.phases = config.mission.phases
+scaled_generation_config.mission.leader_motion.trajectory_enabled = True
+scaled_generation_config.mission.leader_motion.trajectory_sample_dt = 1.0
+scaled_generation_config.mission.leader_motion.trajectory_time_scale = 2.0
+scaled_generation_profile = MissionProfile(scaled_generation_config.mission)
+scaled_generation_spec = scaled_generation_profile.trajectory_spec_for_nominal(
+    np.array([1.0, 0.0, 0.5])
+)
+
+unscaled_generation_config = ConfigLoader.load("config")
+unscaled_generation_config.mission.phases = config.mission.phases
+unscaled_generation_config.mission.leader_motion.trajectory_enabled = True
+unscaled_generation_config.mission.leader_motion.trajectory_sample_dt = 1.0
+unscaled_generation_config.mission.leader_motion.trajectory_time_scale = 1.0
+unscaled_generation_profile = MissionProfile(unscaled_generation_config.mission)
+unscaled_generation_spec = unscaled_generation_profile.trajectory_spec_for_nominal(
+    np.array([1.0, 0.0, 0.5])
+)
+
+np.testing.assert_allclose(
+    _evaluate_trajectory_spec(scaled_generation_spec, 2.0),
+    _evaluate_trajectory_spec(unscaled_generation_spec, 1.0),
+    atol=1e-6,
 )
 quality_summary = trajectory_profile.trajectory_quality_summary()
 assert quality_summary["condition_number_max"] is not None

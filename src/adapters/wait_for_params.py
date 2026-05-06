@@ -19,6 +19,7 @@ def wait_for_params_per_group(
     fleet,
     pool: GroupExecutorPool,
     *,
+    drone_ids: list[int] | None = None,
     on_done: Callable[[int], None] | None = None,
 ) -> None:
     """按 group 并行调用 ``transport.wait_for_params(drone_id)``。
@@ -28,7 +29,7 @@ def wait_for_params_per_group(
     """
 
     grouped: dict[int, list[int]] = {}
-    for drone_id in fleet.all_ids():
+    for drone_id in (drone_ids if drone_ids is not None else fleet.all_ids()):
         group_id = fleet.get_radio_group(drone_id)
         grouped.setdefault(group_id, []).append(drone_id)
 
@@ -45,6 +46,47 @@ def wait_for_params_per_group(
         def _run(drones=drones):
             for drone_id in drones:
                 transport.wait_for_params(drone_id)
+                if on_done is not None:
+                    on_done(drone_id)
+
+        futures.append((group_id, drones, pool.submit(group_id, _run)))
+
+    first_exc: BaseException | None = None
+    for _, _, fut in futures:
+        exc = fut.exception()
+        if exc is not None and first_exc is None:
+            first_exc = exc
+    if first_exc is not None:
+        raise first_exc
+
+
+def reset_estimator_per_group(
+    transport,
+    fleet,
+    pool: GroupExecutorPool,
+    *,
+    drone_ids: list[int] | None = None,
+    on_done: Callable[[int], None] | None = None,
+) -> None:
+    """按 radio group 并行 reset estimator；组内仍串行。"""
+
+    grouped: dict[int, list[int]] = {}
+    for drone_id in (drone_ids if drone_ids is not None else fleet.all_ids()):
+        group_id = fleet.get_radio_group(drone_id)
+        grouped.setdefault(group_id, []).append(drone_id)
+
+    futures: list[tuple[int, list[int], Future]] = []
+    for group_id, drones in grouped.items():
+        if group_id not in pool.group_ids:
+            for drone_id in drones:
+                transport.reset_estimator_and_wait(drone_id)
+                if on_done is not None:
+                    on_done(drone_id)
+            continue
+
+        def _run(drones=drones):
+            for drone_id in drones:
+                transport.reset_estimator_and_wait(drone_id)
                 if on_done is not None:
                     on_done(drone_id)
 

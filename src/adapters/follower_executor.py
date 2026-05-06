@@ -1,6 +1,7 @@
 """Follower执行器 - 只执行follower命令"""
 
 import logging
+from collections.abc import Sequence
 from concurrent.futures import Future
 from ..runtime.command_plan import FollowerAction, HoldAction
 from .group_executor_pool import GroupExecutorPool
@@ -160,7 +161,7 @@ class FollowerExecutor:
         """执行 follower setpoint。
 
         每个 action 自描述发送模式：``kind="velocity"`` 走 ``cmd_velocity_world``，
-        ``kind="full_state"`` 走 ``cmd_full_state``（onboard Mellinger 闭环）。
+        ``kind="full_state"`` 走 ``cmd_full_state`` （onboard Mellinger 闭环）。
         历史上只有 velocity 分支，现在在同一个入口里分发，保持 caller 侧代码不变。
         """
 
@@ -226,6 +227,24 @@ class FollowerExecutor:
             drone_ids,
             lambda drone_id: self.transport.hl_takeoff(drone_id, height, duration),
         )
+
+    def go_to_positions(
+        self,
+        drone_ids: list[int],
+        positions: dict[int, Sequence[float]],
+        duration: float = 2.0,
+    ):
+        def _send_one(drone_id: int) -> None:
+            pos = positions[drone_id]
+            self.transport.hl_go_to(
+                drone_id,
+                float(pos[0]),
+                float(pos[1]),
+                float(pos[2]),
+                duration,
+            )
+
+        return self._run_drone_ids_parallel("go_to", drone_ids, _send_one)
 
     def land(self, drone_ids: list[int], duration: float = 2.0):
         return self._run_drone_ids_parallel(

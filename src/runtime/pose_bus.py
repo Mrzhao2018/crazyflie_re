@@ -7,9 +7,12 @@ from .pose_snapshot import PoseSnapshot
 
 
 class PoseBus:
-    def __init__(self, fleet_model, pose_timeout=1.0):
+    def __init__(self, fleet_model, pose_timeout=1.0, active_drone_ids=None):
         self.fleet = fleet_model
         self.pose_timeout = pose_timeout
+        self.active_drone_ids = (
+            tuple(active_drone_ids) if active_drone_ids is not None else tuple(fleet_model.all_ids())
+        )
         self._agent_poses = {}  # {drone_id: (pos, vel, timestamp)}; vel 可能为 None
         self._history: dict[int, list[tuple[float, np.ndarray]]] = {}
         self._history_window_s = 10.0
@@ -22,7 +25,7 @@ class PoseBus:
         self._scratch_velocities = np.zeros((n, 3), dtype=float)
         self._scratch_fresh = np.zeros(n, dtype=bool)
         self._scratch_vel_fresh = np.zeros(n, dtype=bool)
-        self._all_ids_cache = tuple(fleet_model.all_ids())
+        self._all_ids_cache = self.active_drone_ids
         self._idx_cache = tuple(
             fleet_model.id_to_index(d) for d in self._all_ids_cache
         )

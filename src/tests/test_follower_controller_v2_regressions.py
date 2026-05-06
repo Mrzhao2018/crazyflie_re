@@ -78,7 +78,7 @@ def test_v2_clears_stale_follower_state_before_reentry():
     assert np.linalg.norm(reentry_commands.commands[5]) < 1e-9
 
 
-def test_full_state_reference_smoothing_and_limits():
+def test_full_state_derives_feedforward_from_smoothed_position_reference():
     config = ConfigLoader.load("config")
     config.control.output_mode = "full_state"
     config.control.full_state_position_smoothing_alpha = 0.45
@@ -108,7 +108,8 @@ def test_full_state_reference_smoothing_and_limits():
         frame_condition_number=float("nan"),
         valid=True,
     )
-    controller.compute(snapshot, first_ref, follower_ids, fleet)
+    first_result = controller.compute(snapshot, first_ref, follower_ids, fleet)
+    controller.commit_full_state_state(first_result, follower_ids)
 
     fid = follower_ids[0]
     jumped_targets = {key: value.copy() for key, value in first_targets.items()}
@@ -121,14 +122,84 @@ def test_full_state_reference_smoothing_and_limits():
         frame_condition_number=float("nan"),
         valid=True,
     )
-    result = controller.compute(snapshot, jumped_ref, follower_ids, fleet)
+    next_snapshot = PoseSnapshot(
+        seq=2,
+        t_meas=0.1,
+        positions=nominal.copy(),
+        fresh_mask=np.ones(len(nominal), dtype=bool),
+        disconnected_ids=[],
+    )
+    result = controller.compute(next_snapshot, jumped_ref, follower_ids, fleet)
 
     delta = result.target_positions[fid] - first_targets[fid]
     assert np.isclose(np.linalg.norm(delta), 0.04)
-    assert np.isclose(np.linalg.norm(result.commands[fid]), 0.0)
-    assert np.isclose(np.linalg.norm(result.target_accelerations[fid]), 0.0)
-    assert result.diagnostics["feedforward_suppressed_followers"] == [fid]
-    assert result.diagnostics["acceleration_feedforward_suppressed_followers"] == [fid]
+    np.testing.assert_allclose(result.commands[fid], np.array([0.4, 0.0, 0.0]))
+    np.testing.assert_allclose(result.target_accelerations[fid], np.array([2.0, 0.0, 0.0]))
+    assert result.diagnostics["derived_feedforward_followers"] == [fid]
+    assert result.diagnostics["raw_feedforward_ignored_followers"] == [fid]
+    assert result.diagnostics["raw_acceleration_ignored_followers"] == [fid]
+
+
+def test_full_state_preview_does_not_advance_until_committed():
+    config = ConfigLoader.load("config")
+    config.control.output_mode = "full_state"
+    config.control.full_state_position_smoothing_alpha = 1.0
+    config.control.full_state_max_position_step = 0.04
+    config.control.max_velocity = 0.65
+    config.control.max_acceleration = 2.0
+
+    fleet = FleetModel(config.fleet)
+    controller = FollowerControllerV2(config.control)
+    nominal = np.array(config.mission.nominal_positions, dtype=float)
+    follower_ids = fleet.follower_ids()
+    fid = follower_ids[0]
+    first_targets = {
+        fid: nominal[fleet.id_to_index(fid)].copy() for fid in follower_ids
+    }
+    snapshot = PoseSnapshot(
+        seq=1,
+        t_meas=0.0,
+        positions=nominal.copy(),
+        fresh_mask=np.ones(len(nominal), dtype=bool),
+        disconnected_ids=[],
+    )
+    first_ref = FollowerReferenceSet(
+        follower_ids=list(follower_ids),
+        target_positions=first_targets,
+        target_velocities=None,
+        target_accelerations=None,
+        frame_condition_number=float("nan"),
+        valid=True,
+    )
+
+    uncommitted_seed = controller.compute(snapshot, first_ref, follower_ids, fleet)
+
+    jumped_targets = {key: value.copy() for key, value in first_targets.items()}
+    jumped_targets[fid] = jumped_targets[fid] + np.array([10.0, 0.0, 0.0])
+    jumped_ref = FollowerReferenceSet(
+        follower_ids=list(follower_ids),
+        target_positions=jumped_targets,
+        target_velocities=None,
+        target_accelerations=None,
+        frame_condition_number=float("nan"),
+        valid=True,
+    )
+    next_snapshot = PoseSnapshot(
+        seq=2,
+        t_meas=0.1,
+        positions=nominal.copy(),
+        fresh_mask=np.ones(len(nominal), dtype=bool),
+        disconnected_ids=[],
+    )
+
+    preview_without_commit = controller.compute(
+        next_snapshot, jumped_ref, follower_ids, fleet
+    )
+    np.testing.assert_allclose(preview_without_commit.commands[fid], np.zeros(3))
+
+    controller.commit_full_state_state(uncommitted_seed, follower_ids)
+    preview_after_commit = controller.compute(next_snapshot, jumped_ref, follower_ids, fleet)
+    np.testing.assert_allclose(preview_after_commit.commands[fid], np.array([0.4, 0.0, 0.0]))
 
 
 def test_full_state_first_reference_is_limited_from_current_position():

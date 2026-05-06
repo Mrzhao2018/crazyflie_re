@@ -41,6 +41,47 @@ class FollowerControllerV2(FollowerControllerBase):
             getattr(config, "full_state_max_position_step", float("inf"))
         )
         self._last_full_state_targets: dict[int, np.ndarray] = {}
+        self._last_full_state_velocities: dict[int, np.ndarray] = {}
+        self._last_full_state_t: dict[int, float] = {}
+
+    def reset_full_state_state(self, follower_ids: list[int] | set[int] | None = None) -> None:
+        """Clear committed full-state smoothing state.
+
+        Used when a follower is held or re-enters the stream so the next
+        reference starts from the measured pose instead of a stale internal
+        target.
+        """
+
+        if follower_ids is None:
+            self._last_full_state_targets.clear()
+            self._last_full_state_velocities.clear()
+            self._last_full_state_t.clear()
+            return
+        for fid in follower_ids:
+            self._last_full_state_targets.pop(int(fid), None)
+            self._last_full_state_velocities.pop(int(fid), None)
+            self._last_full_state_t.pop(int(fid), None)
+
+    def commit_full_state_state(
+        self,
+        command_set: FollowerCommandSet,
+        follower_ids: list[int] | set[int] | None = None,
+    ) -> None:
+        """Commit only full-state references that were actually sent."""
+
+        pending = command_set.full_state_state or {}
+        allowed = None if follower_ids is None else {int(fid) for fid in follower_ids}
+        for fid, state in pending.items():
+            fid_int = int(fid)
+            if allowed is not None and fid_int not in allowed:
+                continue
+            self._last_full_state_targets[fid_int] = np.asarray(
+                state["target_position"], dtype=float
+            ).copy()
+            self._last_full_state_velocities[fid_int] = np.asarray(
+                state["target_velocity"], dtype=float
+            ).copy()
+            self._last_full_state_t[fid_int] = float(state["t_meas"])
 
     def _estimate_current_velocity(
         self,
@@ -83,62 +124,94 @@ class FollowerControllerV2(FollowerControllerBase):
     ) -> FollowerCommandSet:
         """full_state 模式：把 (pos, vel, acc) reference 透传给 onboard Mellinger。
 
-        host 侧不再做 PD / 积分 / 速度饱和 —— 所有闭环逻辑在飞控完成。
+        host 侧不再做 PD / 积分闭环；只保留参考平滑与速度/加速度限幅，
+        闭环逻辑在飞控完成。
         ``commands`` 里保留 ref velocity 仅供 scheduler 的 deadband 与 diagnostics
         使用；真正下发的是 full_state action 里的 pos+vel+acc。
         """
         commands: dict[int, np.ndarray] = {}
         target_positions: dict[int, np.ndarray] = {}
         target_accelerations: dict[int, np.ndarray] = {}
+        full_state_state: dict[int, dict[str, np.ndarray | float]] = {}
         skipped_stale: list[int] = []
         missing_reference: list[int] = []
-        feedforward_suppressed: list[int] = []
-        acceleration_feedforward_suppressed: list[int] = []
+        derived_feedforward_applied: list[int] = []
+        derived_acceleration_applied: list[int] = []
+        raw_feedforward_ignored: list[int] = []
+        raw_acceleration_ignored: list[int] = []
 
         for fid in active_follower_ids:
             if fid not in references.target_positions:
                 missing_reference.append(fid)
                 self._last_full_state_targets.pop(fid, None)
+                self._last_full_state_velocities.pop(fid, None)
+                self._last_full_state_t.pop(fid, None)
                 continue
             idx = fleet_model.id_to_index(fid)
             if not snapshot.fresh_mask[idx]:
                 skipped_stale.append(fid)
                 self._last_full_state_targets.pop(fid, None)
+                self._last_full_state_velocities.pop(fid, None)
+                self._last_full_state_t.pop(fid, None)
                 continue
 
             p_current = np.array(snapshot.positions[idx], dtype=float)
             p_target_raw = np.array(references.target_positions[fid], dtype=float)
+            previous_target = self._last_full_state_targets.get(fid)
+            previous_velocity = self._last_full_state_velocities.get(fid)
+            previous_t = self._last_full_state_t.get(fid)
             p_target = self._smooth_full_state_position(
                 fid, p_target_raw, current_position=p_current
             )
+            raw_v = None
             if references.target_velocities is not None:
-                raw_v = references.target_velocities.get(fid)
+                raw_v = self._finite_vector(references.target_velocities.get(fid))
                 if raw_v is not None:
-                    feedforward_suppressed.append(fid)
+                    raw_feedforward_ignored.append(fid)
+            raw_a = None
             if references.target_accelerations is not None:
-                raw_a = references.target_accelerations.get(fid)
+                raw_a = self._finite_vector(references.target_accelerations.get(fid))
                 if raw_a is not None:
-                    acceleration_feedforward_suppressed.append(fid)
+                    raw_acceleration_ignored.append(fid)
 
-            # In full-state mode Mellinger expects a self-consistent
-            # position/velocity/acceleration tuple. The AFC velocity and
-            # acceleration estimates are derived from raw target jumps, while
-            # the position reference above is intentionally smoothed/limited for
-            # real flight. Sending the raw feedforward together with a smoothed
-            # position can command aggressive thrust in the wrong direction, so
-            # keep feedforward at zero until it is generated from the same
-            # smoothed trajectory.
-            v_target = np.zeros(3, dtype=float)
-            a_target = np.zeros(3, dtype=float)
+            fallback_v = np.zeros(3, dtype=float)
+            fallback_a = np.zeros(3, dtype=float)
+            current_t = float(snapshot.t_meas)
+            if previous_target is not None and previous_t is not None:
+                dt = current_t - previous_t
+                if dt > 1e-6:
+                    fallback_v = self._clip_vector_norm(
+                        (p_target - previous_target) / dt,
+                        self.max_velocity,
+                    )
+                    if previous_velocity is not None:
+                        fallback_a = self._clip_vector_norm(
+                            (fallback_v - previous_velocity) / dt,
+                            self.max_acceleration,
+                        )
+                    if np.linalg.norm(fallback_v) > 1e-12:
+                        derived_feedforward_applied.append(fid)
+                    if np.linalg.norm(fallback_a) > 1e-12:
+                        derived_acceleration_applied.append(fid)
+
+            v_target = fallback_v
+            a_target = fallback_a
 
             target_positions[fid] = p_target
             target_accelerations[fid] = a_target
             commands[fid] = v_target
+            full_state_state[fid] = {
+                "target_position": p_target.copy(),
+                "target_velocity": v_target.copy(),
+                "t_meas": current_t,
+            }
 
         active_set = set(active_follower_ids)
         for fid in list(self._last_full_state_targets):
             if fid not in active_set:
                 self._last_full_state_targets.pop(fid, None)
+                self._last_full_state_velocities.pop(fid, None)
+                self._last_full_state_t.pop(fid, None)
 
         command_norms = {
             fid: float(np.linalg.norm(v)) for fid, v in commands.items()
@@ -149,10 +222,14 @@ class FollowerControllerV2(FollowerControllerBase):
                 "output_mode": "full_state",
                 "skipped_stale_followers": skipped_stale,
                 "missing_reference_followers": missing_reference,
-                "feedforward_followers": [],
-                "acceleration_feedforward_followers": [],
-                "feedforward_suppressed_followers": feedforward_suppressed,
-                "acceleration_feedforward_suppressed_followers": acceleration_feedforward_suppressed,
+                "feedforward_followers": derived_feedforward_applied,
+                "acceleration_feedforward_followers": derived_acceleration_applied,
+                "derived_feedforward_followers": derived_feedforward_applied,
+                "derived_acceleration_followers": derived_acceleration_applied,
+                "raw_feedforward_ignored_followers": raw_feedforward_ignored,
+                "raw_acceleration_ignored_followers": raw_acceleration_ignored,
+                "feedforward_suppressed_followers": [],
+                "acceleration_feedforward_suppressed_followers": [],
                 "radial_scaled_followers": [],
                 "commanded_accelerations": {},
                 "command_norms": command_norms,
@@ -160,7 +237,20 @@ class FollowerControllerV2(FollowerControllerBase):
             },
             target_positions=target_positions,
             target_accelerations=target_accelerations,
+            full_state_state=full_state_state,
         )
+
+    @staticmethod
+    def _finite_vector(value) -> np.ndarray | None:
+        if value is None:
+            return None
+        try:
+            vector = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            return None
+        if vector.shape != (3,) or not np.isfinite(vector).all():
+            return None
+        return vector
 
     def _smooth_full_state_position(
         self,
@@ -183,7 +273,6 @@ class FollowerControllerV2(FollowerControllerBase):
         norm = float(np.linalg.norm(delta))
         if norm > self.full_state_max_position_step:
             smoothed = previous + delta / norm * self.full_state_max_position_step
-        self._last_full_state_targets[fid] = smoothed.copy()
         return smoothed
 
     @staticmethod

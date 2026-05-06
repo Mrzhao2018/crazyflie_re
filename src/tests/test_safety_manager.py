@@ -13,6 +13,7 @@ from src.runtime.follower_controller import FollowerCommandSet
 config = ConfigLoader.load("config")
 config.safety.min_vbat = 3.15
 config.safety.min_vbat_critical = 2.8
+config.safety.runtime_pose_jump_hold_streak = 2
 fleet = FleetModel(config.fleet)
 safety = SafetyManager(config.safety, fleet)
 nominal = np.array(config.mission.nominal_positions, dtype=float)
@@ -45,14 +46,28 @@ decision = safety.evaluate(snapshot, commands=commands)
 assert decision.action == "HOLD"
 assert "COMMAND_SATURATED" in decision.reason_codes
 
-pose_jump_decision = safety.evaluate(
+pose_jump_safety = SafetyManager(config.safety, fleet)
+pose_jump_window = {
+    5: [
+        (0.0, nominal[fleet.id_to_index(5)].copy()),
+        (0.1, nominal[fleet.id_to_index(5)] + np.array([0.0, 0.0, 0.5])),
+    ]
+}
+pose_jump_decision = pose_jump_safety.evaluate(
     snapshot,
-    pose_window={
-        5: [
-            (0.0, nominal[fleet.id_to_index(5)].copy()),
-            (0.1, nominal[fleet.id_to_index(5)] + np.array([0.0, 0.0, 0.5])),
-        ]
-    },
+    pose_window=pose_jump_window,
+)
+assert pose_jump_decision.action == "EXECUTE"
+assert "POSE_JUMP" in pose_jump_decision.reason_codes
+pose_jump_reason = next(
+    reason for reason in pose_jump_decision.structured_reasons if reason.code == "POSE_JUMP"
+)
+assert pose_jump_reason.severity == "TELEMETRY"
+assert pose_jump_reason.details["streak"] == 1
+
+pose_jump_decision = pose_jump_safety.evaluate(
+    snapshot,
+    pose_window=pose_jump_window,
 )
 assert pose_jump_decision.action == "HOLD"
 assert "POSE_JUMP" in pose_jump_decision.reason_codes
@@ -60,6 +75,7 @@ pose_jump_reason = next(
     reason for reason in pose_jump_decision.structured_reasons if reason.code == "POSE_JUMP"
 )
 assert pose_jump_reason.details["drone_id"] == 5
+assert pose_jump_reason.details["streak"] == 2
 assert pose_jump_reason.details["vertical_speed"] > config.safety.runtime_vertical_speed_threshold
 
 health = {5: HealthSample(t_meas=0.0, values={"pm.vbat": 4.0})}

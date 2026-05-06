@@ -124,12 +124,15 @@ config.control.velocity_feedback_gain = 0.8
 config.control.acceleration_feedforward_gain = 1.0
 config.control.max_acceleration = 2.0
 controller_v2 = FollowerControllerV2(config.control)
+snapshot_next = PoseSnapshot(1, 0.1, nominal, np.ones(len(nominal), dtype=bool), [])
 commands_v2_seed = controller_v2.compute(
-    snapshot, follower_ref_next, fleet.follower_ids(), fleet
+    snapshot_next, follower_ref_next, fleet.follower_ids(), fleet
 )
 assert len(commands_v2_seed.commands) == len(fleet.follower_ids())
+controller_v2.commit_full_state_state(commands_v2_seed, fleet.follower_ids())
+snapshot_next2 = PoseSnapshot(2, 0.2, nominal, np.ones(len(nominal), dtype=bool), [])
 commands_v2 = controller_v2.compute(
-    snapshot, follower_ref_next2, fleet.follower_ids(), fleet
+    snapshot_next2, follower_ref_next2, fleet.follower_ids(), fleet
 )
 assert commands_v2.diagnostics["feedforward_followers"]
 assert commands_v2.diagnostics["acceleration_feedforward_followers"]

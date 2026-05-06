@@ -8,15 +8,23 @@ carry all of this orchestration inline.
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 from ..app.mission_errors import MissionErrorDefinition
-from .command_plan import HoldAction
+import numpy as np
+
+from .command_plan import FollowerAction, HoldAction
 from .mission_fsm import MissionState
 from .telemetry import TelemetryRecord
 
 
 logger = logging.getLogger(__name__)
+
+ORDERLY_LAND_DURATION_S = 4.0
+SAFETY_DIRECT_LAND_DURATION_S = 2.0
+SAFETY_DIRECT_DESCENT_RATE_MPS = 0.45
+SAFETY_DIRECT_DESCENT_RATE_HZ = 10.0
 
 
 class LandingFlow:
@@ -83,7 +91,7 @@ class LandingFlow:
         actions = [HoldAction(drone_id=drone_id) for drone_id in follower_ids]
         for attempt in range(max(1, int(repeats))):
             try:
-                result = app.comp["follower_executor"].execute_hold(actions)
+                result = app._execute_hold_actions(actions)
                 app.telemetry_reporter.record_executor_summary(
                     "follower_brake_execution", [result]
                 )
@@ -108,6 +116,139 @@ class LandingFlow:
                     error=str(exc),
                 )
             time.sleep(max(0.0, float(interval_s)))
+
+    def _switch_followers_to_pid_for_high_level_land(self, *, reason: str) -> None:
+        """Return full-state followers to PID before high-level land commands."""
+        app = self.app
+        if app.comp["config"].control.output_mode != "full_state":
+            return
+
+        for drone_id in self._active_follower_ids():
+            try:
+                app.comp["transport"].set_onboard_controller(drone_id, "pid")
+                app.telemetry.record_event(
+                    "landing_onboard_controller",
+                    ok=True,
+                    reason=reason,
+                    drone_id=int(drone_id),
+                    controller="pid",
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Failed to switch follower %s to PID before high-level land",
+                    drone_id,
+                )
+                app.telemetry.record_event(
+                    "landing_onboard_controller",
+                    ok=False,
+                    reason=reason,
+                    drone_id=int(drone_id),
+                    controller="pid",
+                    error=str(exc),
+                )
+
+    @staticmethod
+    def _should_direct_land(
+        *, safety_action: str, scheduler_reason: str, reason_event: str
+    ) -> bool:
+        return (
+            safety_action in {"HOLD_TIMEOUT", "ABORT"}
+            or scheduler_reason in {"hold_timeout", "emergency_land"}
+            or reason_event in {"hold_timeout_land", "emergency_land"}
+        )
+
+    def _direct_descend_followers(self, *, reason: str) -> dict:
+        """For safety land, keep followers in velocity mode and command downward motion."""
+        app = self.app
+        follower_ids = self._active_follower_ids()
+        if not follower_ids:
+            return {"kind": "direct_descent", "successes": [], "failures": []}
+
+        ticks = max(
+            1,
+            int(math.ceil(SAFETY_DIRECT_LAND_DURATION_S * SAFETY_DIRECT_DESCENT_RATE_HZ)),
+        )
+        period_s = 1.0 / SAFETY_DIRECT_DESCENT_RATE_HZ
+        velocity = np.array([0.0, 0.0, -SAFETY_DIRECT_DESCENT_RATE_MPS], dtype=float)
+        successes: set[int] = set()
+        failures: list[dict] = []
+
+        if app.comp["config"].control.output_mode == "full_state":
+            snapshot = app.comp["pose_bus"].latest()
+            if snapshot is None:
+                raise RuntimeError("full_state direct descent requires a pose snapshot")
+            targets: dict[int, np.ndarray] = {}
+            for drone_id in follower_ids:
+                idx = app.fleet.id_to_index(drone_id)
+                targets[int(drone_id)] = np.array(snapshot.positions[idx], dtype=float)
+
+            for _ in range(ticks):
+                actions = []
+                for drone_id in follower_ids:
+                    target = targets[int(drone_id)].copy()
+                    target[2] = max(0.0, target[2] - SAFETY_DIRECT_DESCENT_RATE_MPS * period_s)
+                    targets[int(drone_id)] = target
+                    actions.append(
+                        FollowerAction(
+                            kind="full_state",
+                            drone_id=drone_id,
+                            velocity=velocity,
+                            position=target,
+                            acceleration=np.zeros(3, dtype=float),
+                        )
+                    )
+                result = app.comp["follower_executor"].execute_velocity(actions)
+                successes.update(int(drone_id) for drone_id in result.get("successes", []))
+                failures.extend(result.get("failures") or [])
+                time.sleep(period_s)
+
+            summary = {
+                "kind": "full_state_direct_descent",
+                "successes": sorted(successes),
+                "failures": failures,
+                "ticks": ticks,
+                "rate_hz": SAFETY_DIRECT_DESCENT_RATE_HZ,
+                "descent_rate_mps": SAFETY_DIRECT_DESCENT_RATE_MPS,
+            }
+            app.telemetry.record_event(
+                "follower_direct_descent_execution",
+                ok=not bool(failures),
+                reason=reason,
+                drone_ids=follower_ids,
+                result=summary,
+            )
+            return summary
+
+        for _ in range(ticks):
+            actions = [
+                FollowerAction(
+                    kind="velocity",
+                    drone_id=drone_id,
+                    velocity=velocity,
+                )
+                for drone_id in follower_ids
+            ]
+            result = app.comp["follower_executor"].execute_velocity(actions)
+            successes.update(int(drone_id) for drone_id in result.get("successes", []))
+            failures.extend(result.get("failures") or [])
+            time.sleep(period_s)
+
+        summary = {
+            "kind": "direct_descent",
+            "successes": sorted(successes),
+            "failures": failures,
+            "ticks": ticks,
+            "rate_hz": SAFETY_DIRECT_DESCENT_RATE_HZ,
+            "descent_rate_mps": SAFETY_DIRECT_DESCENT_RATE_MPS,
+        }
+        app.telemetry.record_event(
+            "follower_direct_descent_execution",
+            ok=not bool(failures),
+            reason=reason,
+            drone_ids=follower_ids,
+            result=summary,
+        )
+        return summary
 
     # ---- graceful shutdown / orderly land --------------------------------
 
@@ -158,8 +299,18 @@ class LandingFlow:
 
         try:
             app.telemetry.record_event(reason_event, ok=True)
-            self._brake_streaming_followers(reason=reason_event)
+            direct_land = self._should_direct_land(
+                safety_action=safety_action,
+                scheduler_reason=scheduler_reason,
+                reason_event=reason_event,
+            )
+            if not direct_land:
+                self._brake_streaming_followers(reason=reason_event)
+            else:
+                self._direct_descend_followers(reason=reason_event)
             self._notify_streaming_setpoint_stop(reason=reason_event)
+            if not direct_land:
+                self._switch_followers_to_pid_for_high_level_land(reason=reason_event)
             time.sleep(0.2)
             leader_land_results = app.comp["leader_executor"].execute(
                 [app._leader_land_action(app.fleet.leader_ids())]
@@ -167,12 +318,14 @@ class LandingFlow:
             app.telemetry_reporter.record_executor_summary(
                 "leader_land_execution", leader_land_results
             )
-            follower_land_result = app.comp["follower_executor"].land(
-                self._active_follower_ids(), duration=4.0
-            )
-            app.telemetry_reporter.record_executor_summary(
-                "follower_land_execution", [follower_land_result]
-            )
+            if not direct_land:
+                follower_land_result = app.comp["follower_executor"].land(
+                    self._active_follower_ids(),
+                    duration=ORDERLY_LAND_DURATION_S,
+                )
+                app.telemetry_reporter.record_executor_summary(
+                    "follower_land_execution", [follower_land_result]
+                )
             app._terminal_land_executed = True
             app._set_trajectory_state("terminated", trajectory_terminal_reason)
             time.sleep(3.0)
@@ -207,16 +360,13 @@ class LandingFlow:
         app.fsm.force_abort()
         app._set_trajectory_state("terminated", "abort")
 
-        self._brake_streaming_followers(reason="emergency_land")
+        self._direct_descend_followers(reason="emergency_land")
         self._notify_streaming_setpoint_stop(reason="emergency_land")
         time.sleep(0.2)
 
         try:
             app.comp["leader_executor"].execute(
                 [app._leader_land_action(app.fleet.leader_ids())]
-            )
-            app.comp["follower_executor"].land(
-                self._active_follower_ids(), duration=4.0
             )
             app._terminal_land_executed = True
         except Exception as exc:

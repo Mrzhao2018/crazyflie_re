@@ -118,6 +118,7 @@ class FakeTransport:
         self.wait_calls = []
         self.reset_calls = []
         self.controller_calls = []
+        self.param_calls = []
         self.upload_calls = []
         self.define_calls = []
         self.velocity_calls = []
@@ -132,6 +133,9 @@ class FakeTransport:
 
     def set_onboard_controller(self, drone_id, controller):
         self.controller_calls.append((drone_id, controller))
+
+    def set_param(self, drone_id, name, value):
+        self.param_calls.append((drone_id, name, value))
 
     def upload_trajectory(self, drone_id, pieces, start_addr=0):
         self.upload_calls.append((drone_id, pieces, start_addr))
@@ -319,6 +323,7 @@ class FakeLeaderExecutor:
 class FakeFollowerExecutor:
     def __init__(self):
         self.takeoff_calls = []
+        self.go_to_calls = []
         self.hold_calls = []
         self.velocity_calls = []
         self.land_calls = []
@@ -329,6 +334,10 @@ class FakeFollowerExecutor:
     def takeoff(self, drone_ids, height=0.5, duration=2.0):
         self.takeoff_calls.append((list(drone_ids), height, duration))
         return {"kind": "takeoff", "successes": list(drone_ids), "failures": []}
+
+    def go_to_positions(self, drone_ids, positions, duration=2.0):
+        self.go_to_calls.append((list(drone_ids), dict(positions), duration))
+        return {"kind": "go_to", "successes": list(drone_ids), "failures": []}
 
     def execute_hold(self, actions):
         self.hold_calls.append(actions)
@@ -383,7 +392,11 @@ class FakeFrameEstimator:
 
 
 class FakeFollowerRefGen:
+    def __init__(self):
+        self.calls = []
+
     def compute(self, leader_positions, t_meas=None):
+        self.calls.append((dict(leader_positions), t_meas))
         return type(
             "FollowerRef",
             (),
@@ -392,7 +405,7 @@ class FakeFollowerRefGen:
                 "frame_condition_number": 1.0,
                 "target_positions": {
                     5: np.array([0.0, 0.0, 1.0]),
-                    6: np.array([0.0, 0.0, 1.0]),
+                    6: np.array([0.5, 0.5, 1.0]),
                 },
                 "target_velocities": None,
                 "target_accelerations": None,
@@ -594,6 +607,10 @@ def build_components(
                 (),
                 {
                     "mode": startup_mode,
+                    "follower_align_enabled": True,
+                    "follower_align_duration_s": 0.0,
+                    "follower_align_settle_s": 0.0,
+                    "follower_align_tolerance_m": 0.25,
                     "manual": type(
                         "FakeManualCfg",
                         (),
@@ -632,6 +649,8 @@ def build_components(
                 {
                     "hold_auto_land_timeout": 0.2,
                     "velocity_stream_watchdog_action": watchdog_action,
+                    "velocity_stream_watchdog_factor": 6.0,
+                    "velocity_stream_watchdog_degrade_streak": 2,
                 },
             )(),
             "control": type(
@@ -640,6 +659,7 @@ def build_components(
                 {
                     "output_mode": "velocity",
                     "onboard_controller": "pid",
+                    "onboard_param_overrides": None,
                     "dynamics_model_order": 1,
                     "max_velocity": 0.65,
                     "max_acceleration": 1.5,

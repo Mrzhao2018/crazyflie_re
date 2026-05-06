@@ -67,6 +67,16 @@ def _build_follower_controller(control_config):
     return FollowerController(control_config)
 
 
+def _active_drone_ids(config, fleet) -> list[int]:
+    configured = getattr(config.control, "active_follower_ids", None)
+    follower_ids = (
+        list(fleet.follower_ids())
+        if configured is None
+        else [int(drone_id) for drone_id in configured]
+    )
+    return list(fleet.leader_ids()) + follower_ids
+
+
 def build_core_app(config_dir: str, startup_mode_override: str | None = None):
     """构建与真机无关的核心应用对象"""
     resolved_config_dir = str(Path(config_dir).resolve())
@@ -95,8 +105,10 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
         delay_prediction_gain=config.control.delay_prediction_gain,
     )
 
+    active_drone_ids = _active_drone_ids(config, fleet)
+
     # 3. Runtime层
-    pose_bus = PoseBus(fleet, config.safety.pose_timeout)
+    pose_bus = PoseBus(fleet, config.safety.pose_timeout, active_drone_ids=active_drone_ids)
     frame_estimator = AffineFrameEstimator(fleet)
     follower_controller = _build_follower_controller(config.control)
     fsm = MissionFSM()
@@ -154,6 +166,7 @@ def build_core_app(config_dir: str, startup_mode_override: str | None = None):
         "link_state_bus": link_state_bus,
         "manual_leader_state": manual_state,
         "manual_input": manual_input,
+        "active_drone_ids": active_drone_ids,
     }
 
     components["preflight"] = PreflightRunner(components)
@@ -171,6 +184,7 @@ def build_real_app(config_dir: str, startup_mode_override: str | None = None):
 
     link_manager = CflibLinkManager(
         components["fleet"],
+        active_drone_ids=components["active_drone_ids"],
         link_quality_bus=components.get("link_quality_bus"),
         link_state_bus=components.get("link_state_bus"),
         connect_pace_s=components["config"].comm.connect_pace_s,
@@ -195,6 +209,7 @@ def build_real_app(config_dir: str, startup_mode_override: str | None = None):
         link_manager,
         components["fleet"],
         components["config"].comm.pose_log_freq,
+        active_drone_ids=components["active_drone_ids"],
         attitude_log_enabled=components["config"].comm.attitude_log_enabled,
         motor_log_enabled=components["config"].comm.motor_log_enabled,
     )

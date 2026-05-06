@@ -251,12 +251,12 @@ class CflibCommandTransport:
 
         姿态固定为 identity quaternion，角速度喂 0，让 onboard 自主解算。
 
-        会在下发前 reject NaN/Inf 与任意分量 |v| > ``FULL_STATE_INT16_LIMIT`` 的
-        输入。cflib 的 `send_full_state_setpoint` 会把三组向量量化成 int16 mm/
-        mm·s/mm·s^2，超界时 `struct.pack('<h', ...)` 会抛 ``struct.error``，放任
+        会在下发前 reject NaN/Inf 与任意分量 ``|v| > FULL_STATE_INT16_LIMIT`` 的
+        输入。cflib 的 ``send_full_state_setpoint`` 会把三组向量量化成 int16 mm/
+        mm·s/mm·s^2，超界时 ``struct.pack('<h', ...)`` 会抛 ``struct.error``，放任
         下去会把整组 follower 拖进 ``executor_group_hold``，所以在此主动拦截并
-        `raise ValueError` 让上层 `classify_command_failure` 归入
-        `invalid_command` / `retryable=false`。
+        ``raise ValueError`` 让上层 ``classify_command_failure`` 归入
+        ``invalid_command`` / ``retryable=false``。
         """
         _validate_full_state_vector("pos", pos)
         _validate_full_state_vector("vel", vel)
@@ -284,6 +284,11 @@ class CflibCommandTransport:
             raise ValueError(f"Unsupported onboard controller: {controller}")
         scf = self.link_manager.get(drone_id)
         scf.cf.param.set_value("stabilizer.controller", str(mapping[controller]))
+
+    def set_param(self, drone_id: int, name: str, value) -> None:
+        """Set a firmware parameter through cflib's param port."""
+        scf = self.link_manager.get(drone_id)
+        scf.cf.param.set_value(str(name), str(value))
 
     def notify_setpoint_stop(self, drone_id: int):
         """通知停止低层setpoint流，恢复高层控制权限"""

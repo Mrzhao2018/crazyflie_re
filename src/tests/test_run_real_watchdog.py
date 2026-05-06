@@ -7,7 +7,7 @@ from src.app.run_real import RealMissionApp
 from src.runtime.failure_policy import VELOCITY_STREAM_WATCHDOG_FACTOR
 from src.tests.run_real_fixtures import build_components, make_snapshot
 from src.runtime.mission_fsm import MissionState
-from src.runtime.safety_manager import SafetyDecision
+from src.runtime.safety_manager import SafetyDecision, SafetyReason
 
 
 components = build_components(
@@ -40,6 +40,12 @@ assert all(
     item["watchdog_timeout"] == (1.0 / 8.0) * VELOCITY_STREAM_WATCHDOG_FACTOR
     for item in watchdog_event["details"]["stale_followers"]
 )
+assert all(item["stale_streak"] == 1 for item in watchdog_event["details"]["stale_followers"])
+assert all(
+    item["required_streak"]
+    == components["config"].safety.velocity_stream_watchdog_degrade_streak
+    for item in watchdog_event["details"]["stale_followers"]
+)
 
 
 components = build_components(
@@ -55,6 +61,10 @@ transport._last_velocity_command_time = {5: time.monotonic() - 10.0}
 stale = app._check_velocity_stream_watchdog(snapshot_t_meas=1.0)
 
 assert [item["drone_id"] for item in stale] == [5]
+assert components["fsm"].state() == MissionState.RUN
+stale = app._check_velocity_stream_watchdog(snapshot_t_meas=1.1)
+
+assert [item["drone_id"] for item in stale] == [5]
 assert components["fsm"].state() == MissionState.HOLD
 assert len(components["follower_executor"].hold_calls) == 1
 hold_event = next(
@@ -66,6 +76,35 @@ assert hold_event["details"]["reason"] == "watchdog"
 assert hold_event["details"]["category"] == MissionErrors.Runtime.WATCHDOG_HOLD.category
 assert hold_event["details"]["code"] == MissionErrors.Runtime.WATCHDOG_HOLD.code
 assert hold_event["details"]["stage"] == MissionErrors.Runtime.WATCHDOG_HOLD.stage
+
+
+components = build_components(
+    [make_snapshot(1), make_snapshot(2)],
+    [SafetyDecision("EXECUTE", []), SafetyDecision("EXECUTE", [])],
+    watchdog_action="hold",
+)
+components["config"].control.output_mode = "full_state"
+components["config"].control.onboard_controller = "mellinger"
+app = RealMissionApp(components)
+components["fsm"]._state = MissionState.RUN
+transport = components["transport"]
+transport._last_velocity_command_time = {5: time.monotonic() - 10.0}
+
+app._check_velocity_stream_watchdog(snapshot_t_meas=1.0)
+app._check_velocity_stream_watchdog(snapshot_t_meas=1.1)
+
+assert components["follower_executor"].hold_calls == []
+assert len(components["follower_executor"].velocity_calls) == 1
+full_state_hold_actions = components["follower_executor"].velocity_calls[0]
+assert [action.kind for action in full_state_hold_actions] == ["full_state"]
+assert [action.drone_id for action in full_state_hold_actions] == [5]
+assert full_state_hold_actions[0].position is not None
+assert full_state_hold_actions[0].acceleration is not None
+assert any(
+    event["event"] == "full_state_hold_setpoint"
+    and event["details"]["drone_ids"] == [5]
+    for event in components["telemetry"].events
+)
 
 
 components = build_components(
@@ -114,7 +153,40 @@ hold_summary = next(
     if event["event"] == "follower_hold_execution"
 )
 assert hold_summary["details"]["radio_groups"][2]["successes"] == [5, 6]
-assert len(components["follower_executor"].velocity_calls) == 0
+descent_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "follower_direct_descent_execution"
+)
+assert descent_event["details"]["ok"] is True
+
+
+components = build_components(
+    [make_snapshot(1), make_snapshot(2)],
+    [SafetyDecision("EXECUTE", []), SafetyDecision("EXECUTE", [])],
+    watchdog_action="degrade",
+)
+app = RealMissionApp(components)
+transport = components["transport"]
+transport._last_velocity_command_time = {5: time.monotonic() - 10.0}
+
+first_stale = app._check_velocity_stream_watchdog(snapshot_t_meas=1.0)
+
+assert [item["drone_id"] for item in first_stale] == [5]
+assert first_stale[0]["stale_streak"] == 1
+assert first_stale[0]["required_streak"] == 2
+assert not any(
+    event["event"] == "watchdog_degrade"
+    for event in components["telemetry"].events
+)
+
+second_stale = app._check_velocity_stream_watchdog(snapshot_t_meas=1.1)
+
+assert second_stale[0]["stale_streak"] == 2
+assert any(
+    event["event"] == "watchdog_degrade"
+    for event in components["telemetry"].events
+)
 
 
 components = build_components(
@@ -227,5 +299,54 @@ assert hold_event["details"]["category"] == MissionErrors.Runtime.EXECUTOR_GROUP
 assert hold_event["details"]["code"] == MissionErrors.Runtime.EXECUTOR_GROUP_HOLD.code
 assert hold_event["details"]["stage"] == MissionErrors.Runtime.EXECUTOR_GROUP_HOLD.stage
 assert components["fsm"].state() == MissionState.HOLD
+
+
+components = build_components(
+    [make_snapshot(1), make_snapshot(2), make_snapshot(3)],
+    [
+        SafetyDecision(
+            "HOLD",
+            ["Drone 5 pose jump detected"],
+            reason_codes=["POSE_JUMP"],
+            structured_reasons=[
+                SafetyReason(
+                    code="POSE_JUMP",
+                    severity="HOLD",
+                    message="Drone 5 pose jump detected",
+                    details={
+                        "drone_id": 5,
+                        "speed": 3.4,
+                        "speed_threshold": 3.0,
+                    },
+                )
+            ],
+        ),
+        SafetyDecision("EXECUTE", []),
+        SafetyDecision("ABORT", ["stop"]),
+    ],
+)
+app = RealMissionApp(components)
+components["fsm"]._state = MissionState.SETTLE
+
+app.run()
+
+safety_hold_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "hold_entered"
+    and event["details"]["reason"] == "safety"
+)
+assert safety_hold_event["details"].get("reason_codes") == ["POSE_JUMP"]
+assert (
+    safety_hold_event["details"].get("structured_reasons", [{}])[0].get("code")
+    == "POSE_JUMP"
+)
+assert (
+    safety_hold_event["details"]
+    .get("structured_reasons", [{"details": {}}])[0]
+    .get("details", {})
+    .get("drone_id")
+    == 5
+)
 
 print("[OK] RealMissionApp velocity watchdog verified")

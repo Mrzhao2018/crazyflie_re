@@ -44,11 +44,15 @@ class LighthousePoseSource:
         fleet_model,
         log_freq_hz=10.0,
         *,
+        active_drone_ids: list[int] | None = None,
         attitude_log_enabled: bool = True,
         motor_log_enabled: bool = True,
     ):
         self.link_manager = link_manager
         self.fleet = fleet_model
+        self.active_drone_ids = (
+            list(active_drone_ids) if active_drone_ids is not None else fleet_model.all_ids()
+        )
         self.log_period_ms = int(1000.0 / log_freq_hz)
         self.attitude_log_enabled = bool(attitude_log_enabled)
         self.motor_log_enabled = bool(motor_log_enabled)
@@ -64,7 +68,7 @@ class LighthousePoseSource:
         self._log_configs.clear()
         self._data_callbacks.clear()
 
-        for drone_id in self.fleet.all_ids():
+        for drone_id in self.active_drone_ids:
             try:
                 self._attach_drone(drone_id)
             except RuntimeError as exc:

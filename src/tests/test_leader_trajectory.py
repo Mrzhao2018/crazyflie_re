@@ -42,6 +42,12 @@ snapshot = PoseSnapshot(
     disconnected_ids=[],
 )
 leader_ref = leader_gen.reference_at(6.0)
+assert leader_ref.trajectory["time_scale"] == config.mission.leader_motion.trajectory_time_scale
+assert (
+    leader_ref.trajectory["relative_position"]
+    == config.mission.leader_motion.trajectory_relative_position
+)
+assert leader_ref.trajectory["trajectory_id"] == config.mission.leader_motion.trajectory_id
 plan = scheduler.plan(
     snapshot, MissionState.RUN, leader_ref, None, SafetyDecision("EXECUTE", [])
 )

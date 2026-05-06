@@ -3,7 +3,7 @@
 import numpy as np
 from pathlib import Path
 
-from src.app.run_real import RealMissionApp
+from src.app.run_real import RealMissionApp, _StartupAborted
 from src.tests.run_real_fixtures import (
     FakeFleet,
     FakeFollowerController,
@@ -205,6 +205,108 @@ assert any(
     event["event"] == "follower_takeoff_execution" and event["details"]["ok"] is True
     for event in components["telemetry"].events
 )
+assert len(components["follower_executor"].go_to_calls) == 1
+go_to_ids, go_to_positions, go_to_duration = components["follower_executor"].go_to_calls[0]
+assert go_to_ids == [5, 6]
+assert set(go_to_positions) == {5, 6}
+assert go_to_duration == components["config"].startup.follower_align_duration_s
+entry_leader_positions, entry_t_meas = components["follower_ref_gen"].calls[0]
+assert entry_t_meas is None
+assert entry_leader_positions[1].tolist() == [1.0, 0.0, 0.5]
+assert entry_leader_positions[2].tolist() == [0.0, 1.0, 0.5]
+assert entry_leader_positions[3].tolist() == [-1.0, 0.0, 0.5]
+assert entry_leader_positions[4].tolist() == [0.0, 0.0, 1.5]
+assert any(
+    event["event"] == "follower_entry_align" and event["details"]["ok"] is True
+    for event in components["telemetry"].events
+)
+
+
+components = build_components(
+    [make_snapshot(1)], [SafetyDecision("EXECUTE", [])]
+)
+components["config"].startup.follower_align_enabled = False
+app = RealMissionApp(components)
+app._align_followers_to_entry_reference([5, 6])
+assert components["follower_executor"].go_to_calls == []
+skipped_align_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "follower_entry_align"
+)
+assert skipped_align_event["details"]["skipped"] is True
+assert skipped_align_event["details"]["reason"] == "disabled"
+
+
+def _suppress_emergency_sleep(app, telemetry):
+    def _record_only(trigger_error=None):
+        telemetry.record_event(
+            "emergency_land",
+            ok=True,
+            trigger_code=getattr(trigger_error, "code", None),
+        )
+
+    app._emergency_land = _record_only
+
+
+components = build_components(
+    [make_snapshot(1)], [SafetyDecision("EXECUTE", [])]
+)
+app = RealMissionApp(components)
+_suppress_emergency_sleep(app, components["telemetry"])
+components["frame_estimator"].estimate = lambda snapshot, leader_ids: type(
+    "Frame",
+    (),
+    {"valid": False, "condition_number": float("inf"), "leader_positions": {}},
+)()
+try:
+    app._align_followers_to_entry_reference([5, 6])
+    raise AssertionError("Expected invalid frame to abort follower entry align")
+except _StartupAborted as exc:
+    assert "leader frame" in str(exc)
+assert any(event["event"] == "mission_error" for event in components["telemetry"].events)
+assert any(event["event"] == "emergency_land" for event in components["telemetry"].events)
+
+
+components = build_components(
+    [make_snapshot(1)], [SafetyDecision("EXECUTE", [])]
+)
+app = RealMissionApp(components)
+_suppress_emergency_sleep(app, components["telemetry"])
+components["follower_ref_gen"].compute = lambda leader_positions, t_meas=None: type(
+    "FollowerRef",
+    (),
+    {
+        "valid": True,
+        "target_positions": {5: np.array([0.0, 0.0, 1.0])},
+        "target_velocities": None,
+        "target_accelerations": None,
+    },
+)()
+try:
+    app._align_followers_to_entry_reference([5, 6])
+    raise AssertionError("Expected missing follower reference to abort entry align")
+except _StartupAborted as exc:
+    assert "缺少 follower reference" in str(exc)
+
+
+components = build_components(
+    [make_snapshot(1), make_snapshot(2, z=0.0)], [SafetyDecision("EXECUTE", [])]
+)
+app = RealMissionApp(components)
+_suppress_emergency_sleep(app, components["telemetry"])
+try:
+    app._align_followers_to_entry_reference([5, 6])
+    raise AssertionError("Expected follower entry align validation to abort")
+except _StartupAborted as exc:
+    assert "位置误差" in str(exc)
+failed_align_event = next(
+    event
+    for event in components["telemetry"].events
+    if event["event"] == "follower_entry_align"
+)
+assert failed_align_event["details"]["ok"] is False
+assert set(failed_align_event["details"]["failed_drone_ids"]) == {5, 6}
 
 
 # run() HOLD path executes hold and does not velocity-execute
@@ -414,7 +516,11 @@ components["fsm"]._state = MissionState.SETTLE
 app.run()
 assert components["fsm"].state() == MissionState.ABORT
 assert len(components["follower_executor"].stop_calls) == 1
-assert len(components["follower_executor"].land_calls) == 1
+assert len(components["follower_executor"].land_calls) == 0
+assert any(
+    event["event"] == "follower_direct_descent_execution"
+    for event in components["telemetry"].events
+)
 abort_record = components["telemetry"].records[-1]
 assert abort_record.safety_action == "ABORT"
 assert abort_record.scheduler_reason == "emergency_land"
@@ -510,7 +616,11 @@ timeout_record = components["telemetry"].records[-1]
 assert timeout_record.safety_action == "HOLD_TIMEOUT"
 assert timeout_record.scheduler_reason == "hold_timeout"
 assert timeout_record.trajectory_terminal_reason == "hold_timeout"
-assert len(components["follower_executor"].land_calls) == 1
+assert len(components["follower_executor"].land_calls) == 0
+assert any(
+    event["event"] == "follower_direct_descent_execution"
+    for event in components["telemetry"].events
+)
 
 # start() failure path cleans up resources
 components = build_components(

@@ -82,6 +82,7 @@ class CflibLinkManager:
         self,
         fleet: FleetModel,
         *,
+        active_drone_ids: list[int] | None = None,
         link_quality_bus: LinkQualityBus | None = None,
         link_state_bus: LinkStateBus | None = None,
         connect_pace_s: float = 0.2,
@@ -89,6 +90,9 @@ class CflibLinkManager:
         radio_driver: RadioDriverMode | str = RadioDriverMode.AUTO,
     ):
         self.fleet = fleet
+        self._active_drone_ids = (
+            list(active_drone_ids) if active_drone_ids is not None else fleet.all_ids()
+        )
         self._scfs = {}  # {drone_id: SyncCrazyflie}
         self._initialized = False
         self._last_connect_report: dict[str, Any] | None = None
@@ -100,7 +104,7 @@ class CflibLinkManager:
 
     def _grouped_drone_ids(self) -> dict[int, list[int]]:
         grouped: dict[int, list[int]] = {}
-        for drone_id in self.fleet.all_ids():
+        for drone_id in self._active_drone_ids:
             group_id = self.fleet.get_radio_group(drone_id)
             grouped.setdefault(group_id, []).append(drone_id)
         return dict(sorted(grouped.items()))

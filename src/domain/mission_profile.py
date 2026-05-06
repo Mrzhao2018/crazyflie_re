@@ -161,6 +161,7 @@ class MissionProfile:
         pieces: list[TrajectoryPiece] = []
         phases = [phase for phase in self._phases if phase.mode == "formation_run"]
         sample_dt = self._leader_motion.trajectory_sample_dt
+        time_scale = max(float(self._leader_motion.trajectory_time_scale), 1e-9)
 
         for idx, phase in enumerate(phases):
             phase_duration = max(phase.t_end - phase.t_start, 0.1)
@@ -177,14 +178,18 @@ class MissionProfile:
                 )
                 duration = max(seg_end_raw - seg_start, 0.1)
 
-                local_start = seg_start - phase.t_start
-                local_end = seg_end - phase.t_start
+                local_start = (seg_start - phase.t_start) / time_scale
+                local_end = (seg_end - phase.t_start) / time_scale
                 start_transform = self._trajectory_transform_at(local_start)
                 end_transform = self._trajectory_transform_at(local_end)
-                start_velocity = self._trajectory_velocity_at(
-                    local_start, nominal_position
+                start_velocity = (
+                    self._trajectory_velocity_at(local_start, nominal_position)
+                    / time_scale
                 )
-                end_velocity = self._trajectory_velocity_at(local_end, nominal_position)
+                end_velocity = (
+                    self._trajectory_velocity_at(local_end, nominal_position)
+                    / time_scale
+                )
 
                 start_pos = start_transform.A @ nominal_position + start_transform.b
                 end_pos = end_transform.A @ nominal_position + end_transform.b

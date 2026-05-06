@@ -49,6 +49,7 @@ class SafetyManager:
         )
         self._boundary_min = np.asarray(config.boundary_min, dtype=float)
         self._boundary_max = np.asarray(config.boundary_max, dtype=float)
+        self._pose_jump_streaks: dict[int, int] = {}
 
     def _combined_disconnected_ids(self, snapshot: PoseSnapshot) -> list[int]:
         combined = set(snapshot.disconnected_ids)
@@ -168,6 +169,10 @@ class SafetyManager:
             jump_thr = float(getattr(self.config, "runtime_pose_jump_threshold", 0.0))
             speed_thr = float(getattr(self.config, "runtime_pose_speed_threshold", 0.0))
             vz_thr = float(getattr(self.config, "runtime_vertical_speed_threshold", 0.0))
+            hold_streak_required = max(
+                1, int(getattr(self.config, "runtime_pose_jump_hold_streak", 1))
+            )
+            pose_jump_drone_ids: set[int] = set()
             if jump_thr > 0 or speed_thr > 0 or vz_thr > 0:
                 for drone_id, samples in pose_window.items():
                     if len(samples) < 2:
@@ -187,9 +192,12 @@ class SafetyManager:
                         or (speed_thr > 0 and speed > speed_thr)
                         or (vz_thr > 0 and vertical_speed > vz_thr)
                     ):
+                        pose_jump_drone_ids.add(drone_id)
+                        streak = self._pose_jump_streaks.get(drone_id, 0) + 1
+                        self._pose_jump_streaks[drone_id] = streak
                         add_reason(
                             "POSE_JUMP",
-                            "HOLD",
+                            "HOLD" if streak >= hold_streak_required else "TELEMETRY",
                             f"Drone {drone_id} pose jump detected",
                             drone_id=drone_id,
                             jump=jump,
@@ -199,7 +207,12 @@ class SafetyManager:
                             jump_threshold=jump_thr,
                             speed_threshold=speed_thr,
                             vertical_speed_threshold=vz_thr,
+                            streak=streak,
+                            required_streak=hold_streak_required,
                         )
+                for drone_id in list(self._pose_jump_streaks):
+                    if drone_id not in pose_jump_drone_ids:
+                        self._pose_jump_streaks.pop(drone_id, None)
 
         # 7. 检查健康状态
         if health is not None and self.config.min_vbat > 0:

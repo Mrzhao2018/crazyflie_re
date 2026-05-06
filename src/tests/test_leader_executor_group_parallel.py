@@ -123,6 +123,60 @@ for kind, payload, call_kind in (
     group2_order = [d for _, gid, d, k in transport2.calls if gid == 2 and k == call_kind]
     assert group2_order == [7, 8], f"{kind} 同组内必须保持提交顺序"
 
+
+class RecordingTrajectoryTransport(RecordingTransport):
+    def __init__(self, radio_group_map: dict[int, int]):
+        super().__init__(radio_group_map, per_send_s=0.0)
+        self.start_params = []
+
+    def hl_start_trajectory(
+        self,
+        drone_id,
+        trajectory_id,
+        time_scale=1.0,
+        relative_position=False,
+        relative_yaw=False,
+        reversed=False,
+    ):
+        self.start_params.append(
+            {
+                "drone_id": drone_id,
+                "trajectory_id": trajectory_id,
+                "time_scale": time_scale,
+                "relative_position": relative_position,
+                "relative_yaw": relative_yaw,
+                "reversed": reversed,
+            }
+        )
+
+
+transport3 = RecordingTrajectoryTransport(radio_groups)
+executor3 = LeaderExecutor(transport3, group_executor_pool=pool)
+result = executor3.execute(
+    [
+        LeaderAction(
+            kind="start_trajectory",
+            drone_ids=[1, 4, 7, 8],
+            payload={
+                "trajectory_id": 1,
+                "time_scale": 1.25,
+                "relative_position": False,
+                "relative_yaw": False,
+                "reversed": False,
+            },
+        )
+    ]
+)[0]
+assert {item["time_scale"] for item in transport3.start_params} == {1.0}
+assert result["parameters"]["time_scale"] == 1.0
+assert result["parameters"]["requested_time_scale"] == 1.25
+assert set(result["send_timings"]) == {"1", "4", "7", "8"}
+assert result["send_skew_ms"] >= 0.0
+assert all(
+    timing["duration_ms"] >= 0.0 and timing["start_offset_ms"] >= 0.0
+    for timing in result["send_timings"].values()
+)
+
 # ---- 无 pool 时，batch_goto 走旧同步路径 ----------------------------------
 
 transport_nopool = RecordingTransport(radio_groups)

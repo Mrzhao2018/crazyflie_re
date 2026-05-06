@@ -195,7 +195,11 @@ assert app.start() is False
 assert components["fsm"].state() == MissionState.ABORT
 assert any(
     event["event"] == "mission_error"
-    and event["details"]["code"] == MissionErrors.Readiness.TAKEOFF_VALIDATION_FAILED.code
+    and event["details"]["code"]
+    in {
+        MissionErrors.Readiness.TAKEOFF_VALIDATION_FAILED.code,
+        MissionErrors.Readiness.STARTUP_FAILED.code,
+    }
     for event in components["telemetry"].events
 )
 
@@ -240,7 +244,9 @@ components["transport"].set_onboard_controller = fail_on_second_controller_write
 app = RealMissionApp(components)
 assert app.start() is False
 assert components["transport"].controller_calls[:6] == [
-    (drone_id, "pid") for drone_id in components["fleet"].all_ids()
+    (drone_id, "mellinger") for drone_id in components["fleet"].leader_ids()
+] + [
+    (drone_id, "pid") for drone_id in components["fleet"].follower_ids()
 ]
 assert (5, "mellinger") in components["transport"].controller_calls
 assert (5, "pid") in components["transport"].controller_calls
@@ -248,16 +254,82 @@ assert (5, "pid") in components["transport"].controller_calls
 components = build_startup_components()
 components["config"].control.output_mode = "full_state"
 components["config"].control.onboard_controller = "mellinger"
+components["config"].control.onboard_param_overrides = {"ctrlMel.massThrust": 95000}
 app = RealMissionApp(components)
 assert app.start() is True
 assert components["transport"].controller_calls == [
-    (drone_id, "pid") for drone_id in components["fleet"].all_ids()
+    (drone_id, "mellinger") for drone_id in components["fleet"].leader_ids()
+] + [
+    (drone_id, "pid") for drone_id in components["fleet"].follower_ids()
 ] + [(drone_id, "mellinger") for drone_id in components["fleet"].follower_ids()]
+assert components["transport"].param_calls == [
+    (drone_id, "ctrlMel.massThrust", 95000)
+    for drone_id in components["fleet"].all_ids()
+]
+assert any(
+    event["event"] == "set_onboard_param_override"
+    and event["details"]["name"] == "ctrlMel.massThrust"
+    and event["details"]["value"] == 95000
+    for event in components["telemetry"].events
+)
 assert any(
     event["event"] == "set_runtime_onboard_controller"
     and event["details"]["controller"] == "mellinger"
     for event in components["telemetry"].events
 )
+
+components = build_startup_components()
+components["config"].control.output_mode = "full_state"
+components["config"].control.onboard_controller = "mellinger"
+components["config"].control.full_state_warmup_s = 0.01
+components["config"].control.full_state_warmup_rate_hz = 1000.0
+valid_snapshot = make_snapshot(1, z=0.8)
+bad_snapshot = make_snapshot(2, z=-0.2)
+switched_to_mellinger = {"value": False}
+
+
+class SwitchSensitivePoseBus(FakePoseBus):
+    def latest(self):
+        return bad_snapshot if switched_to_mellinger["value"] else valid_snapshot
+
+
+components["pose_bus"] = SwitchSensitivePoseBus([valid_snapshot])
+original_set_controller = components["transport"].set_onboard_controller
+
+
+def mark_bad_after_mellinger_switch(drone_id, controller):
+    original_set_controller(drone_id, controller)
+    if controller == "mellinger" and components["fleet"].is_follower(drone_id):
+        switched_to_mellinger["value"] = True
+
+
+components["transport"].set_onboard_controller = mark_bad_after_mellinger_switch
+app = RealMissionApp(components)
+assert app.start() is True
+events = components["telemetry"].events
+first_runtime_idx = next(
+    idx for idx, event in enumerate(events) if event["event"] == "set_runtime_onboard_controller"
+)
+first_pre_handoff_idx = next(
+    idx
+    for idx, event in enumerate(events)
+    if event["event"] == "full_state_handoff_setpoint"
+    and event["details"]["reason"] == "runtime_onboard_controller_pre"
+)
+first_post_handoff_idx = next(
+    idx
+    for idx, event in enumerate(events)
+    if event["event"] == "full_state_handoff_setpoint"
+    and event["details"]["reason"] == "runtime_onboard_controller_post"
+)
+assert first_pre_handoff_idx < first_runtime_idx < first_post_handoff_idx
+warmup_event = next(
+    event for event in components["telemetry"].events if event["event"] == "full_state_warmup"
+)
+assert {
+    drone_id: position[2]
+    for drone_id, position in warmup_event["details"]["target_positions"].items()
+} == {5: 0.8, 6: 0.8}
 
 components = build_startup_components()
 components["config"].control.output_mode = "full_state"
@@ -281,8 +353,12 @@ active_failed_snapshot.positions[components["fleet"].id_to_index(5)][2] = 0.1
 components["pose_bus"] = FakePoseBus([active_failed_snapshot] * 3)
 app = RealMissionApp(components)
 assert app.start() is False
-assert components["follower_executor"].land_calls == [([5], 4.0)]
-assert all(6 not in call[0] for call in components["follower_executor"].land_calls)
+assert components["follower_executor"].land_calls == []
+assert all(
+    action.drone_id == 5
+    for batch in components["follower_executor"].velocity_calls
+    for action in batch
+)
 
 components = build_startup_components()
 app = RealMissionApp(components)

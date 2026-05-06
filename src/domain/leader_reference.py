@@ -38,12 +38,22 @@ class LeaderReferenceGenerator:
                 )
                 for lid in self.leader_ids
             }
+            first_spec = next(iter(per_leader.values()), {})
             return LeaderReferenceFrame(
                 t_ref=t,
                 leader_ids=list(self.leader_ids),
                 positions={},
                 mode="trajectory",
-                trajectory={"per_leader": per_leader},
+                trajectory={
+                    "trajectory_id": first_spec.get("trajectory_id", 1),
+                    "time_scale": first_spec.get("time_scale", 1.0),
+                    "relative_position": first_spec.get("relative_position", False),
+                    "relative_yaw": first_spec.get("relative_yaw", False),
+                    "reversed": first_spec.get("reversed", False),
+                    "trajectory_type": first_spec.get("trajectory_type", "poly4d"),
+                    "start_addr": first_spec.get("start_addr", 0),
+                    "per_leader": per_leader,
+                },
             )
 
         transform = self.mission.affine_transform_at(t)

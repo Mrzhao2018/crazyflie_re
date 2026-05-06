@@ -16,7 +16,7 @@ from .mission_fsm import MissionState
 
 logger = logging.getLogger(__name__)
 
-VELOCITY_STREAM_WATCHDOG_FACTOR = 3.0
+VELOCITY_STREAM_WATCHDOG_FACTOR = 6.0
 EXECUTOR_GROUP_FAILURE_STREAK_THRESHOLD = 2
 
 
@@ -26,6 +26,7 @@ class FailurePolicy:
     def __init__(self, app):
         self.app = app
         self.watchdog_degraded_followers: set[int] = set()
+        self.velocity_stream_watchdog_streaks: dict[int, int] = {}
         self.follower_group_failure_streaks: dict[int, int] = {}
         self.hold_entered_at: float | None = None
 
@@ -90,22 +91,41 @@ class FailurePolicy:
             return []
 
         follower_interval = 1.0 / config.comm.follower_tx_freq
-        watchdog_timeout = follower_interval * VELOCITY_STREAM_WATCHDOG_FACTOR
+        watchdog_factor = float(
+            getattr(
+                config.safety,
+                "velocity_stream_watchdog_factor",
+                VELOCITY_STREAM_WATCHDOG_FACTOR,
+            )
+        )
+        required_streak = max(
+            1,
+            int(getattr(config.safety, "velocity_stream_watchdog_degrade_streak", 1)),
+        )
+        watchdog_timeout = follower_interval * watchdog_factor
         stale_followers: list[dict] = []
         for drone_id in fleet.follower_ids():
             last_tx_time = transport.last_velocity_command_time(drone_id)
             if last_tx_time is None:
+                self.velocity_stream_watchdog_streaks.pop(drone_id, None)
                 continue
             command_age = self._now_monotonic() - last_tx_time
             if command_age > watchdog_timeout:
+                stale_streak = self.velocity_stream_watchdog_streaks.get(drone_id, 0) + 1
+                self.velocity_stream_watchdog_streaks[drone_id] = stale_streak
                 stale_followers.append(
                     {
                         "drone_id": drone_id,
                         "command_age": command_age,
                         "watchdog_timeout": watchdog_timeout,
+                        "watchdog_factor": watchdog_factor,
+                        "stale_streak": stale_streak,
+                        "required_streak": required_streak,
                         "snapshot_t_meas": snapshot_t_meas,
                     }
                 )
+            else:
+                self.velocity_stream_watchdog_streaks.pop(drone_id, None)
 
         if stale_followers:
             action = config.safety.velocity_stream_watchdog_action
@@ -129,11 +149,17 @@ class FailurePolicy:
                 int(item["drone_id"])
                 for item in stale_followers
                 if "drone_id" in item
+                and int(item.get("stale_streak", 0)) >= required_streak
             )
-            if action == "hold":
+            actionable_stale_followers = [
+                item
+                for item in stale_followers
+                if int(item.get("stale_streak", 0)) >= required_streak
+            ]
+            if action == "hold" and stale_ids:
                 self.enter_hold_mode(reason="watchdog", follower_ids=stale_ids)
-            elif action == "degrade":
-                self.apply_watchdog_degrade(stale_followers)
+            elif action == "degrade" and actionable_stale_followers:
+                self.apply_watchdog_degrade(actionable_stale_followers)
 
         return stale_followers
 
@@ -434,6 +460,8 @@ class FailurePolicy:
         *,
         reason: str = "safety",
         follower_ids: list[int] | None = None,
+        reason_codes: list[str] | None = None,
+        structured_reasons: list[object] | None = None,
     ) -> None:
         app = self.app
         if app.fsm.state() != MissionState.HOLD:
@@ -453,6 +481,11 @@ class FailurePolicy:
                 "hold_entered",
                 ok=True,
                 reason=reason,
+                reason_codes=list(reason_codes or []),
+                structured_reasons=[
+                    self._serialize_safety_reason(item)
+                    for item in (structured_reasons or [])
+                ],
                 category=(
                     hold_definition.category if hold_definition is not None else None
                 ),
@@ -470,10 +503,20 @@ class FailurePolicy:
 
         target_ids = follower_ids or app.fleet.follower_ids()
         hold_actions = [HoldAction(drone_id=fid) for fid in target_ids]
-        hold_result = app.comp["follower_executor"].execute_hold(hold_actions)
+        hold_result = app._execute_hold_actions(hold_actions)
         app.telemetry_reporter.record_executor_summary(
             "follower_hold_execution", [hold_result]
         )
+
+    @staticmethod
+    def _serialize_safety_reason(reason) -> dict:
+        details = getattr(reason, "details", {}) or {}
+        return {
+            "code": getattr(reason, "code", None),
+            "severity": getattr(reason, "severity", None),
+            "message": getattr(reason, "message", None),
+            "details": dict(details) if isinstance(details, dict) else details,
+        }
 
     def check_hold_timeout(self, mission_elapsed: float) -> bool:
         if self.hold_entered_at is None:
