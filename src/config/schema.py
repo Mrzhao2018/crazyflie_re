@@ -125,6 +125,11 @@ class StartupConfig:
 
     mode: Literal["auto", "manual_leader"] = "auto"
     manual: ManualLeaderControlConfig | None = None
+    follower_align_enabled: bool = True
+    follower_align_duration_s: float = 2.0
+    follower_align_settle_s: float = 0.5
+    follower_align_tolerance_m: float = 0.25
+    start_stabilize_s: float = 1.0
 
 
 @dataclass
@@ -145,6 +150,7 @@ class SafetyConfig:
     runtime_pose_jump_threshold: float = 0.35
     runtime_pose_speed_threshold: float = 3.0
     runtime_vertical_speed_threshold: float = 1.5
+    runtime_pose_jump_hold_streak: int = 2
     min_vbat: float = 3.15
     min_vbat_abort_samples: int = 5
     min_vbat_window_s: float = 3.0
@@ -153,9 +159,15 @@ class SafetyConfig:
     velocity_stream_watchdog_action: Literal[
         "telemetry", "hold", "degrade"
     ] = "telemetry"
+    velocity_stream_watchdog_factor: float = 6.0
+    velocity_stream_watchdog_degrade_streak: int = 2
     executor_group_failure_streak: int = 2
+    leader_trajectory_start_verify_delay_s: float = 1.5
+    leader_trajectory_start_min_displacement_m: float = 0.06
+    leader_trajectory_start_max_retries: int = 1
     # PR11: 部分组掉线时降级为 parked hold 而不是整队 ABORT（默认关闭，向后兼容）
     fast_gate_group_degrade_enabled: bool = True
+    fast_gate_group_degrade_streak: int = 4
 
 
 @dataclass
@@ -188,6 +200,7 @@ class ControlConfig:
     full_state_max_position_step: float = 0.04
     full_state_warmup_s: float = 1.0
     full_state_warmup_rate_hz: float = 20.0
+    onboard_param_overrides: dict[str, str | int | float | bool] | None = None
     # 实机排障用：只让指定 follower 起飞、切 runtime controller 并接收 follower
     # setpoint。None 表示启用全部 follower。
     active_follower_ids: list[int] | None = None

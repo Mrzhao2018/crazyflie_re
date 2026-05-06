@@ -41,32 +41,34 @@ drones:
     radio_group: 2
 
 control:
-  gain: 1.0
-  gain_xy: 1.4
-  gain_z: 0.5
-  radial_gain_scale_xy: 0.30
+  gain: 0.0
+  gain_xy: 0.0
+  gain_z: 0.0
+  radial_gain_scale_xy: 0.0
   damping: 2.0
-  max_velocity: 0.65
-  dynamics_model_order: 1
-  velocity_feedback_gain: 1.2
-  acceleration_feedforward_gain: 0.5
+  max_velocity: 0.45
+  dynamics_model_order: 2
+  velocity_feedback_gain: 0.0
+  acceleration_feedforward_gain: 0.0
   mass_kg: 0.033
   damping_coeff: 0.05
-  max_acceleration: 2.0
-  feedforward_gain: 0.6
-  feedforward_gain_xy: 0.7
-  feedforward_gain_z: 0.35
-  radial_feedforward_scale_xy: 0.20
-  max_feedforward_velocity: 0.28
-  max_feedforward_velocity_xy: 0.30
-  max_feedforward_velocity_z: 0.12
+  max_acceleration: 1.0
+  feedforward_gain: 0.0
+  feedforward_gain_xy: 0.0
+  feedforward_gain_z: 0.0
+  radial_feedforward_scale_xy: 0.0
+  max_feedforward_velocity: 0.0
+  max_feedforward_velocity_xy: 0.0
+  max_feedforward_velocity_z: 0.0
   time_delay_compensation_enabled: false
   estimated_total_delay_ms: 0.0
   delay_prediction_gain: 1.0
-  full_state_position_smoothing_alpha: 0.45
-  full_state_max_position_step: 0.04
-  full_state_warmup_s: 1.0
+  full_state_position_smoothing_alpha: 0.25
+  full_state_max_position_step: 0.035
+  full_state_warmup_s: 0.5
   full_state_warmup_rate_hz: 20.0
-  active_follower_ids: [5]
-  output_mode: velocity
-  onboard_controller: pid
+  onboard_param_overrides:
+    ctrlMel.massThrust: 95000
+  active_follower_ids: null
+  output_mode: full_state
+  onboard_controller: mellinger

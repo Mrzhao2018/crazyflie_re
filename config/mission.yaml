@@ -6,7 +6,7 @@ leader_motion:
   translation: [0.0, 0.0, 0.0]
   trajectory_enabled: true
   trajectory_id: 1
-  trajectory_time_scale: 0.95
+  trajectory_time_scale: 1.75
   trajectory_relative_position: false
   trajectory_relative_yaw: false
   trajectory_reversed: false

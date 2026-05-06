@@ -1,4 +1,9 @@
 mode: auto
+follower_align_enabled: true
+follower_align_duration_s: 2.0
+follower_align_settle_s: 0.5
+follower_align_tolerance_m: 0.25
+start_stabilize_s: 1.0
 manual:
   translation_step: 0.1
   vertical_step: 0.1

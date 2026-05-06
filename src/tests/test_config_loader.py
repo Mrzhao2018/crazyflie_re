@@ -9,39 +9,65 @@ assert config.comm.connect_groups_in_parallel is True
 assert config.comm.trajectory_upload_groups_in_parallel is True
 assert config.control.time_delay_compensation_enabled is False
 assert config.control.estimated_total_delay_ms == 0.0
-assert config.control.dynamics_model_order == 1
-assert config.control.output_mode == "velocity"
-assert config.control.onboard_controller == "pid"
-assert config.control.velocity_feedback_gain == 1.2
-assert config.control.acceleration_feedforward_gain == 0.5
+assert config.control.dynamics_model_order == 2
+assert config.control.output_mode == "full_state"
+assert config.control.onboard_controller == "mellinger"
+assert config.control.gain == 0.0
+assert config.control.gain_xy == 0.0
+assert config.control.gain_z == 0.0
+assert config.control.radial_gain_scale_xy == 0.0
+assert config.control.max_velocity == 0.45
+assert config.control.velocity_feedback_gain == 0.0
+assert config.control.acceleration_feedforward_gain == 0.0
 assert config.control.mass_kg == 0.033
 assert config.control.damping_coeff == 0.05
-assert config.control.max_acceleration == 2.0
-assert config.control.full_state_position_smoothing_alpha == 0.45
-assert config.control.full_state_max_position_step == 0.04
-assert config.control.full_state_warmup_s == 1.0
+assert config.control.max_acceleration == 1.0
+assert config.control.feedforward_gain == 0.0
+assert config.control.feedforward_gain_xy == 0.0
+assert config.control.feedforward_gain_z == 0.0
+assert config.control.radial_feedforward_scale_xy == 0.0
+assert config.control.max_feedforward_velocity == 0.0
+assert config.control.max_feedforward_velocity_xy == 0.0
+assert config.control.max_feedforward_velocity_z == 0.0
+assert config.control.full_state_position_smoothing_alpha == 0.25
+assert config.control.full_state_max_position_step == 0.035
+assert config.control.full_state_warmup_s == 0.5
 assert config.control.full_state_warmup_rate_hz == 20.0
-assert config.control.active_follower_ids == [5]
+assert config.control.onboard_param_overrides == {"ctrlMel.massThrust": 95000}
+assert config.control.active_follower_ids is None
+assert config.comm.pose_log_freq == 8.0
+assert config.comm.follower_tx_freq == 8.0
 assert config.comm.telemetry_queue_max == 4096
 assert config.comm.telemetry_flush_every_n == 50
 assert config.comm.radio_health_window_s == 2.0
 assert config.comm.congestion_soft_floor == 60.0
 assert config.comm.latency_p95_soft_limit_ms == 50.0
 assert config.comm.min_stream_keepalive_hz == 2.0
+assert config.safety.velocity_stream_watchdog_action == "telemetry"
+assert config.safety.velocity_stream_watchdog_factor == 12.0
+assert config.safety.velocity_stream_watchdog_degrade_streak == 5
 assert config.safety.executor_group_failure_streak == 2
 assert config.safety.min_vbat == 0.0
 assert config.safety.min_vbat_abort_samples == 5
 assert config.safety.min_vbat_window_s == 3.0
 assert config.safety.min_vbat_critical == 0.0
 assert config.safety.fast_gate_group_degrade_enabled is True
+assert config.safety.fast_gate_group_degrade_streak == 4
 assert config.safety.pose_jitter_threshold == 0.05
 assert config.safety.estimator_variance_window_s == 1.0
 assert config.safety.lighthouse_required_method is None
 assert config.safety.runtime_pose_jump_threshold == 0.35
 assert config.safety.runtime_pose_speed_threshold == 3.0
 assert config.safety.runtime_vertical_speed_threshold == 1.5
+assert config.safety.runtime_pose_jump_hold_streak == 2
 assert config.mission.leader_motion.trajectory_type == "poly4d_compressed"
+assert config.mission.leader_motion.trajectory_time_scale == 1.75
 assert config.mission.leader_motion.trajectory_sample_dt == 0.1334
+assert config.startup.follower_align_enabled is True
+assert config.startup.follower_align_duration_s == 2.0
+assert config.startup.follower_align_settle_s == 0.5
+assert config.startup.follower_align_tolerance_m == 0.25
+assert config.startup.start_stabilize_s == 1.0
 
 bad_model_order = ConfigLoader.load("config")
 bad_model_order.control.dynamics_model_order = 3
@@ -99,6 +125,14 @@ try:
 except ValueError as exc:
     assert "full_state_warmup_rate_hz" in str(exc)
 
+bad_onboard_param_override = ConfigLoader.load("config")
+bad_onboard_param_override.control.onboard_param_overrides = {"massThrust": 95000}
+try:
+    ConfigLoader._validate(bad_onboard_param_override)
+    raise AssertionError("Expected onboard_param_overrides validation to fail")
+except ValueError as exc:
+    assert "onboard_param_overrides" in str(exc)
+
 bad_pose_jump = ConfigLoader.load("config")
 bad_pose_jump.safety.runtime_pose_jump_threshold = -1.0
 try:
@@ -107,6 +141,14 @@ try:
 except ValueError as exc:
     assert "runtime_pose_jump_threshold" in str(exc)
 
+bad_pose_jump_streak = ConfigLoader.load("config")
+bad_pose_jump_streak.safety.runtime_pose_jump_hold_streak = 0
+try:
+    ConfigLoader._validate(bad_pose_jump_streak)
+    raise AssertionError("Expected runtime_pose_jump_hold_streak validation to fail")
+except ValueError as exc:
+    assert "runtime_pose_jump_hold_streak" in str(exc)
+
 bad_active_followers = ConfigLoader.load("config")
 bad_active_followers.control.active_follower_ids = [1]
 try:
@@ -114,6 +156,10 @@ try:
     raise AssertionError("Expected active_follower_ids validation to fail")
 except ValueError as exc:
     assert "active_follower_ids" in str(exc)
+
+leader_only_probe = ConfigLoader.load("config")
+leader_only_probe.control.active_follower_ids = []
+ConfigLoader._validate(leader_only_probe)
 
 bad_pose_timeout = ConfigLoader.load("config")
 bad_pose_timeout.safety.pose_timeout = 1.0 / bad_pose_timeout.comm.pose_log_freq
@@ -163,6 +209,22 @@ try:
 except ValueError as exc:
     assert "velocity_stream_watchdog_action" in str(exc)
 
+bad_watchdog_factor = ConfigLoader.load("config")
+bad_watchdog_factor.safety.velocity_stream_watchdog_factor = 0.0
+try:
+    ConfigLoader._validate(bad_watchdog_factor)
+    raise AssertionError("Expected velocity_stream_watchdog_factor validation to fail")
+except ValueError as exc:
+    assert "velocity_stream_watchdog_factor" in str(exc)
+
+bad_watchdog_streak = ConfigLoader.load("config")
+bad_watchdog_streak.safety.velocity_stream_watchdog_degrade_streak = 0
+try:
+    ConfigLoader._validate(bad_watchdog_streak)
+    raise AssertionError("Expected velocity_stream_watchdog_degrade_streak validation to fail")
+except ValueError as exc:
+    assert "velocity_stream_watchdog_degrade_streak" in str(exc)
+
 bad_executor_streak = ConfigLoader.load("config")
 bad_executor_streak.safety.executor_group_failure_streak = 0
 try:
@@ -210,5 +272,29 @@ try:
     raise AssertionError("Expected min_vbat_window_s validation to fail")
 except ValueError as exc:
     assert "min_vbat_window_s" in str(exc)
+
+bad_follower_align_duration = ConfigLoader.load("config")
+bad_follower_align_duration.startup.follower_align_duration_s = 0.0
+try:
+    ConfigLoader._validate(bad_follower_align_duration)
+    raise AssertionError("Expected follower_align_duration_s validation to fail")
+except ValueError as exc:
+    assert "follower_align_duration_s" in str(exc)
+
+bad_follower_align_settle = ConfigLoader.load("config")
+bad_follower_align_settle.startup.follower_align_settle_s = -0.1
+try:
+    ConfigLoader._validate(bad_follower_align_settle)
+    raise AssertionError("Expected follower_align_settle_s validation to fail")
+except ValueError as exc:
+    assert "follower_align_settle_s" in str(exc)
+
+bad_follower_align_tolerance = ConfigLoader.load("config")
+bad_follower_align_tolerance.startup.follower_align_tolerance_m = 0.0
+try:
+    ConfigLoader._validate(bad_follower_align_tolerance)
+    raise AssertionError("Expected follower_align_tolerance_m validation to fail")
+except ValueError as exc:
+    assert "follower_align_tolerance_m" in str(exc)
 
 print("[OK] ConfigLoader cross-config checks verified")

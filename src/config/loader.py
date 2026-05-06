@@ -153,11 +153,21 @@ class ConfigLoader:
             raise ValueError("runtime_pose_speed_threshold 不能小于 0")
         if config.safety.runtime_vertical_speed_threshold < 0:
             raise ValueError("runtime_vertical_speed_threshold 不能小于 0")
+        if config.safety.runtime_pose_jump_hold_streak <= 0:
+            raise ValueError("runtime_pose_jump_hold_streak 必须大于 0")
 
         if config.safety.hold_auto_land_timeout <= 0:
             raise ValueError("hold_auto_land_timeout 必须大于 0")
         if config.safety.executor_group_failure_streak <= 0:
             raise ValueError("executor_group_failure_streak 必须大于 0")
+        if config.safety.leader_trajectory_start_verify_delay_s < 0:
+            raise ValueError("leader_trajectory_start_verify_delay_s 不能小于 0")
+        if config.safety.leader_trajectory_start_min_displacement_m < 0:
+            raise ValueError("leader_trajectory_start_min_displacement_m 不能小于 0")
+        if config.safety.leader_trajectory_start_max_retries < 0:
+            raise ValueError("leader_trajectory_start_max_retries 不能小于 0")
+        if config.safety.fast_gate_group_degrade_streak <= 0:
+            raise ValueError("fast_gate_group_degrade_streak 必须大于 0")
 
         if config.safety.velocity_stream_watchdog_action not in {
             "telemetry",
@@ -167,6 +177,10 @@ class ConfigLoader:
             raise ValueError(
                 "velocity_stream_watchdog_action 必须是 telemetry、hold 或 degrade"
             )
+        if config.safety.velocity_stream_watchdog_factor <= 0:
+            raise ValueError("velocity_stream_watchdog_factor 必须大于 0")
+        if config.safety.velocity_stream_watchdog_degrade_streak <= 0:
+            raise ValueError("velocity_stream_watchdog_degrade_streak 必须大于 0")
 
         for freq_name in (
             "pose_log_freq",
@@ -236,13 +250,19 @@ class ConfigLoader:
             raise ValueError("full_state_warmup_s 不能小于 0")
         if config.control.full_state_warmup_rate_hz <= 0:
             raise ValueError("full_state_warmup_rate_hz 必须大于 0")
+        if config.control.onboard_param_overrides is not None:
+            if not isinstance(config.control.onboard_param_overrides, dict):
+                raise ValueError("onboard_param_overrides 必须是参数名到值的映射")
+            for name in config.control.onboard_param_overrides:
+                if not isinstance(name, str) or "." not in name or not name.strip():
+                    raise ValueError(
+                        "onboard_param_overrides 的参数名必须形如 group.name"
+                    )
         if config.control.active_follower_ids is not None:
             fleet_follower_ids = {
                 drone.id for drone in config.fleet.drones if drone.role == "follower"
             }
             active_follower_ids = list(config.control.active_follower_ids)
-            if not active_follower_ids:
-                raise ValueError("active_follower_ids 不能为空；如需全部 follower 请设为 null")
             if len(set(active_follower_ids)) != len(active_follower_ids):
                 raise ValueError("active_follower_ids 不能包含重复 drone id")
             unknown_active = sorted(set(active_follower_ids) - fleet_follower_ids)
@@ -275,6 +295,15 @@ class ConfigLoader:
 
         if config.startup.mode == "manual_leader" and config.startup.manual is None:
             raise ValueError("manual_leader 模式需要提供 startup.manual 配置")
+
+        if config.startup.follower_align_duration_s <= 0:
+            raise ValueError("follower_align_duration_s 必须大于 0")
+        if config.startup.follower_align_settle_s < 0:
+            raise ValueError("follower_align_settle_s 不能小于 0")
+        if config.startup.follower_align_tolerance_m <= 0:
+            raise ValueError("follower_align_tolerance_m 必须大于 0")
+        if config.startup.start_stabilize_s < 0:
+            raise ValueError("start_stabilize_s 不能小于 0")
 
         if config.startup.manual is not None:
             if config.startup.manual.translation_step <= 0:
@@ -348,6 +377,19 @@ class ConfigLoader:
         startup = StartupConfig(
             mode=cast(Literal["auto", "manual_leader"], startup_mode),
             manual=(ManualLeaderControlConfig(**manual_cfg) if manual_cfg else None),
+            follower_align_enabled=bool(
+                startup_data.get("follower_align_enabled", True)
+            ),
+            follower_align_duration_s=float(
+                startup_data.get("follower_align_duration_s", 2.0)
+            ),
+            follower_align_settle_s=float(
+                startup_data.get("follower_align_settle_s", 0.5)
+            ),
+            follower_align_tolerance_m=float(
+                startup_data.get("follower_align_tolerance_m", 0.25)
+            ),
+            start_stabilize_s=float(startup_data.get("start_stabilize_s", 1.0)),
         )
         safety = SafetyConfig(**safety_data)
         control = ControlConfig(

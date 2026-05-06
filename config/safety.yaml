@@ -3,7 +3,7 @@ boundary_max: [1.7, 1.7, 1.80]
 pose_timeout: 1.0
 max_condition_number: 100.0
 max_command_norm: 2.5
-estimator_variance_threshold: 0.001
+estimator_variance_threshold: 0.0
 pose_jitter_threshold: 0.05
 estimator_variance_window_s: 1.0
 lighthouse_required_method: null
@@ -12,10 +12,17 @@ inter_drone_separation_action: telemetry
 runtime_pose_jump_threshold: 0.35
 runtime_pose_speed_threshold: 3.0
 runtime_vertical_speed_threshold: 1.5
+runtime_pose_jump_hold_streak: 2
 hold_auto_land_timeout: 3.0
-velocity_stream_watchdog_action: degrade
+velocity_stream_watchdog_action: telemetry
+velocity_stream_watchdog_factor: 12.0
+velocity_stream_watchdog_degrade_streak: 5
+leader_trajectory_start_verify_delay_s: 3.0
+leader_trajectory_start_min_displacement_m: 0.06
+leader_trajectory_start_max_retries: 1
 min_vbat: 0.0
 min_vbat_abort_samples: 5
 min_vbat_window_s: 3.0
 min_vbat_critical: 0.0
 fast_gate_group_degrade_enabled: true
+fast_gate_group_degrade_streak: 4
