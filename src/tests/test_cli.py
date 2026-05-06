@@ -34,6 +34,87 @@ assert args.verbose is True
 args = build_parser().parse_args(["run"])
 assert args.verbose is False
 
+args = build_parser().parse_args(
+    [
+        "probe-velocity",
+        "--config-dir",
+        "config",
+        "--drone-id",
+        "6",
+        "--speed",
+        "0.12",
+        "--segment-s",
+        "0.8",
+        "--no-notify-before-velocity",
+    ]
+)
+assert args.command == "probe-velocity"
+assert args.config_dir == "config"
+assert args.drone_id == 6
+assert args.speed == 0.12
+assert args.segment_s == 0.8
+assert args.notify_before_velocity is False
+
+args = build_parser().parse_args(["probe-velocity"])
+assert args.notify_before_velocity is True
+
+args = build_parser().parse_args(
+    [
+        "probe-full-state-circle",
+        "--config-dir",
+        "config",
+        "--drone-id",
+        "3",
+        "--radius",
+        "0.12",
+        "--period-s",
+        "8.0",
+        "--cycles",
+        "1.5",
+        "--rate-hz",
+        "20.0",
+        "--z-bias-compensation",
+        "--max-z-bias",
+        "0.06",
+        "--notify-before-full-state",
+        "--diagnostic-log",
+        "--set-param",
+        "ctrlMel.ki_z=0",
+        "--set-param",
+        "ctrlMel.ki_m_z=0",
+    ]
+)
+assert args.command == "probe-full-state-circle"
+assert args.config_dir == "config"
+assert args.drone_id == 3
+assert args.radius == 0.12
+assert args.period_s == 8.0
+assert args.cycles == 1.5
+assert args.rate_hz == 20.0
+assert args.z_bias_compensation is True
+assert args.max_z_bias == 0.06
+assert args.notify_before_full_state is True
+assert args.diagnostic_log is True
+assert args.set_param == ["ctrlMel.ki_z=0", "ctrlMel.ki_m_z=0"]
+
+args = build_parser().parse_args(
+    [
+        "probe-params",
+        "--config-dir",
+        "config",
+        "--drone-id",
+        "5",
+        "--filter",
+        "stabilizer",
+        "--filter",
+        "mel",
+    ]
+)
+assert args.command == "probe-params"
+assert args.config_dir == "config"
+assert args.drone_id == 5
+assert args.filter == ["stabilizer", "mel"]
+
 args = build_parser().parse_args(["--verbose"])
 assert args.verbose is True
 

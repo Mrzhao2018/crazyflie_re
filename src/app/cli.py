@@ -96,6 +96,30 @@ def _probe_full_state_command(args: argparse.Namespace) -> int:
     return full_state_probe.run(args)
 
 
+def _probe_full_state_circle_command(args: argparse.Namespace) -> int:
+    from . import full_state_circle_probe
+
+    return full_state_circle_probe.run(args)
+
+
+def _probe_hlc_trajectory_command(args: argparse.Namespace) -> int:
+    from . import hlc_trajectory_probe
+
+    return hlc_trajectory_probe.run(args)
+
+
+def _probe_velocity_command(args: argparse.Namespace) -> int:
+    from . import velocity_probe
+
+    return velocity_probe.run(args)
+
+
+def _probe_params_command(args: argparse.Namespace) -> int:
+    from . import param_probe
+
+    return param_probe.run(args)
+
+
 def _command_handlers() -> dict[str, CommandHandler]:
     return {
         "run": _run_command,
@@ -107,6 +131,10 @@ def _command_handlers() -> dict[str, CommandHandler]:
         "sim": run_sim.run,
         "ros2-sim": run_ros2_sim.run,
         "probe-full-state": _probe_full_state_command,
+        "probe-full-state-circle": _probe_full_state_circle_command,
+        "probe-hlc-trajectory": _probe_hlc_trajectory_command,
+        "probe-params": _probe_params_command,
+        "probe-velocity": _probe_velocity_command,
         "web": _web_command,
     }
 
@@ -226,6 +254,126 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["mellinger", "indi"],
         default="mellinger",
         help="起飞后切换的 onboard controller",
+    )
+
+    circle_probe_parser = subparsers.add_parser(
+        "probe-full-state-circle",
+        help="单机 full-state/Mellinger 圆轨迹探针，不运行 AFC mission",
+        parents=[config_parent],
+    )
+    circle_probe_parser.add_argument("--drone-id", type=int, default=5)
+    circle_probe_parser.add_argument("--height", type=float, default=0.5)
+    circle_probe_parser.add_argument("--takeoff-duration", type=float, default=2.0)
+    circle_probe_parser.add_argument("--settle-s", type=float, default=1.0)
+    circle_probe_parser.add_argument("--warmup-s", type=float, default=1.0)
+    circle_probe_parser.add_argument("--radius", type=float, default=0.15)
+    circle_probe_parser.add_argument("--period-s", type=float, default=10.0)
+    circle_probe_parser.add_argument("--cycles", type=float, default=2.0)
+    circle_probe_parser.add_argument("--rate-hz", type=float, default=20.0)
+    circle_probe_parser.add_argument("--abort-radius", type=float, default=0.35)
+    circle_probe_parser.add_argument(
+        "--notify-before-full-state",
+        action="store_true",
+        help="切入 full-state streaming 前先发送 notify_setpoint_stop",
+    )
+    circle_probe_parser.add_argument(
+        "--diagnostic-log",
+        action="store_true",
+        help="单机 probe 额外订阅 thrust/motor/vbat 诊断日志并打印",
+    )
+    circle_probe_parser.add_argument(
+        "--set-param",
+        action="append",
+        default=None,
+        help="临时设置 firmware 参数 NAME=VALUE；结束时恢复原值，可重复",
+    )
+    circle_probe_parser.add_argument(
+        "--z-bias-compensation",
+        action="store_true",
+        help="用 full-state warmup 后测得的 Z 稳态偏置补偿后续目标高度",
+    )
+    circle_probe_parser.add_argument(
+        "--max-z-bias",
+        type=float,
+        default=0.08,
+        help="Z bias compensation 的最大绝对补偿量，单位 m",
+    )
+    circle_probe_parser.add_argument("--min-takeoff-z", type=float, default=0.3)
+    circle_probe_parser.add_argument("--pose-timeout", type=float, default=3.0)
+    circle_probe_parser.add_argument("--land-duration", type=float, default=3.0)
+    circle_probe_parser.add_argument(
+        "--controller",
+        choices=["mellinger", "indi"],
+        default="mellinger",
+        help="起飞后切换的 onboard controller",
+    )
+
+    hlc_probe_parser = subparsers.add_parser(
+        "probe-hlc-trajectory",
+        help="单机 HLC trajectory/memory 探针，不运行 AFC mission",
+        parents=[config_parent],
+    )
+    hlc_probe_parser.add_argument("--drone-id", type=int, default=7)
+    hlc_probe_parser.add_argument("--height", type=float, default=0.5)
+    hlc_probe_parser.add_argument("--takeoff-duration", type=float, default=2.0)
+    hlc_probe_parser.add_argument("--settle-s", type=float, default=1.0)
+    hlc_probe_parser.add_argument("--entry-duration", type=float, default=2.0)
+    hlc_probe_parser.add_argument("--start-stabilize-s", type=float, default=1.0)
+    hlc_probe_parser.add_argument("--max-run-s", type=float, default=40.0)
+    hlc_probe_parser.add_argument("--report-hz", type=float, default=2.0)
+    hlc_probe_parser.add_argument("--phase-grid-dt", type=float, default=0.05)
+    hlc_probe_parser.add_argument("--abort-radius", type=float, default=0.6)
+    hlc_probe_parser.add_argument("--pose-timeout", type=float, default=3.0)
+    hlc_probe_parser.add_argument("--land-duration", type=float, default=3.0)
+    hlc_probe_parser.add_argument("--output", default=None)
+    hlc_probe_parser.add_argument("--set-param", action="append", default=None)
+    hlc_probe_parser.add_argument(
+        "--controller",
+        choices=["pid", "mellinger", "indi"],
+        default="mellinger",
+        help="HLC trajectory 使用的 onboard controller",
+    )
+
+    param_probe_parser = subparsers.add_parser(
+        "probe-params",
+        help="单机 firmware 参数 dump，辅助排查 controller/estimator 参数",
+        parents=[config_parent],
+    )
+    param_probe_parser.add_argument("--drone-id", type=int, default=5)
+    param_probe_parser.add_argument(
+        "--filter",
+        action="append",
+        default=None,
+        help="参数名子串过滤，可重复；默认筛 controller/estimator 相关组",
+    )
+
+    velocity_probe_parser = subparsers.add_parser(
+        "probe-velocity",
+        help="单机 world velocity 方向探针，不运行 AFC mission",
+        parents=[config_parent],
+    )
+    velocity_probe_parser.add_argument("--drone-id", type=int, default=6)
+    velocity_probe_parser.add_argument("--height", type=float, default=1.0)
+    velocity_probe_parser.add_argument("--takeoff-duration", type=float, default=2.0)
+    velocity_probe_parser.add_argument("--settle-s", type=float, default=1.0)
+    velocity_probe_parser.add_argument("--segment-s", type=float, default=1.0)
+    velocity_probe_parser.add_argument("--rest-s", type=float, default=0.5)
+    velocity_probe_parser.add_argument("--speed", type=float, default=0.15)
+    velocity_probe_parser.add_argument("--rate-hz", type=float, default=10.0)
+    velocity_probe_parser.add_argument("--min-takeoff-z", type=float, default=0.3)
+    velocity_probe_parser.add_argument("--pose-timeout", type=float, default=3.0)
+    velocity_probe_parser.add_argument("--land-duration", type=float, default=3.0)
+    velocity_probe_parser.add_argument(
+        "--no-notify-before-velocity",
+        action="store_false",
+        dest="notify_before_velocity",
+        help="复现实验用：HLC 起飞后不调用 notify_setpoint_stop，直接进入 velocity streaming",
+    )
+    velocity_probe_parser.set_defaults(notify_before_velocity=True)
+    velocity_probe_parser.add_argument(
+        "--output",
+        default=None,
+        help="可选：保存每段位移结果 JSON",
     )
 
     web_parser = subparsers.add_parser(
