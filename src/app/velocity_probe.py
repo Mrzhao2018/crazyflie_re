@@ -290,4 +290,3 @@ def run(args: argparse.Namespace) -> int:
         except Exception:
             pass
         link_manager.close_all()
-
