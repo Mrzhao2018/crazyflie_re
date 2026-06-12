@@ -38,17 +38,16 @@ class PoseBus:
         t_meas: float,
         velocity: np.ndarray | None = None,
     ):
-        """单个agent的pose更新 - 只有这里才递增seq"""
+        """单个agent的pose更新 - 只有这里才递增seq
+        
+        性能优化：历史清理延迟到 recent_samples() 中执行，
+        减少 update 热路径的锁持有时间
+        """
         with self._lock:
             self._agent_poses[drone_id] = (pos, velocity, t_meas)
             history = self._history.setdefault(drone_id, [])
             history.append((float(t_meas), np.array(pos, dtype=float).copy()))
-            cutoff = float(t_meas) - self._history_window_s
-            self._history[drone_id] = [
-                (sample_t, sample_pos)
-                for sample_t, sample_pos in history
-                if sample_t >= cutoff
-            ]
+            # 历史清理已移至 recent_samples()，减少锁持有时间
             self._seq_counter += 1
 
     def latest(self) -> PoseSnapshot | None:
@@ -111,11 +110,29 @@ class PoseBus:
             return self._seq_counter > seq
 
     def recent_samples(self, window_s: float) -> dict[int, list[tuple[float, np.ndarray]]]:
+        """获取最近窗口的采样数据
+        
+        性能优化：在此处执行历史清理（非热路径），
+        避免阻塞 update_agent() 中的传感器回调
+        """
         with self._lock:
             latest_t = max((entry[2] for entry in self._agent_poses.values()), default=None)
             if latest_t is None:
                 return {}
             cutoff = latest_t - max(0.0, float(window_s))
+            
+            # 顺便清理过期历史（延迟清理策略）
+            global_cutoff = latest_t - self._history_window_s
+            for drone_id in list(self._history.keys()):
+                samples = self._history[drone_id]
+                if samples:
+                    # 保留所有在全局窗口内的样本
+                    self._history[drone_id] = [
+                        (sample_t, sample_pos)
+                        for sample_t, sample_pos in samples
+                        if sample_t >= global_cutoff
+                    ]
+            
             return {
                 drone_id: [
                     (sample_t, sample_pos.copy())

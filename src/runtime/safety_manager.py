@@ -60,6 +60,34 @@ class SafetyManager:
                 logger.warning("Failed to get link_state disconnected IDs: %s", exc)
         return sorted(combined)
 
+    def _check_boundaries(self, snapshot: PoseSnapshot) -> tuple[bool, list[int]]:
+        """检查边界违规（向量化）
+        
+        Returns:
+            (has_violation, violated_drone_ids)
+        """
+        fresh_all = snapshot.fresh_mask[self._all_idx]
+        if not fresh_all.any():
+            return False, []
+        
+        idx_active = self._all_idx[fresh_all]
+        positions_active = snapshot.positions[idx_active]
+        below = np.any(positions_active < self._boundary_min, axis=1)
+        above = np.any(positions_active > self._boundary_max, axis=1)
+        violated = below | above
+        
+        if not violated.any():
+            return False, []
+        
+        ids_active = [
+            self._all_ids_cache[i]
+            for i, ok in enumerate(fresh_all) if ok
+        ]
+        violated_ids = [
+            ids_active[i] for i, bad in enumerate(violated) if bad
+        ]
+        return True, violated_ids
+
     def evaluate(
         self,
         snapshot: PoseSnapshot,
@@ -99,30 +127,19 @@ class SafetyManager:
                 ignored_drone_ids=sorted(ignored_disconnects),
             )
 
-        # 2. 检查边界（向量化）
-        fresh_all = snapshot.fresh_mask[self._all_idx]
-        if fresh_all.any():
-            idx_active = self._all_idx[fresh_all]
-            positions_active = snapshot.positions[idx_active]
-            below = np.any(positions_active < self._boundary_min, axis=1)
-            above = np.any(positions_active > self._boundary_max, axis=1)
-            violated = below | above
-            if violated.any():
-                ids_active = [
-                    self._all_ids_cache[i]
-                    for i, ok in enumerate(fresh_all) if ok
-                ]
-                for i, bad in enumerate(violated):
-                    if bad:
-                        drone_id = ids_active[i]
-                        pos = positions_active[i]
-                        add_reason(
-                            "OUT_OF_BOUNDS",
-                            "ABORT",
-                            f"Drone {drone_id} out of bounds",
-                            drone_id=drone_id,
-                            position=pos.tolist(),
-                        )
+        # 2. 检查边界（向量化，复用 _check_boundaries）
+        has_boundary_violation, violated_ids = self._check_boundaries(snapshot)
+        if has_boundary_violation:
+            for drone_id in violated_ids:
+                idx = self.fleet.id_to_index(drone_id)
+                pos = snapshot.positions[idx]
+                add_reason(
+                    "OUT_OF_BOUNDS",
+                    "ABORT",
+                    f"Drone {drone_id} out of bounds",
+                    drone_id=drone_id,
+                    position=pos.tolist(),
+                )
 
         # 3. 检查frame条件数
         if frame is not None:
@@ -388,17 +405,10 @@ class SafetyManager:
 
         reason_codes: list[str] = []
 
-        out_of_bounds = False
-        fresh = snapshot.fresh_mask
-        if fresh.any():
-            positions = snapshot.positions[fresh]
-            below = np.any(positions < self._boundary_min, axis=1)
-            above = np.any(positions > self._boundary_max, axis=1)
-            if below.any() or above.any():
-                out_of_bounds = True
-                reason_codes.append("OUT_OF_BOUNDS")
-
+        # 边界检查（复用 _check_boundaries）
+        out_of_bounds, _ = self._check_boundaries(snapshot)
         if out_of_bounds:
+            reason_codes.append("OUT_OF_BOUNDS")
             return FastGateDecision(action="ABORT", reason_codes=reason_codes, degrade_groups=[])
 
         disconnected_ids = self._combined_disconnected_ids(snapshot)
