@@ -28,3 +28,17 @@ doc/*
 debug-*.log
 .ruff_cache/
 .pytest_cache/
+
+# 论文相关文档
+*.docx
+*.pdf
+第*.md
+*_重组全文*.md
+
+# 临时文本文件
+*_dryrun.txt
+*_run.txt
+refs_dump.txt
+
+# 工具脚本
+tools/

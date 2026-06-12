@@ -78,6 +78,18 @@ assert pose_jump_reason.details["drone_id"] == 5
 assert pose_jump_reason.details["streak"] == 2
 assert pose_jump_reason.details["vertical_speed"] > config.safety.runtime_vertical_speed_threshold
 
+tiny_dt_window = {
+    5: [
+        (0.0, nominal[fleet.id_to_index(5)].copy()),
+        (0.008, nominal[fleet.id_to_index(5)] + np.array([0.03, 0.0, 0.0])),
+    ]
+}
+tiny_dt_decision = SafetyManager(config.safety, fleet).evaluate(
+    snapshot,
+    pose_window=tiny_dt_window,
+)
+assert "POSE_JUMP" not in tiny_dt_decision.reason_codes
+
 health = {5: HealthSample(t_meas=0.0, values={"pm.vbat": 4.0})}
 decision = safety.evaluate(snapshot, health=health)
 assert decision.action == "EXECUTE"

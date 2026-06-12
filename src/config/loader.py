@@ -153,6 +153,10 @@ class ConfigLoader:
             raise ValueError("runtime_pose_speed_threshold 不能小于 0")
         if config.safety.runtime_vertical_speed_threshold < 0:
             raise ValueError("runtime_vertical_speed_threshold 不能小于 0")
+        if config.safety.runtime_pose_speed_min_dt < 0:
+            raise ValueError("runtime_pose_speed_min_dt 不能小于 0")
+        if config.safety.runtime_pose_speed_min_jump < 0:
+            raise ValueError("runtime_pose_speed_min_jump 不能小于 0")
         if config.safety.runtime_pose_jump_hold_streak <= 0:
             raise ValueError("runtime_pose_jump_hold_streak 必须大于 0")
 
@@ -166,6 +170,26 @@ class ConfigLoader:
             raise ValueError("leader_trajectory_start_min_displacement_m 不能小于 0")
         if config.safety.leader_trajectory_start_max_retries < 0:
             raise ValueError("leader_trajectory_start_max_retries 不能小于 0")
+        if config.safety.leader_pose_planned_fallback_stale_after_s < 0:
+            raise ValueError("leader_pose_planned_fallback_stale_after_s 不能小于 0")
+        if config.safety.leader_pose_planned_fallback_max_age_s <= 0:
+            raise ValueError("leader_pose_planned_fallback_max_age_s 必须大于 0")
+        if (
+            config.safety.leader_pose_planned_fallback_stale_after_s
+            >= config.safety.leader_pose_planned_fallback_max_age_s
+        ):
+            raise ValueError(
+                "leader_pose_planned_fallback_stale_after_s 必须小于 max_age_s"
+            )
+        leader_ids = {drone.id for drone in config.fleet.drones if drone.role == "leader"}
+        unknown_fallback = sorted(
+            set(config.safety.leader_pose_planned_fallback_ids) - leader_ids
+        )
+        if unknown_fallback:
+            raise ValueError(
+                "leader_pose_planned_fallback_ids 只能包含 leader id，未知/非 leader: "
+                f"{unknown_fallback}"
+            )
         if config.safety.fast_gate_group_degrade_streak <= 0:
             raise ValueError("fast_gate_group_degrade_streak 必须大于 0")
 

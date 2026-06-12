@@ -25,6 +25,7 @@ class PoseBus:
         self._scratch_velocities = np.zeros((n, 3), dtype=float)
         self._scratch_fresh = np.zeros(n, dtype=bool)
         self._scratch_vel_fresh = np.zeros(n, dtype=bool)
+        self._scratch_pose_timestamps = np.full(n, np.nan, dtype=float)
         self._all_ids_cache = self.active_drone_ids
         self._idx_cache = tuple(
             fleet_model.id_to_index(d) for d in self._all_ids_cache
@@ -61,10 +62,12 @@ class PoseBus:
             velocities = self._scratch_velocities
             fresh_mask = self._scratch_fresh
             vel_fresh_mask = self._scratch_vel_fresh
+            pose_timestamps = self._scratch_pose_timestamps
             positions.fill(0.0)
             velocities.fill(0.0)
             fresh_mask.fill(False)
             vel_fresh_mask.fill(False)
+            pose_timestamps.fill(np.nan)
             disconnected_ids = []
             any_velocity = False
 
@@ -77,6 +80,7 @@ class PoseBus:
                     continue
                 pos, vel, ts = entry
                 positions[idx] = pos
+                pose_timestamps[idx] = float(ts)
                 is_fresh = now - ts < self.pose_timeout
                 if is_fresh:
                     fresh_mask[idx] = True
@@ -99,6 +103,7 @@ class PoseBus:
                 disconnected_ids=disconnected_ids,
                 velocities=velocities.copy() if any_velocity else None,
                 velocity_fresh_mask=vel_fresh_mask.copy() if any_velocity else None,
+                pose_timestamps=pose_timestamps.copy(),
             )
 
     def has_newer_than(self, seq: int) -> bool:

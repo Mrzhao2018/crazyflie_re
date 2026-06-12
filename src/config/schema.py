@@ -150,6 +150,8 @@ class SafetyConfig:
     runtime_pose_jump_threshold: float = 0.35
     runtime_pose_speed_threshold: float = 3.0
     runtime_vertical_speed_threshold: float = 1.5
+    runtime_pose_speed_min_dt: float = 0.03
+    runtime_pose_speed_min_jump: float = 0.08
     runtime_pose_jump_hold_streak: int = 2
     min_vbat: float = 3.15
     min_vbat_abort_samples: int = 5
@@ -165,6 +167,10 @@ class SafetyConfig:
     leader_trajectory_start_verify_delay_s: float = 1.5
     leader_trajectory_start_min_displacement_m: float = 0.06
     leader_trajectory_start_max_retries: int = 1
+    leader_pose_planned_fallback_enabled: bool = True
+    leader_pose_planned_fallback_ids: list[int] = field(default_factory=lambda: [7])
+    leader_pose_planned_fallback_stale_after_s: float = 0.18
+    leader_pose_planned_fallback_max_age_s: float = 0.8
     # PR11: 部分组掉线时降级为 parked hold 而不是整队 ABORT（默认关闭，向后兼容）
     fast_gate_group_degrade_enabled: bool = True
     fast_gate_group_degrade_streak: int = 4

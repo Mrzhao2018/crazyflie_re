@@ -28,7 +28,7 @@
 | leaders                 | `1, 4, 7, 8`                               |
 | followers               | `2, 3, 5, 6, 9, 10`                        |
 | radio groups            | `0, 1, 2`                                  |
-| formation_type          | `pyramid`                                  |
+| formation_type          | `tetrahedron_edges`                        |
 | 任务时长                | `40s`                                      |
 | 阶段                    | `settle 0~4` → `trajectory_entry 4~6` → `formation_run 6~40` |
 | leader motion           | `affine_rotation`                          |

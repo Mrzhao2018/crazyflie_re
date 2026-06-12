@@ -169,6 +169,8 @@ class SafetyManager:
             jump_thr = float(getattr(self.config, "runtime_pose_jump_threshold", 0.0))
             speed_thr = float(getattr(self.config, "runtime_pose_speed_threshold", 0.0))
             vz_thr = float(getattr(self.config, "runtime_vertical_speed_threshold", 0.0))
+            speed_min_dt = float(getattr(self.config, "runtime_pose_speed_min_dt", 0.0))
+            speed_min_jump = float(getattr(self.config, "runtime_pose_speed_min_jump", 0.0))
             hold_streak_required = max(
                 1, int(getattr(self.config, "runtime_pose_jump_hold_streak", 1))
             )
@@ -187,10 +189,11 @@ class SafetyManager:
                     jump = float(np.linalg.norm(delta))
                     speed = jump / dt
                     vertical_speed = abs(float(delta[2])) / dt
+                    speed_check_enabled = dt >= speed_min_dt and jump >= speed_min_jump
                     if (
                         (jump_thr > 0 and jump > jump_thr)
-                        or (speed_thr > 0 and speed > speed_thr)
-                        or (vz_thr > 0 and vertical_speed > vz_thr)
+                        or (speed_check_enabled and speed_thr > 0 and speed > speed_thr)
+                        or (speed_check_enabled and vz_thr > 0 and vertical_speed > vz_thr)
                     ):
                         pose_jump_drone_ids.add(drone_id)
                         streak = self._pose_jump_streaks.get(drone_id, 0) + 1
@@ -207,6 +210,9 @@ class SafetyManager:
                             jump_threshold=jump_thr,
                             speed_threshold=speed_thr,
                             vertical_speed_threshold=vz_thr,
+                            speed_min_dt=speed_min_dt,
+                            speed_min_jump=speed_min_jump,
+                            speed_check_enabled=speed_check_enabled,
                             streak=streak,
                             required_streak=hold_streak_required,
                         )

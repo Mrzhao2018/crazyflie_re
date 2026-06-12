@@ -1,6 +1,7 @@
 """Leader trajectory start confirmation tests."""
 
 import numpy as np
+import time
 
 from src.app.run_real import RealMissionApp
 from src.domain.mission_profile import TrajectoryPiece
@@ -88,6 +89,7 @@ def _snapshot_with_time(seq: int, t_meas: float) -> PoseSnapshot:
         positions=snapshot.positions,
         fresh_mask=snapshot.fresh_mask,
         disconnected_ids=snapshot.disconnected_ids,
+        pose_timestamps=np.full(len(snapshot.fresh_mask), t_meas, dtype=float),
     )
 
 
@@ -152,6 +154,41 @@ def test_auto_trajectory_run_clock_starts_at_formation_run():
     app = RealMissionApp(components)
 
     assert app._run_elapsed_start_offset("auto") == 6.0
+
+
+def test_stale_leader_pose_uses_planned_trajectory_fallback_for_frame_only():
+    components = _components()
+    components["config"].safety.leader_pose_planned_fallback_enabled = True
+    components["config"].safety.leader_pose_planned_fallback_ids = [1]
+    components["config"].safety.leader_pose_planned_fallback_stale_after_s = 0.1
+    components["config"].safety.leader_pose_planned_fallback_max_age_s = 0.3
+
+    class _MissionProfile:
+        def trajectory_start_time(self):
+            return 6.0
+
+    components["mission_profile"] = _MissionProfile()
+    app = RealMissionApp(components)
+    leader_ref = _leader_ref()
+    snapshot = _snapshot_with_time(seq=10, t_meas=100.0)
+    snapshot.positions[0] = np.array([99.0, 99.0, 99.0])
+    snapshot.pose_timestamps[0] = time.time() - 0.2
+    app._trajectory_started = True
+
+    compensated, applied = app._leader_pose_compensated_snapshot(
+        snapshot, leader_ref, mission_elapsed=7.0
+    )
+
+    assert applied and applied[0]["drone_id"] == 1
+    assert 0.0 < applied[0]["blend"] < 1.0
+    assert 0.0 < applied[0]["applied_delta_m"] < applied[0]["delta_m"]
+    assert np.linalg.norm(compensated.positions[0] - np.array([99.0, 99.0, 99.0])) > 0.0
+    assert np.linalg.norm(compensated.positions[0] - np.array([1.2, 0.0, 0.8])) > 0.0
+    np.testing.assert_allclose(snapshot.positions[0], np.array([99.0, 99.0, 99.0]))
+    assert any(
+        event["event"] == "leader_pose_planned_fallback"
+        for event in components["telemetry"].events
+    )
 
 
 def test_leader_trajectory_start_confirms_when_moving_leaders_move():

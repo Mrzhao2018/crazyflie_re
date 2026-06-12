@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 from ..runtime.mission_fsm import MissionState
+from ..runtime.pose_snapshot import PoseSnapshot
 from ..runtime.telemetry import TelemetryRecord
 from ..runtime.follower_controller import FollowerCommandSet
 from ..runtime.mission_telemetry_reporter import MissionTelemetryReporter
@@ -1632,16 +1633,22 @@ class RealMissionApp:
                 frame = None
                 follower_ref = None
                 commands = None
+                frame_snapshot = snapshot
 
                 # 只有新pose才进行frame/ref/control计算
                 is_new_pose = snapshot.seq > self._last_processed_seq
                 if is_new_pose:
-                    frame = frame_estimator.estimate(snapshot, fleet.leader_ids())
+                    frame_snapshot, _leader_pose_fallbacks = (
+                        self._leader_pose_compensated_snapshot(
+                            snapshot, leader_ref, t_elapsed
+                        )
+                    )
+                    frame = frame_estimator.estimate(frame_snapshot, fleet.leader_ids())
 
                     if frame.valid:
                         follower_ref = follower_ref_gen.compute(
                             frame.leader_positions,
-                            snapshot.t_meas,
+                            frame_snapshot.t_meas,
                         )
 
                     if follower_ref is not None and follower_ref.valid:
@@ -2117,6 +2124,112 @@ class RealMissionApp:
             )
             for drone_id in leader_ids
         }
+
+    def _planned_leader_position_from_ref(self, leader_ref, drone_id: int, mission_elapsed: float) -> np.ndarray | None:
+        trajectory = leader_ref.trajectory or {}
+        per_leader = trajectory.get("per_leader", {}) or {}
+        spec = per_leader.get(int(drone_id))
+        if not spec:
+            return None
+        start_time_fn = getattr(self.comp.get("mission_profile"), "trajectory_start_time", None)
+        t0 = float(start_time_fn()) if callable(start_time_fn) else 0.0
+        local_t = max(0.0, float(mission_elapsed) - t0)
+        return _evaluate_trajectory_spec(spec, local_t)
+
+    def _leader_pose_compensated_snapshot(self, snapshot, leader_ref, mission_elapsed: float):
+        safety_cfg = self.comp["config"].safety
+        if (
+            not getattr(safety_cfg, "leader_pose_planned_fallback_enabled", False)
+            or not self._trajectory_started
+            or getattr(leader_ref, "mode", None) != "trajectory"
+        ):
+            return snapshot, []
+        timestamps = getattr(snapshot, "pose_timestamps", None)
+        if timestamps is None:
+            return snapshot, []
+
+        stale_after_s = float(
+            getattr(safety_cfg, "leader_pose_planned_fallback_stale_after_s", 0.18)
+        )
+        max_age_s = float(
+            getattr(safety_cfg, "leader_pose_planned_fallback_max_age_s", 0.8)
+        )
+        fallback_ids = [
+            int(drone_id)
+            for drone_id in getattr(
+                safety_cfg, "leader_pose_planned_fallback_ids", []
+            )
+        ]
+        now = time.time()
+        positions = np.array(snapshot.positions, dtype=float).copy()
+        fresh_mask = np.array(snapshot.fresh_mask, dtype=bool).copy()
+        disconnected_ids = set(int(drone_id) for drone_id in snapshot.disconnected_ids)
+        applied = []
+        fleet = self.comp["fleet"]
+        for drone_id in fallback_ids:
+            idx = fleet.id_to_index(drone_id)
+            ts = float(timestamps[idx]) if np.isfinite(timestamps[idx]) else None
+            if ts is None:
+                continue
+            age_s = now - ts
+            if age_s <= stale_after_s or age_s > max_age_s:
+                continue
+            planned = self._planned_leader_position_from_ref(
+                leader_ref, drone_id, mission_elapsed
+            )
+            if planned is None:
+                continue
+            measured = positions[idx].copy()
+            blend = float(
+                np.clip(
+                    (age_s - stale_after_s) / max(max_age_s - stale_after_s, 1e-9),
+                    0.0,
+                    1.0,
+                )
+            )
+            compensated_position = (1.0 - blend) * measured + blend * np.asarray(
+                planned, dtype=float
+            )
+            positions[idx] = compensated_position
+            fresh_mask[idx] = True
+            disconnected_ids.discard(drone_id)
+            applied.append(
+                {
+                    "drone_id": int(drone_id),
+                    "age_s": age_s,
+                    "blend": blend,
+                    "measured": measured.tolist(),
+                    "planned": np.asarray(planned, dtype=float).tolist(),
+                    "compensated": compensated_position.tolist(),
+                    "delta_m": float(np.linalg.norm(np.asarray(planned) - measured)),
+                    "applied_delta_m": float(
+                        np.linalg.norm(compensated_position - measured)
+                    ),
+                }
+            )
+
+        if not applied:
+            return snapshot, []
+
+        compensated = PoseSnapshot(
+            seq=snapshot.seq,
+            t_meas=snapshot.t_meas,
+            positions=positions,
+            fresh_mask=fresh_mask,
+            disconnected_ids=sorted(disconnected_ids),
+            velocities=snapshot.velocities,
+            velocity_fresh_mask=snapshot.velocity_fresh_mask,
+            pose_timestamps=snapshot.pose_timestamps,
+        )
+        self.comp["telemetry"].record_event(
+            "leader_pose_planned_fallback",
+            ok=True,
+            mission_elapsed=float(mission_elapsed),
+            stale_after_s=stale_after_s,
+            max_age_s=max_age_s,
+            applied=applied,
+        )
+        return compensated, applied
 
     def _expected_moving_leader_ids(self, leader_ref, verify_delay_s: float) -> list[int]:
         trajectory = leader_ref.trajectory or {}
