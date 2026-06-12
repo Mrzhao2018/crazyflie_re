@@ -75,12 +75,17 @@ class LinkStateBus:
             return dict(self._latest)
 
     def disconnected_ids(self) -> list[int]:
+        """获取已断连的无人机 ID 列表
+        
+        性能优化：使用列表推导式而非生成器+sorted，减少锁持有时间。
+        """
         with self._lock:
-            return sorted(
+            disconnected = [
                 drone_id
                 for drone_id, sample in self._latest.items()
                 if sample.state == "disconnected"
-            )
+            ]
+            return sorted(disconnected)
 
     def drain_events(self) -> list[dict[str, object]]:
         with self._lock:
