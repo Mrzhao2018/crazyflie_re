@@ -56,8 +56,8 @@ class SafetyManager:
         if self.link_state_bus is not None:
             try:
                 combined.update(self.link_state_bus.disconnected_ids())
-            except Exception:
-                pass
+            except (AttributeError, TypeError, KeyError) as exc:
+                logger.warning("Failed to get link_state disconnected IDs: %s", exc)
         return sorted(combined)
 
     def evaluate(
@@ -183,6 +183,7 @@ class SafetyManager:
                     t_prev, p_prev = ordered[-2]
                     t_cur, p_cur = ordered[-1]
                     dt = float(t_cur) - float(t_prev)
+                    # 防止除零：dt 过小时跳过检查
                     if dt <= 1e-6:
                         continue
                     delta = np.asarray(p_cur, dtype=float) - np.asarray(p_prev, dtype=float)

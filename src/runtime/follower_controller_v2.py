@@ -96,6 +96,7 @@ class FollowerControllerV2(FollowerControllerBase):
         if previous is None:
             return np.zeros(3, dtype=float)
         dt = float(t_meas) - previous.t_meas
+        # 防止除零：dt 过小时返回上次速度
         if dt <= 1e-9:
             return previous.velocity.copy()
         return (position - previous.position) / dt
@@ -179,12 +180,14 @@ class FollowerControllerV2(FollowerControllerBase):
             current_t = float(snapshot.t_meas)
             if previous_target is not None and previous_t is not None:
                 dt = current_t - previous_t
+                # 防止除零
                 if dt > 1e-6:
                     fallback_v = self._clip_vector_norm(
                         (p_target - previous_target) / dt,
                         self.max_velocity,
                     )
                     if previous_velocity is not None:
+                        # 防止除零
                         fallback_a = self._clip_vector_norm(
                             (fallback_v - previous_velocity) / dt,
                             self.max_acceleration,
@@ -312,7 +315,12 @@ class FollowerControllerV2(FollowerControllerBase):
                 self._state_estimates.pop(fid, None)
                 continue
 
-            idx = fleet_model.id_to_index(fid)
+            try:
+                idx = fleet_model.id_to_index(fid)
+            except (KeyError, ValueError, IndexError) as exc:
+                logger.warning("Invalid follower ID %d in velocity mode: %s", fid, exc)
+                discarded_reasons[fid] = f"invalid_id:{exc}"
+                continue
             if not snapshot.fresh_mask[idx]:
                 skipped_stale.append(fid)
                 self._state_estimates.pop(fid, None)

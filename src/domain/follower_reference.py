@@ -106,6 +106,7 @@ class FollowerReferenceGenerator:
             and t_meas is not None
         ):
             dt = float(t_meas) - self._last_t_meas
+            # 防止除零
             if dt > 1e-9:
                 vel_arr = (current - self._last_target_positions) / dt
                 velocities = {
@@ -145,6 +146,7 @@ class FollowerReferenceGenerator:
             and t_meas is not None
         ):
             dt = float(t_meas) - self._last_t_meas
+            # 防止除零
             if dt > 1e-9:
                 acc_arr = (current - self._last_target_velocities) / dt
                 accelerations = {

@@ -95,7 +95,8 @@ class ConfigLoader:
                 raise ValueError("mission.phases 必须连续，不能留时间空档")
             previous_end = phase.t_end
 
-        if config.mission.phases[0].t_start != 0.0:
+        # 使用容差比较浮点数
+        if abs(config.mission.phases[0].t_start - 0.0) > 1e-9:
             raise ValueError("mission.phases 必须从 t_start=0.0 开始")
 
         if abs(config.mission.duration - config.mission.phases[-1].t_end) > 1e-6:

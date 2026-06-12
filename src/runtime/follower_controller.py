@@ -41,7 +41,12 @@ class FollowerController(FollowerControllerBase):
             if fid not in references.target_positions:
                 missing_reference.append(fid)
                 continue
-            idx = fleet_model.id_to_index(fid)
+            try:
+                idx = fleet_model.id_to_index(fid)
+            except (KeyError, ValueError, IndexError) as exc:
+                logger.warning("Invalid follower ID %d: %s", fid, exc)
+                missing_reference.append(fid)
+                continue
             if not snapshot.fresh_mask[idx]:
                 skipped_stale.append(fid)
                 continue

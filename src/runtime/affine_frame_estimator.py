@@ -46,7 +46,12 @@ class AffineFrameEstimator:
             leader_positions = {}
             stale_leaders = []
             for lid in leader_ids:
-                idx = self.fleet.id_to_index(lid)
+                try:
+                    idx = self.fleet.id_to_index(lid)
+                except (KeyError, ValueError, IndexError) as exc:
+                    logger.warning("Invalid leader ID %d in frame estimation: %s", lid, exc)
+                    stale_leaders.append(lid)
+                    continue
                 if not snapshot.fresh_mask[idx]:
                     stale_leaders.append(lid)
                 leader_positions[lid] = snapshot.positions[idx]
