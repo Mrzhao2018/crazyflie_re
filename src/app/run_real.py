@@ -1436,8 +1436,255 @@ class RealMissionApp:
         self._progress.close()
         return True
 
+    def _get_latest_snapshot(self):
+        """获取最新 pose snapshot"""
+        return self.comp["pose_bus"].latest()
+
+    def _check_fast_gate(self, snapshot, safety):
+        """快速门控检查
+        
+        Returns:
+            (should_abort, fast_gate_pending_ignored_ids)
+        """
+        fast_gate_pending_ignored_ids: set[int] = set()
+        
+        if getattr(
+            self.comp["config"].safety,
+            "fast_gate_group_degrade_enabled",
+            False,
+        ):
+            fg = safety.fast_gate_decision(snapshot)
+            if fg.action == "ABORT":
+                if self._try_reconnect_on_disconnect(snapshot, fg.reason_codes):
+                    return (False, fast_gate_pending_ignored_ids)
+                logger.error("Fast-gate ABORT: %s", fg.reason_codes)
+                self._emergency_land()
+                return (True, fast_gate_pending_ignored_ids)
+            if fg.action == "HOLD_GROUP":
+                triggered_groups = self._fast_gate_groups_passing_streak(
+                    fg.degrade_groups
+                )
+                degraded = (
+                    self.failure_policy.apply_fast_gate_group_degrade(
+                        triggered_groups,
+                        getattr(
+                            self.comp["config"].safety,
+                            "fast_gate_group_degrade_streak",
+                            1,
+                        )
+                    ),
+                )
+                fast_gate_pending_ignored_ids.update(degraded)
+            else:
+                self._fast_gate_group_degrade_streaks.clear()
+        else:
+            fast_blocked, fast_reasons = safety.fast_gate(snapshot)
+            if fast_blocked:
+                if self._try_reconnect_on_disconnect(snapshot, fast_reasons):
+                    return (False, fast_gate_pending_ignored_ids)
+                logger.error("Fast-gate triggered: %s", fast_reasons)
+                self._emergency_land()
+                return (True, fast_gate_pending_ignored_ids)
+        
+        return (False, fast_gate_pending_ignored_ids)
+
+    def _handle_trajectory_lifecycle(
+        self, startup_mode, leader_ref, snapshot, t_elapsed
+    ):
+        """处理轨迹生命周期（启动、检查）
+        
+        Returns:
+            should_abort: bool
+        """
+        if (
+            startup_mode == "auto"
+            and leader_ref.mode == "trajectory"
+            and not self._trajectory_started
+            and self._phase_label(t_elapsed) == "formation_run"
+        ):
+            self._start_leader_trajectory(
+                leader_ref,
+                snapshot,
+                mission_elapsed=t_elapsed,
+            )
+        elif (
+            startup_mode == "auto"
+            and leader_ref.mode == "trajectory"
+            and self._trajectory_started
+        ):
+            start_status = self._check_leader_trajectory_start_motion(
+                snapshot,
+                mission_elapsed=t_elapsed,
+                leader_ref=leader_ref,
+            )
+            if start_status == "failed":
+                logger.error("Leader trajectory failed to start; landing")
+                self._orderly_land(
+                    reason_event="leader_trajectory_start_failed_land",
+                    safety_action="ABORT",
+                    safety_reasons=["leader trajectory did not start"],
+                    safety_reason_codes=["LEADER_TRAJECTORY_START_FAILED"],
+                    scheduler_reason="leader_trajectory_start_failed",
+                )
+                return True
+        return False
+
+    def _compute_control_state(self, snapshot, leader_ref, t_elapsed):
+        """计算控制状态（frame、follower_ref、commands）
+        
+        Returns:
+            (frame, follower_ref, commands, parked_follower_ids)
+        """
+        fleet = self.fleet
+        frame_estimator = self.comp["frame_estimator"]
+        follower_ref_gen = self.comp["follower_ref_gen"]
+        follower_controller = self.comp["follower_controller"]
+        
+        frame = None
+        follower_ref = None
+        commands = None
+        parked_follower_ids = []
+
+        if self._should_compute_follower_control(snapshot, t_elapsed):
+            frame_snapshot = snapshot
+            if (
+                leader_ref.mode == "trajectory"
+                and self._trajectory_started
+                and not self._trajectory_start_confirmed
+            ):
+                frame_snapshot = self._trajectory_start_snapshot()
+            
+            frame = frame_estimator.estimate(
+                frame_snapshot,
+                leader_ref.target_leader_ids,
+            )
+
+            if frame is not None and frame.valid:
+                follower_ref = follower_ref_gen.reference_at(
+                    fleet.follower_ids(),
+                    frame.leader_positions,
+                    frame_snapshot.t_meas,
+                )
+
+                if follower_ref is not None and follower_ref.valid:
+                    commands = follower_controller.compute(
+                        snapshot,
+                        follower_ref,
+                        self._active_follower_ids(),
+                        fleet,
+                    )
+        
+        return frame, follower_ref, commands, parked_follower_ids
+
+    def _evaluate_safety(
+        self, snapshot, frame, commands, follower_ref, health_latest, fast_gate_pending_ignored_ids
+    ):
+        """评估完整安全状态
+        
+        Returns:
+            SafetyDecision
+        """
+        safety = self.comp["safety"]
+        health_bus = self.comp["health_bus"]
+        pose_bus = self.comp["pose_bus"]
+        
+        health_window_fn = getattr(health_bus, "recent_samples", None)
+        health_window = (
+            health_window_fn(
+                self.comp["config"].safety.min_vbat_window_s
+            )
+            if callable(health_window_fn)
+            else None
+        )
+        pose_window_fn = getattr(pose_bus, "recent_samples", None)
+        pose_window = (
+            pose_window_fn(self.comp["config"].safety.estimator_variance_window_s)
+            if callable(pose_window_fn)
+            else None
+        )
+        
+        return safety.evaluate(
+            snapshot,
+            frame,
+            commands,
+            follower_ref,
+            health=health_latest,
+            health_window=health_window,
+            pose_window=pose_window,
+            ignored_disconnected_ids=(
+                set(self.failure_policy.watchdog_degraded_followers)
+                | fast_gate_pending_ignored_ids
+            ),
+        )
+
+    def _handle_safety_decision(self, safety_decision):
+        """处理安全决策
+        
+        Returns:
+            should_abort: bool
+        """
+        if safety_decision.action == "ABORT":
+            logger.error("ABORT triggered: %s", safety_decision.reasons)
+            self._emergency_land()
+            return True
+
+        if safety_decision.action == "HOLD":
+            logger.warning("HOLD triggered: %s", safety_decision.reasons)
+            self._enter_hold_mode(
+                reason_codes=safety_decision.reason_codes,
+                reasons=safety_decision.reasons,
+            )
+        
+        return False
+
+    def _execute_control_plan(self, plan, filtered_commands):
+        """执行控制计划
+        
+        Returns:
+            success_ids: set[int]
+        """
+        leader_executor = self.comp["leader_executor"]
+        follower_executor = self.comp["follower_executor"]
+        
+        plan_diagnostics = plan.diagnostics or {}
+        success_ids = set()
+        
+        # 执行 leader 动作
+        if plan.leader_actions:
+            leader_results = leader_executor.execute(plan.leader_actions)
+            self.telemetry_reporter.record_executor_summary("leader_execution", leader_results)
+        
+        # 执行 follower 动作
+        if plan.follower_actions:
+            execute_started = time.monotonic()
+            follower_velocity_result = follower_executor.execute_velocity(
+                plan.follower_actions
+            )
+            execute_duration_s = time.monotonic() - execute_started
+            
+            self._record_streaming_setpoint_active(
+                plan.follower_actions,
+                follower_velocity_result,
+                plan_diagnostics=plan_diagnostics,
+                execute_duration_s=execute_duration_s,
+            )
+            self.telemetry_reporter.record_executor_summary(
+                "follower_velocity_execution",
+                [follower_velocity_result],
+            )
+            self._apply_follower_failure_policy(follower_velocity_result)
+            
+            success_ids = set(follower_velocity_result.get("successes", []))
+            self._commit_follower_controller_full_state(
+                filtered_commands,
+                success_ids,
+            )
+            self._clear_watchdog_degrade(active_commands={drone_id: None for drone_id in success_ids})
+        
+        return success_ids
+
     def run(self):
-        """主循环"""
+        """主循环（重构版：清晰的步骤划分）"""
         telemetry = self.telemetry
         fleet = self.fleet
         scheduler = self.scheduler
